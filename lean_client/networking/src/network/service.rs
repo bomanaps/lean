@@ -496,24 +496,44 @@ where
                             );
                         }
                     }
-                    Ok(GossipsubMessage::Attestation(signed_attestation)) => {
+                    Ok(GossipsubMessage::AttestationSubnet { subnet_id, attestation }) => {
                         info!(
-                            validator = %signed_attestation.validator_id,
-                            slot = %signed_attestation.message.slot.0,
-                            "received attestation via gossip"
+                            validator = %attestation.validator_id,
+                            slot = %attestation.message.slot.0,
+                            subnet_id = subnet_id,
+                            "received attestation via subnet gossip"
                         );
-                        let slot = signed_attestation.message.slot.0;
+                        let slot = attestation.message.slot.0;
 
                         if let Err(err) = self
                             .chain_message_sink
                             .send(ChainMessage::ProcessAttestation {
-                                signed_attestation: signed_attestation,
+                                signed_attestation: attestation,
                                 is_trusted: false,
                                 should_gossip: true,
                             })
                             .await
                         {
-                            warn!("failed to send vote for slot {slot} to chain: {err:?}");
+                            warn!("failed to send subnet attestation for slot {slot} to chain: {err:?}");
+                        }
+                    }
+                    Ok(GossipsubMessage::Aggregation(signed_aggregated_attestation)) => {
+                        info!(
+                            slot = %signed_aggregated_attestation.data.slot.0,
+                            "received aggregated attestation via gossip"
+                        );
+                        let slot = signed_aggregated_attestation.data.slot.0;
+
+                        if let Err(err) = self
+                            .chain_message_sink
+                            .send(ChainMessage::ProcessAggregation {
+                                signed_aggregated_attestation,
+                                is_trusted: false,
+                                should_gossip: true,
+                            })
+                            .await
+                        {
+                            warn!("failed to send aggregation for slot {slot} to chain: {err:?}");
                         }
                     }
                     Err(err) => {
@@ -722,19 +742,42 @@ where
                     }
                 }
             }
-            OutboundP2pRequest::GossipAttestation(signed_attestation) => {
+            OutboundP2pRequest::GossipAttestation(signed_attestation, subnet_id) => {
                 let slot = signed_attestation.message.slot.0;
+                let validator_id = signed_attestation.validator_id;
 
                 match signed_attestation.to_ssz() {
                     Ok(bytes) => {
-                        if let Err(err) = self.publish_to_topic(GossipsubKind::Attestation, bytes) {
-                            warn!(slot = slot, ?err, "Publish attestation failed");
+                        // Devnet-3: Publish to subnet-specific topic only
+                        let topic_kind = GossipsubKind::AttestationSubnet(subnet_id);
+                        if let Err(err) = self.publish_to_topic(topic_kind, bytes) {
+                            warn!(slot = slot, subnet_id = subnet_id, ?err, "Publish attestation to subnet failed");
                         } else {
-                            info!(slot = slot, "Broadcasted attestation");
+                            info!(
+                                slot = slot,
+                                validator = validator_id,
+                                subnet_id = subnet_id,
+                                "Broadcasted attestation to subnet"
+                            );
                         }
                     }
                     Err(err) => {
                         warn!(slot = slot, ?err, "Serialize attestation failed");
+                    }
+                }
+            }
+            OutboundP2pRequest::GossipAggregation(signed_aggregated_attestation) => {
+                let slot = signed_aggregated_attestation.data.slot.0;
+                match signed_aggregated_attestation.to_ssz() {
+                    Ok(bytes) => {
+                        if let Err(err) = self.publish_to_topic(GossipsubKind::Aggregation, bytes) {
+                            warn!(slot = slot, ?err, "Publish aggregation failed");
+                        } else {
+                            info!(slot = slot, "Broadcasted aggregated attestation");
+                        }
+                    }
+                    Err(err) => {
+                        warn!(slot = slot, ?err, "Serialize aggregation failed");
                     }
                 }
             }

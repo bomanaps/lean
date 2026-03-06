@@ -18,13 +18,13 @@ pub type AttestationSignatures = PersistentList<AggregatedSignatureProof, Valida
 /// Aggregated signature proof with participant tracking.
 ///
 /// This type combines the participant bitfield with the proof bytes,
-/// matches Python's `AggregatedSignatureProof` container structure.
+/// matches ream/zeam's `AggregatedSignatureProof` container structure.
 /// Used in `aggregated_payloads` to track which validators are covered by each proof.
 #[derive(Clone, Debug, Ssz, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AggregatedSignatureProof {
     /// Bitfield indicating which validators' signatures are included.
-    participants: AggregationBits,
+    pub participants: AggregationBits,
     /// The raw aggregated proof bytes from lean-multisig.
     pub proof_data: AggregatedSignature,
 }
@@ -222,16 +222,12 @@ impl AggregatedAttestation {
     }
 }
 
-/// Aggregated attestation bundled with aggregated signatures.
+/// Aggregated attestation bundled with aggregated signature proof.
+/// Structure matches ream/zeam for devnet-3 interoperability.
 #[derive(Clone, Debug, Ssz)]
 pub struct SignedAggregatedAttestation {
-    /// Aggregated attestation data.
-    pub message: AggregatedAttestation,
-    /// Aggregated attestation plus its combined signature.
-    ///
-    /// Stores a naive list of validator signatures that mirrors the attestation
-    /// order.
-    ///
-    /// TODO: this will be replaced by a SNARK in future devnets.
-    pub signature: AggregatedSignatures,
+    /// The attestation data being attested to.
+    pub data: AttestationData,
+    /// The aggregated signature proof covering all participants.
+    pub proof: AggregatedSignatureProof,
 }

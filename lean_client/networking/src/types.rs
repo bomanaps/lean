@@ -2,7 +2,7 @@ use std::{collections::HashMap, fmt::Display};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use containers::{SignedAttestation, SignedBlockWithAttestation};
+use containers::{SignedAggregatedAttestation, SignedAttestation, SignedBlockWithAttestation};
 use metrics::METRICS;
 use serde::{Deserialize, Serialize};
 use ssz::H256;
@@ -136,6 +136,12 @@ pub enum ChainMessage {
         is_trusted: bool,
         should_gossip: bool,
     },
+    /// Devnet-3: Process aggregated attestation from aggregation topic
+    ProcessAggregation {
+        signed_aggregated_attestation: SignedAggregatedAttestation,
+        is_trusted: bool,
+        should_gossip: bool,
+    },
 }
 
 impl ChainMessage {
@@ -180,6 +186,16 @@ impl Display for ChainMessage {
                     signed_attestation.message.slot.0
                 )
             }
+            ChainMessage::ProcessAggregation {
+                signed_aggregated_attestation,
+                ..
+            } => {
+                write!(
+                    f,
+                    "ProcessAggregation(slot={})",
+                    signed_aggregated_attestation.data.slot.0
+                )
+            }
         }
     }
 }
@@ -187,7 +203,11 @@ impl Display for ChainMessage {
 #[derive(Debug, Clone)]
 pub enum OutboundP2pRequest {
     GossipBlockWithAttestation(SignedBlockWithAttestation),
-    GossipAttestation(SignedAttestation),
+    /// Devnet-3: Gossip attestation to subnet-specific topic
+    /// Contains (attestation, subnet_id)
+    GossipAttestation(SignedAttestation, u64),
+    /// Devnet-3: Gossip aggregated attestation to aggregation topic
+    GossipAggregation(SignedAggregatedAttestation),
     RequestBlocksByRoot(Vec<H256>),
 }
 

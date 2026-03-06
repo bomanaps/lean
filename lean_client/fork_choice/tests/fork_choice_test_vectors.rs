@@ -568,10 +568,10 @@ fn forkchoice(spec_file: &str) {
                         let block_root = signed_block.message.block.hash_tree_root();
 
                         // Advance time to the block's slot to ensure attestations are processable
-                        // SECONDS_PER_SLOT is 4 (not 12)
-                        let block_time =
-                            store.config.genesis_time + (signed_block.message.block.slot.0 * 4);
-                        on_tick(&mut store, block_time, false);
+                        // SECONDS_PER_SLOT is 4. Convert to milliseconds for devnet-3
+                        let block_time_millis =
+                            (store.config.genesis_time + (signed_block.message.block.slot.0 * 4)) * 1000;
+                        on_tick(&mut store, block_time_millis, false);
 
                         on_block(&mut store, signed_block).unwrap();
                         Ok(block_root)
@@ -610,7 +610,9 @@ fn forkchoice(spec_file: &str) {
                         .tick
                         .or(step.time)
                         .expect(&format!("Step {step_idx}: Missing tick/time data"));
-                    on_tick(&mut store, time_value, false);
+                    // Convert seconds to milliseconds for devnet-3
+                    let time_value_millis = time_value * 1000;
+                    on_tick(&mut store, time_value_millis, false);
 
                     if step.valid {
                         verify_checks(&store, &step.checks, &block_labels, step_idx).expect(

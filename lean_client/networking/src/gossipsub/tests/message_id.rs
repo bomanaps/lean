@@ -1,6 +1,6 @@
 use crate::gossipsub::config::compute_message_id;
 use crate::gossipsub::topic::{
-    ATTESTATION_TOPIC, BLOCK_TOPIC, SSZ_SNAPPY_ENCODING_POSTFIX, TOPIC_PREFIX,
+    ATTESTATION_SUBNET_PREFIX, BLOCK_TOPIC, SSZ_SNAPPY_ENCODING_POSTFIX, TOPIC_PREFIX,
 };
 use crate::types::MESSAGE_DOMAIN_VALID_SNAPPY;
 use libp2p::gossipsub::{Message, TopicHash};
@@ -163,10 +163,10 @@ fn test_realistic_blockchain_scenarios() {
         ),
         (
             format!(
-                "/{}/genesis/{}/{}",
-                TOPIC_PREFIX, ATTESTATION_TOPIC, SSZ_SNAPPY_ENCODING_POSTFIX
+                "/{}/genesis/{}0/{}",
+                TOPIC_PREFIX, ATTESTATION_SUBNET_PREFIX, SSZ_SNAPPY_ENCODING_POSTFIX
             ),
-            b"aggregate_proof_ssz".to_vec(),
+            b"attestation_ssz".to_vec(),
         ),
     ];
 

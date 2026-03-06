@@ -4,12 +4,13 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 use containers::{
-    AggregatedSignatureProof, Attestation, AttestationData, AttestationSignatures, Block,
-    BlockSignatures, BlockWithAttestation, Checkpoint, SignedAttestation,
-    SignedBlockWithAttestation, Slot,
+    AggregatedSignatureProof, AggregationBits,
+    Attestation, AttestationData, AttestationSignatures, Block, BlockSignatures,
+    BlockWithAttestation, Checkpoint, SignedAggregatedAttestation, SignedAttestation,
+    SignedBlockWithAttestation, Slot, SignatureKey,
 };
-use ethereum_types::H256;
-use fork_choice::store::{Store, get_proposal_head, produce_block_with_signatures};
+use fork_choice::store::{Store, produce_block_with_signatures};
+use ssz::H256;
 use metrics::{METRICS, stop_and_discard, stop_and_record};
 use ssz::SszHash;
 use tracing::{info, warn};
@@ -56,14 +57,21 @@ pub struct ValidatorService {
     pub config: ValidatorConfig,
     pub num_validators: u64,
     key_manager: Option<KeyManager>,
+    /// Whether this node performs aggregation duties (devnet-3)
+    is_aggregator: bool,
 }
 
 impl ValidatorService {
     pub fn new(config: ValidatorConfig, num_validators: u64) -> Self {
+        Self::new_with_aggregator(config, num_validators, false)
+    }
+
+    pub fn new_with_aggregator(config: ValidatorConfig, num_validators: u64, is_aggregator: bool) -> Self {
         info!(
             node_id = %config.node_id,
             indices = ?config.validator_indices,
             total_validators = num_validators,
+            is_aggregator = is_aggregator,
             "VALIDATOR INITIALIZED SUCCESSFULLY"
         );
 
@@ -77,6 +85,7 @@ impl ValidatorService {
             config,
             num_validators,
             key_manager: None,
+            is_aggregator,
         }
     }
 
@@ -84,6 +93,15 @@ impl ValidatorService {
         config: ValidatorConfig,
         num_validators: u64,
         keys_dir: impl AsRef<Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_keys_and_aggregator(config, num_validators, keys_dir, false)
+    }
+
+    pub fn new_with_keys_and_aggregator(
+        config: ValidatorConfig,
+        num_validators: u64,
+        keys_dir: impl AsRef<Path>,
+        is_aggregator: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut key_manager = KeyManager::new(keys_dir)?;
 
@@ -97,6 +115,7 @@ impl ValidatorService {
             indices = ?config.validator_indices,
             total_validators = num_validators,
             keys_loaded = config.validator_indices.len(),
+            is_aggregator = is_aggregator,
             "VALIDATOR INITIALIZED WITH XMSS KEYS"
         );
 
@@ -110,6 +129,7 @@ impl ValidatorService {
             config,
             num_validators,
             key_manager: Some(key_manager),
+            is_aggregator,
         })
     }
 
@@ -123,6 +143,125 @@ impl ValidatorService {
             Some(proposer)
         } else {
             None
+        }
+    }
+
+    /// Check if this node is an aggregator for the given slot (devnet-3)
+    /// For devnet-3, aggregator selection is simplified: a node is an aggregator
+    /// if it has validator duties and is_aggregator is enabled via config
+    pub fn is_aggregator_for_slot(&self, _slot: Slot) -> bool {
+        self.is_aggregator && !self.config.validator_indices.is_empty()
+    }
+
+    /// Perform aggregation duty if this node is an aggregator (devnet-3)
+    /// Collects signatures from gossip_signatures and creates aggregated attestations
+    /// Returns None if not an aggregator or no signatures to aggregate
+    pub fn maybe_aggregate(&self, store: &Store, slot: Slot) -> Option<Vec<SignedAggregatedAttestation>> {
+        if !self.is_aggregator_for_slot(slot) {
+            return None;
+        }
+
+        // Get the head state to access validator public keys
+        let head_state = store.states.get(&store.head)?;
+
+        // Group signatures by data_root
+        // SignatureKey contains (validator_id, data_root)
+        let mut groups: HashMap<H256, Vec<(u64, Signature)>> = HashMap::new();
+
+        for (sig_key, signature) in &store.gossip_signatures {
+            groups
+                .entry(sig_key.data_root)
+                .or_default()
+                .push((sig_key.validator_id, signature.clone()));
+        }
+
+        if groups.is_empty() {
+            info!(slot = slot.0, "No signatures to aggregate");
+            return None;
+        }
+
+        let mut aggregated_attestations = Vec::new();
+
+        for (data_root, validator_sigs) in groups {
+            // Look up attestation data by its hash (data_root)
+            // This ensures we get the exact attestation that was signed,
+            // matching ream's attestation_data_by_root_provider approach
+            let Some(attestation_data) = store.attestation_data_by_root.get(&data_root).cloned() else {
+                warn!(
+                    data_root = %format!("0x{:x}", data_root),
+                    "Could not find attestation data for aggregation group"
+                );
+                continue;
+            };
+
+            // Only aggregate attestations for the current slot
+            if attestation_data.slot != slot {
+                continue;
+            }
+
+            // Collect validator IDs, public keys, and signatures
+            // IMPORTANT: Must sort by validator_id to match ream/zeam behavior.
+            // The participants bitfield is iterated in ascending order during verification,
+            // so the proof must be created with public_keys/signatures in the same order.
+            let mut entries: Vec<(u64, Signature)> = validator_sigs
+                .into_iter()
+                .filter(|(vid, _)| head_state.validators.get(*vid).is_ok())
+                .collect();
+            entries.sort_by_key(|(vid, _)| *vid);
+
+            let mut validator_ids = Vec::new();
+            let mut public_keys = Vec::new();
+            let mut signatures = Vec::new();
+
+            for (vid, sig) in entries {
+                // Get public key from state validators (already filtered above)
+                let validator = head_state.validators.get(vid).unwrap();
+                validator_ids.push(vid);
+                public_keys.push(validator.pubkey.clone());
+                signatures.push(sig);
+            }
+
+            if validator_ids.is_empty() {
+                continue;
+            }
+
+            // Create aggregation bits from validator IDs
+            let participants = AggregationBits::from_validator_indices(&validator_ids);
+
+            // Create the aggregated signature proof
+            // Uses attestation_data.slot as epoch (matches ream's approach)
+            let proof = match AggregatedSignatureProof::aggregate(
+                participants,
+                public_keys,
+                signatures,
+                data_root,
+                attestation_data.slot.0 as u32,
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!(error = %e, "Failed to create aggregated signature proof");
+                    continue;
+                }
+            };
+
+            info!(
+                slot = slot.0,
+                validators = validator_ids.len(),
+                data_root = %format!("0x{:x}", data_root),
+                "Created aggregated attestation"
+            );
+
+            // Create SignedAggregatedAttestation matching ream/zeam structure
+            aggregated_attestations.push(SignedAggregatedAttestation {
+                data: attestation_data,
+                proof,
+            });
+        }
+
+        if aggregated_attestations.is_empty() {
+            None
+        } else {
+            Some(aggregated_attestations)
         }
     }
 
