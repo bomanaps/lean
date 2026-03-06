@@ -7,14 +7,14 @@ use containers::{
 use ethereum_types::H256;
 use features::Feature;
 use fork_choice::{
-    handlers::{on_attestation, on_block, on_tick},
+    handlers::{on_aggregated_attestation, on_attestation, on_block, on_tick},
     store::{INTERVALS_PER_SLOT, Store, get_forkchoice_store},
 };
 use http_api::HttpServerConfig;
 use libp2p_identity::Keypair;
 use metrics::{METRICS, Metrics};
 use networking::gossipsub::config::GossipsubConfig;
-use networking::gossipsub::topic::get_topics;
+use networking::gossipsub::topic::{compute_subnet_id, get_subscription_topics};
 use networking::network::{NetworkService, NetworkServiceConfig};
 use networking::types::{ChainMessage, OutboundP2pRequest};
 use ssz::{PersistentList, SszHash};
@@ -136,6 +136,16 @@ struct Args {
     /// List of optional runtime features to enable
     #[clap(long, value_delimiter = ',')]
     features: Vec<Feature>,
+
+    /// Enable aggregator mode (devnet-3)
+    /// When enabled, this node will aggregate attestations at interval 2
+    #[arg(long = "is-aggregator", default_value_t = false)]
+    is_aggregator: bool,
+
+    /// Override attestation committee count (devnet-3)
+    /// When set, uses this value instead of the hardcoded default
+    #[arg(long = "attestation-committee-count")]
+    attestation_committee_count: Option<u64>,
 }
 
 #[tokio::main]
@@ -264,16 +274,18 @@ async fn main() -> Result<()> {
                 if let Some(ref keys_dir) = args.hash_sig_key_dir {
                     let keys_path = std::path::Path::new(keys_dir);
                     if keys_path.exists() {
-                        match ValidatorService::new_with_keys(
+                        match ValidatorService::new_with_keys_and_aggregator(
                             config.clone(),
                             num_validators,
                             keys_path,
+                            args.is_aggregator,
                         ) {
                             Ok(service) => {
                                 info!(
                                     node_id = %node_id,
                                     indices = ?config.validator_indices,
                                     keys_dir = ?keys_path,
+                                    aggregator = args.is_aggregator,
                                     "Validator mode enabled with XMSS signing"
                                 );
                                 Some(service)
@@ -283,7 +295,7 @@ async fn main() -> Result<()> {
                                     "Failed to load XMSS keys: {}, falling back to zero signatures",
                                     e
                                 );
-                                Some(ValidatorService::new(config, num_validators))
+                                Some(ValidatorService::new_with_aggregator(config, num_validators, args.is_aggregator))
                             }
                         }
                     } else {
@@ -291,15 +303,16 @@ async fn main() -> Result<()> {
                             "Hash-sig key directory not found: {:?}, using zero signatures",
                             keys_path
                         );
-                        Some(ValidatorService::new(config, num_validators))
+                        Some(ValidatorService::new_with_aggregator(config, num_validators, args.is_aggregator))
                     }
                 } else {
                     info!(
                         node_id = %node_id,
                         indices = ?config.validator_indices,
+                        aggregator = args.is_aggregator,
                         "Validator mode enabled (no --hash-sig-key-dir specified - using zero signatures)"
                     );
-                    Some(ValidatorService::new(config, num_validators))
+                    Some(ValidatorService::new_with_aggregator(config, num_validators, args.is_aggregator))
                 }
             }
             Err(e) => {
@@ -313,7 +326,9 @@ async fn main() -> Result<()> {
     };
 
     let fork = "devnet0".to_string();
-    let gossipsub_topics = get_topics(fork);
+    // Devnet-3: Non-aggregators only subscribe to Block, Attestation, Aggregation
+    // Aggregators also subscribe to AttestationSubnet topics to collect attestations
+    let gossipsub_topics = get_subscription_topics(fork, args.is_aggregator);
     let mut gossipsub_config = GossipsubConfig::new();
     gossipsub_config.set_topics(gossipsub_topics);
 
@@ -387,7 +402,8 @@ async fn main() -> Result<()> {
     });
 
     let chain_handle = task::spawn(async move {
-        let mut tick_interval = interval(Duration::from_millis(1000));
+        // Devnet-3: 5 intervals per slot at 800ms each (4 second slots)
+        let mut tick_interval = interval(Duration::from_millis(800));
         let mut last_logged_slot = 0u64;
         let mut last_status_slot: Option<u64> = None;
         let mut last_proposal_slot: Option<u64> = None;
@@ -399,11 +415,12 @@ async fn main() -> Result<()> {
         loop {
             tokio::select! {
                 _ = tick_interval.tick() => {
-                    let now = SystemTime::now()
+                    // Devnet-3: on_tick expects time in milliseconds
+                    let now_millis = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap()
-                        .as_secs();
-                    on_tick(&mut store, now, false);
+                        .as_millis() as u64;
+                    on_tick(&mut store, now_millis, false);
 
                     let current_slot = store.time / INTERVALS_PER_SLOT;
                     let current_interval = store.time % INTERVALS_PER_SLOT;
@@ -435,11 +452,11 @@ async fn main() -> Result<()> {
                                                 );
 
                                                 // Synchronize store time with wall clock before processing own block
-                                                let now = SystemTime::now()
+                                                let now_millis = SystemTime::now()
                                                     .duration_since(UNIX_EPOCH)
                                                     .unwrap()
-                                                    .as_secs();
-                                                on_tick(&mut store, now, false);
+                                                    .as_millis() as u64;
+                                                on_tick(&mut store, now_millis, false);
 
                                                 match on_block(&mut store, signed_block.clone()) {
                                                     Ok(()) => {
@@ -467,16 +484,18 @@ async fn main() -> Result<()> {
                                     let attestations = vs.create_attestations(&store, Slot(current_slot));
                                     for signed_att in attestations {
                                         let validator_id = signed_att.validator_id;
+                                        let subnet_id = compute_subnet_id(validator_id);
                                         info!(
                                             slot = current_slot,
                                             validator = validator_id,
-                                            "Broadcasting attestation"
+                                            subnet_id = subnet_id,
+                                            "Broadcasting attestation to subnet"
                                         );
 
                                         match on_attestation(&mut store, signed_att.clone(), false) {
                                             Ok(()) => {
                                                 if let Err(e) = chain_outbound_sender.send(
-                                                    OutboundP2pRequest::GossipAttestation(signed_att)
+                                                    OutboundP2pRequest::GossipAttestation(signed_att, subnet_id)
                                                 ) {
                                                     warn!("Failed to gossip attestation: {}", e);
                                                 }
@@ -489,9 +508,28 @@ async fn main() -> Result<()> {
                             }
                         }
                         2 => {
-                            info!(slot = current_slot, tick = store.time, "Computing safe target");
+                            // Interval 2: Aggregation phase (devnet-3)
+                            if let Some(ref vs) = validator_service {
+                                if let Some(aggregations) = vs.maybe_aggregate(&store, Slot(current_slot)) {
+                                    for aggregation in aggregations {
+                                        if let Err(e) = chain_outbound_sender.send(
+                                            OutboundP2pRequest::GossipAggregation(aggregation)
+                                        ) {
+                                            warn!("Failed to gossip aggregation: {}", e);
+                                        }
+                                    }
+                                    info!(slot = current_slot, tick = store.time, "Aggregation phase - broadcast aggregated attestations");
+                                } else {
+                                    info!(slot = current_slot, tick = store.time, "Aggregation phase - no aggregation duty or no attestations");
+                                }
+                            }
                         }
                         3 => {
+                            // Interval 3: Safe target update (devnet-3)
+                            info!(slot = current_slot, tick = store.time, "Computing safe target");
+                        }
+                        4 => {
+                            // Interval 4: Accept attestations (devnet-3)
                             info!(slot = current_slot, tick = store.time, "Accepting new attestations");
                         }
                         _ => {}
@@ -526,11 +564,11 @@ async fn main() -> Result<()> {
                             );
 
                             // Synchronize store time with wall clock before processing block
-                            let now = SystemTime::now()
+                            let now_millis = SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
                                 .unwrap()
-                                .as_secs();
-                            on_tick(&mut store, now, false);
+                                .as_millis() as u64;
+                            on_tick(&mut store, now_millis, false);
 
                             match on_block(&mut store, signed_block_with_attestation.clone()) {
                                 Ok(()) => {
@@ -584,16 +622,60 @@ async fn main() -> Result<()> {
                             match on_attestation(&mut store, signed_attestation.clone(), false) {
                                 Ok(()) => {
                                     if should_gossip {
+                                        let subnet_id = compute_subnet_id(validator_id);
                                         if let Err(e) = outbound_p2p_sender.send(
-                                            OutboundP2pRequest::GossipAttestation(signed_attestation)
+                                            OutboundP2pRequest::GossipAttestation(signed_attestation, subnet_id)
                                         ) {
                                             warn!("Failed to gossip attestation: {}", e);
                                         } else {
-                                            info!(slot = att_slot, "Broadcasted attestation");
+                                            info!(slot = att_slot, subnet_id = subnet_id, "Broadcasted attestation to subnet");
                                         }
                                     }
                                 }
                                 Err(e) => warn!("Error processing attestation: {}", e),
+                            }
+                        }
+                        ChainMessage::ProcessAggregation {
+                            signed_aggregated_attestation,
+                            should_gossip,
+                            ..
+                        } => {
+                            let agg_slot = signed_aggregated_attestation.data.slot.0;
+                            let validator_count = signed_aggregated_attestation
+                                .proof
+                                .participants
+                                .0
+                                .iter()
+                                .filter(|b| **b)
+                                .count();
+
+                            // Devnet-3: Process aggregated attestation for safe target computation
+                            match on_aggregated_attestation(&mut store, signed_aggregated_attestation.clone()) {
+                                Ok(_) => {
+                                    info!(
+                                        slot = agg_slot,
+                                        validators = validator_count,
+                                        "Processed aggregated attestation for safe target"
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        slot = agg_slot,
+                                        error = %e,
+                                        "Failed to process aggregated attestation"
+                                    );
+                                }
+                            }
+
+                            // Gossip the aggregation if needed
+                            if should_gossip {
+                                if let Err(e) = outbound_p2p_sender.send(
+                                    OutboundP2pRequest::GossipAggregation(signed_aggregated_attestation)
+                                ) {
+                                    warn!("Failed to gossip aggregation: {}", e);
+                                } else {
+                                    info!(slot = agg_slot, "Broadcasted aggregation");
+                                }
                             }
                         }
                     }

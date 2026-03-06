@@ -1,6 +1,6 @@
 use crate::gossipsub::message::GossipsubMessage;
 use crate::gossipsub::topic::{
-    ATTESTATION_TOPIC, BLOCK_TOPIC, SSZ_SNAPPY_ENCODING_POSTFIX, TOPIC_PREFIX,
+    ATTESTATION_SUBNET_PREFIX, BLOCK_TOPIC, SSZ_SNAPPY_ENCODING_POSTFIX, TOPIC_PREFIX,
 };
 use libp2p::gossipsub::TopicHash;
 
@@ -27,10 +27,10 @@ fn test_message_decode_invalid_ssz_for_block() {
 }
 
 #[test]
-fn test_message_decode_invalid_ssz_for_attestation() {
+fn test_message_decode_invalid_ssz_for_attestation_subnet() {
     let topic_str = format!(
-        "/{}/{}/{}/{}",
-        TOPIC_PREFIX, "genesis", ATTESTATION_TOPIC, SSZ_SNAPPY_ENCODING_POSTFIX
+        "/{}/{}/{}{}/{}",
+        TOPIC_PREFIX, "genesis", ATTESTATION_SUBNET_PREFIX, "0", SSZ_SNAPPY_ENCODING_POSTFIX
     );
     let topic = TopicHash::from_raw(topic_str);
     let invalid_ssz = b"not_valid_ssz";

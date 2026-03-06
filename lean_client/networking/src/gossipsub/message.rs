@@ -1,13 +1,16 @@
 use crate::gossipsub::topic::GossipsubKind;
 use crate::gossipsub::topic::GossipsubTopic;
-use containers::SignedAttestation;
-use containers::SignedBlockWithAttestation;
+use containers::{SignedAggregatedAttestation, SignedAttestation, SignedBlockWithAttestation};
 use libp2p::gossipsub::TopicHash;
 use ssz::SszReadDefault as _;
 
+/// Devnet-3 gossipsub message types
 pub enum GossipsubMessage {
     Block(SignedBlockWithAttestation),
-    Attestation(SignedAttestation),
+    /// Attestation from a specific subnet (devnet-3)
+    AttestationSubnet { subnet_id: u64, attestation: SignedAttestation },
+    /// Aggregated attestation (devnet-3)
+    Aggregation(SignedAggregatedAttestation),
 }
 
 impl GossipsubMessage {
@@ -17,8 +20,14 @@ impl GossipsubMessage {
                 SignedBlockWithAttestation::from_ssz_default(data)
                     .map_err(|e| format!("{:?}", e))?,
             )),
-            GossipsubKind::Attestation => Ok(Self::Attestation(
-                SignedAttestation::from_ssz_default(data).map_err(|e| format!("{:?}", e))?,
+            GossipsubKind::AttestationSubnet(subnet_id) => Ok(Self::AttestationSubnet {
+                subnet_id,
+                attestation: SignedAttestation::from_ssz_default(data)
+                    .map_err(|e| format!("{:?}", e))?,
+            }),
+            GossipsubKind::Aggregation => Ok(Self::Aggregation(
+                SignedAggregatedAttestation::from_ssz_default(data)
+                    .map_err(|e| format!("{:?}", e))?,
             )),
         }
     }

@@ -4,7 +4,17 @@ pub const TOPIC_PREFIX: &str = "leanconsensus";
 pub const SSZ_SNAPPY_ENCODING_POSTFIX: &str = "ssz_snappy";
 
 pub const BLOCK_TOPIC: &str = "block";
-pub const ATTESTATION_TOPIC: &str = "attestation";
+pub const ATTESTATION_SUBNET_PREFIX: &str = "attestation_";
+pub const AGGREGATION_TOPIC: &str = "aggregation";
+
+/// Number of attestation subnets (devnet-3)
+pub const ATTESTATION_SUBNET_COUNT: u64 = 1;
+
+/// Compute the subnet ID for a validator (devnet-3)
+/// Subnet assignment: validator_id % ATTESTATION_SUBNET_COUNT
+pub fn compute_subnet_id(validator_id: u64) -> u64 {
+    validator_id % ATTESTATION_SUBNET_COUNT
+}
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct GossipsubTopic {
@@ -12,23 +22,62 @@ pub struct GossipsubTopic {
     pub kind: GossipsubKind,
 }
 
-#[derive(Debug, Hash, Clone, Copy, PartialEq, Eq)]
+/// Devnet-3 gossipsub topic kinds
+/// Note: Legacy global "attestation" topic removed - use AttestationSubnet(subnet_id) instead
+#[derive(Debug, Hash, Clone, PartialEq, Eq)]
 pub enum GossipsubKind {
     Block,
-    Attestation,
+    /// Subnet-specific attestation topic (devnet-3)
+    /// Format: attestation_{subnet_id}
+    AttestationSubnet(u64),
+    /// Aggregated attestation topic (devnet-3)
+    Aggregation,
 }
 
+impl GossipsubKind {
+    /// Check if this kind matches another, treating AttestationSubnet as matching any subnet
+    pub fn matches(&self, other: &Self) -> bool {
+        match (self, other) {
+            (GossipsubKind::AttestationSubnet(_), GossipsubKind::AttestationSubnet(_)) => true,
+            _ => self == other,
+        }
+    }
+}
+
+/// Get all topics (for testing or full subscription)
 pub fn get_topics(fork: String) -> Vec<GossipsubTopic> {
-    vec![
+    get_subscription_topics(fork, true)
+}
+
+/// Get topics for subscription based on node role (devnet-3)
+/// - All nodes subscribe to Block and Aggregation topics
+/// - Only aggregators subscribe to AttestationSubnet topics to collect attestations
+/// - Non-aggregators publish to subnet topics but don't subscribe
+pub fn get_subscription_topics(fork: String, is_aggregator: bool) -> Vec<GossipsubTopic> {
+    let mut topics = vec![
         GossipsubTopic {
             fork: fork.clone(),
             kind: GossipsubKind::Block,
         },
+        // Aggregation topic - all nodes subscribe to receive aggregated attestations
         GossipsubTopic {
             fork: fork.clone(),
-            kind: GossipsubKind::Attestation,
+            kind: GossipsubKind::Aggregation,
         },
-    ]
+    ];
+
+    // Only aggregators subscribe to attestation subnet topics (devnet-3)
+    // Non-aggregators publish to these topics but don't subscribe
+    if is_aggregator {
+        for subnet_id in 0..ATTESTATION_SUBNET_COUNT {
+            topics.push(GossipsubTopic {
+                fork: fork.clone(),
+                kind: GossipsubKind::AttestationSubnet(subnet_id),
+            });
+        }
+    }
+
+    topics
 }
 
 impl GossipsubTopic {
@@ -63,10 +112,19 @@ impl GossipsubTopic {
     }
 
     fn extract_kind(parts: &[&str]) -> Result<GossipsubKind, String> {
-        match parts[2] {
-            BLOCK_TOPIC => Ok(GossipsubKind::Block),
-            ATTESTATION_TOPIC => Ok(GossipsubKind::Attestation),
-            other => Err(format!("Invalid topic kind: {other:?}")),
+        let topic_name = parts[2];
+
+        if topic_name == BLOCK_TOPIC {
+            Ok(GossipsubKind::Block)
+        } else if topic_name == AGGREGATION_TOPIC {
+            Ok(GossipsubKind::Aggregation)
+        } else if let Some(subnet_str) = topic_name.strip_prefix(ATTESTATION_SUBNET_PREFIX) {
+            let subnet_id = subnet_str.parse::<u64>().map_err(|e| {
+                format!("Invalid attestation subnet id: {subnet_str:?}, error: {e}")
+            })?;
+            Ok(GossipsubKind::AttestationSubnet(subnet_id))
+        } else {
+            Err(format!("Invalid topic kind: {topic_name:?}"))
         }
     }
 }
@@ -96,8 +154,11 @@ impl From<GossipsubTopic> for String {
 impl From<GossipsubTopic> for TopicHash {
     fn from(val: GossipsubTopic) -> Self {
         let kind_str = match &val.kind {
-            GossipsubKind::Block => BLOCK_TOPIC,
-            GossipsubKind::Attestation => ATTESTATION_TOPIC,
+            GossipsubKind::Block => BLOCK_TOPIC.to_string(),
+            GossipsubKind::AttestationSubnet(subnet_id) => {
+                format!("{ATTESTATION_SUBNET_PREFIX}{subnet_id}")
+            }
+            GossipsubKind::Aggregation => AGGREGATION_TOPIC.to_string(),
         };
         TopicHash::from_raw(format!(
             "/{}/{}/{}/{}",
@@ -110,7 +171,10 @@ impl std::fmt::Display for GossipsubKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GossipsubKind::Block => write!(f, "{BLOCK_TOPIC}"),
-            GossipsubKind::Attestation => write!(f, "{ATTESTATION_TOPIC}"),
+            GossipsubKind::AttestationSubnet(subnet_id) => {
+                write!(f, "{ATTESTATION_SUBNET_PREFIX}{subnet_id}")
+            }
+            GossipsubKind::Aggregation => write!(f, "{AGGREGATION_TOPIC}"),
         }
     }
 }

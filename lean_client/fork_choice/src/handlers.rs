@@ -1,15 +1,21 @@
 use anyhow::{Result, anyhow, bail, ensure};
-use containers::{AttestationData, SignatureKey, SignedAttestation, SignedBlockWithAttestation};
-use metrics::{METRICS, stop_and_discard};
+use containers::{
+    AttestationData, SignatureKey, SignedAggregatedAttestation, SignedAttestation,
+    SignedBlockWithAttestation,
+};
+use metrics::METRICS;
 use ssz::{H256, SszHash};
 use tracing::warn;
 
-use crate::store::{INTERVALS_PER_SLOT, SECONDS_PER_INTERVAL, Store, tick_interval, update_head};
+use crate::store::{INTERVALS_PER_SLOT, MILLIS_PER_INTERVAL, Store, tick_interval, update_head};
 
 #[inline]
-pub fn on_tick(store: &mut Store, time: u64, has_proposal: bool) {
-    // Calculate target time in intervals
-    let tick_interval_time = time.saturating_sub(store.config.genesis_time) / SECONDS_PER_INTERVAL;
+pub fn on_tick(store: &mut Store, time_millis: u64, has_proposal: bool) {
+    // Calculate target time in intervals using milliseconds (devnet-3: 800ms intervals)
+    // genesis_time is in seconds, convert to milliseconds for calculation
+    let genesis_millis = store.config.genesis_time * 1000;
+    let elapsed_millis = time_millis.saturating_sub(genesis_millis);
+    let tick_interval_time = elapsed_millis / MILLIS_PER_INTERVAL;
 
     // Tick forward one interval at a time
     while store.time < tick_interval_time {
@@ -123,6 +129,11 @@ pub fn on_gossip_attestation(
         .gossip_signatures
         .insert(sig_key, signed_attestation.signature);
 
+    // Store attestation data indexed by hash for aggregation lookup
+    store
+        .attestation_data_by_root
+        .insert(data_root, attestation_data.clone());
+
     // Process the attestation data (not from block)
     on_attestation_internal(store, validator_id, attestation_data, false)
         .inspect_err(|_| {
@@ -176,9 +187,14 @@ pub fn on_attestation(
         });
     })?;
 
+    // Store attestation data indexed by hash for aggregation lookup
+    let data_root = attestation_data.hash_tree_root();
+    store
+        .attestation_data_by_root
+        .insert(data_root, attestation_data.clone());
+
     if !is_from_block {
         // Store signature for later aggregation during block building
-        let data_root = attestation_data.hash_tree_root();
         let sig_key = SignatureKey::new(signed_attestation.validator_id, data_root);
         store
             .gossip_signatures
@@ -202,6 +218,66 @@ pub fn on_attestation(
                     .inc()
             });
         })
+}
+
+/// Devnet-3: Process an aggregated attestation from the aggregation topic
+///
+/// Per leanSpec: Aggregated attestations are stored as proofs in
+/// `latest_new_aggregated_payloads`. At interval 3, these are merged with
+/// `latest_known_aggregated_payloads` (from blocks) to compute safe target.
+///
+/// # Signature Verification Strategy (TODO for production)
+///
+/// Currently, this function validates attestation data but does NOT verify the
+/// aggregated XMSS signature. This is intentional for devnet-3 performance testing.
+///
+/// For production, signature verification should be added:
+/// 1. Verify the `AggregatedSignatureProof` against the aggregation bits
+/// 2. Consider async/batched verification for throughput
+/// 3. Cache verification results to avoid re-verifying the same aggregations
+///
+/// See Ream's approach: deferred verification in gossip path with later validation
+#[inline]
+pub fn on_aggregated_attestation(
+    store: &mut Store,
+    signed_aggregated_attestation: SignedAggregatedAttestation,
+) -> Result<()> {
+    // Structure: { data: AttestationData, proof: AggregatedSignatureProof }
+    let attestation_data = signed_aggregated_attestation.data.clone();
+    let proof = signed_aggregated_attestation.proof.clone();
+
+    // Validate attestation data (slot bounds, target validity, etc.)
+    // TODO(production): Add signature verification here or in caller
+    validate_attestation_data(store, &attestation_data)?;
+
+    // Store attestation data indexed by hash for later extraction
+    let data_root = attestation_data.hash_tree_root();
+    store
+        .attestation_data_by_root
+        .insert(data_root, attestation_data.clone());
+
+    // Per leanSpec: Store the proof in latest_new_aggregated_payloads
+    // Each participating validator gets an entry via their SignatureKey
+    for (bit_idx, bit) in proof.participants.0.iter().enumerate() {
+        if *bit {
+            let validator_id = bit_idx as u64;
+            let sig_key = SignatureKey::new(validator_id, data_root);
+            store
+                .latest_new_aggregated_payloads
+                .entry(sig_key)
+                .or_default()
+                .push(proof.clone());
+        }
+    }
+
+    METRICS.get().map(|metrics| {
+        metrics
+            .lean_attestations_valid_total
+            .with_label_values(&["aggregation"])
+            .inc()
+    });
+
+    Ok(())
 }
 
 /// Internal attestation processing - stores AttestationData
@@ -383,6 +459,12 @@ fn process_block_internal(
     for (att_idx, aggregated_attestation) in aggregated_attestations.into_iter().enumerate() {
         let data_root = aggregated_attestation.data.hash_tree_root();
 
+        // Store attestation data for safe target extraction
+        // This is critical: without this, block attestations are invisible to update_safe_target()
+        store
+            .attestation_data_by_root
+            .insert(data_root, aggregated_attestation.data.clone());
+
         // Get the corresponding proof from attestation_signatures
         if let Ok(proof_data) = signatures.attestation_signatures.get(att_idx as u64) {
             // Store proof for each validator in the aggregation
@@ -391,9 +473,9 @@ fn process_block_internal(
                     let validator_id = bit_idx as u64;
                     let sig_key = SignatureKey::new(validator_id, data_root);
                     store
-                        .aggregated_payloads
+                        .latest_known_aggregated_payloads
                         .entry(sig_key)
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(proof_data.clone());
                 }
             }

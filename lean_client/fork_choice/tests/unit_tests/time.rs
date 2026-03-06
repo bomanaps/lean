@@ -1,14 +1,15 @@
 use super::common::create_test_store;
 use fork_choice::handlers::on_tick;
-use fork_choice::store::{INTERVALS_PER_SLOT, SECONDS_PER_SLOT, tick_interval};
+use fork_choice::store::{INTERVALS_PER_SLOT, MILLIS_PER_INTERVAL, SECONDS_PER_SLOT, tick_interval};
 
 #[test]
 fn test_on_tick_basic() {
     let mut store = create_test_store();
     let initial_time = store.time;
-    let target_time = store.config.genesis_time + 200;
+    // on_tick now expects milliseconds (devnet-3)
+    let target_time_millis = (store.config.genesis_time + 200) * 1000;
 
-    on_tick(&mut store, target_time, true);
+    on_tick(&mut store, target_time_millis, true);
 
     assert!(store.time > initial_time);
 }
@@ -17,9 +18,10 @@ fn test_on_tick_basic() {
 fn test_on_tick_no_proposal() {
     let mut store = create_test_store();
     let initial_time = store.time;
-    let target_time = store.config.genesis_time + 100;
+    // on_tick now expects milliseconds (devnet-3)
+    let target_time_millis = (store.config.genesis_time + 100) * 1000;
 
-    on_tick(&mut store, target_time, false);
+    on_tick(&mut store, target_time_millis, false);
 
     assert!(store.time >= initial_time);
 }
@@ -28,10 +30,12 @@ fn test_on_tick_no_proposal() {
 fn test_on_tick_already_current() {
     let mut store = create_test_store();
     let initial_time = store.time;
-    let current_target = store.config.genesis_time + initial_time;
+    // on_tick now expects milliseconds (devnet-3)
+    // Convert initial_time (in intervals) to seconds, then to milliseconds
+    let current_target_millis = (store.config.genesis_time * 1000) + (initial_time * MILLIS_PER_INTERVAL);
 
     // Try to advance to current time
-    on_tick(&mut store, current_target, true);
+    on_tick(&mut store, current_target_millis, true);
 
     // Should not change significantly
     assert_eq!(store.time, initial_time);
@@ -41,10 +45,11 @@ fn test_on_tick_already_current() {
 fn test_on_tick_small_increment() {
     let mut store = create_test_store();
     let initial_time = store.time;
-    // Advance by just 1 second
-    let target_time = store.config.genesis_time + initial_time + 1;
+    // on_tick now expects milliseconds (devnet-3)
+    // Advance by just 1 second (1000ms)
+    let target_time_millis = (store.config.genesis_time * 1000) + (initial_time * MILLIS_PER_INTERVAL) + 1000;
 
-    on_tick(&mut store, target_time, false);
+    on_tick(&mut store, target_time_millis, false);
 
     // Should advance or stay same depending on interval rounding, but definitely not go back
     assert!(store.time >= initial_time);
@@ -144,10 +149,18 @@ fn test_interval_calculations() {
     let slot_number = total_intervals / INTERVALS_PER_SLOT;
     let interval_in_slot = total_intervals % INTERVALS_PER_SLOT;
 
-    // INTERVALS_PER_SLOT is 4 (from store.rs)
-    // 10 intervals = 2 slots (8 intervals) + 2 intervals
+    // INTERVALS_PER_SLOT is 5 (devnet-3)
+    // 10 intervals = 2 slots (10 intervals) + 0 intervals
     assert_eq!(slot_number, 2);
-    assert_eq!(interval_in_slot, 2);
+    assert_eq!(interval_in_slot, 0);
+
+    // Test with 8 intervals
+    let total_8 = 8;
+    let slot_8 = total_8 / INTERVALS_PER_SLOT;
+    let interval_8 = total_8 % INTERVALS_PER_SLOT;
+    // 8 intervals = 1 slot (5 intervals) + 3 intervals
+    assert_eq!(slot_8, 1);
+    assert_eq!(interval_8, 3);
 
     // Test boundary cases
     let boundary_intervals = INTERVALS_PER_SLOT;
@@ -156,4 +169,29 @@ fn test_interval_calculations() {
 
     assert_eq!(boundary_slot, 1); // Start of next slot
     assert_eq!(boundary_interval, 0); // First interval of slot
+}
+
+#[test]
+fn test_millis_per_interval() {
+    // Devnet-3: 4 seconds per slot, 5 intervals = 800ms per interval
+    assert_eq!(MILLIS_PER_INTERVAL, 800);
+
+    // Verify no integer truncation: 4 * 1000 = 5 * 800
+    assert_eq!(SECONDS_PER_SLOT * 1000, MILLIS_PER_INTERVAL * INTERVALS_PER_SLOT);
+}
+
+#[test]
+fn test_devnet3_interval_schedule() {
+    // Test that 5 intervals are properly cycled through
+    let mut store = create_test_store();
+    store.time = 0;
+
+    // Tick through a complete slot (5 intervals)
+    for i in 0..5 {
+        tick_interval(&mut store, i == 0);
+    }
+
+    // After 5 ticks, we should be at interval 0 of the next slot
+    assert_eq!(store.time, 5);
+    assert_eq!(store.time % INTERVALS_PER_SLOT, 0);
 }

@@ -1,5 +1,5 @@
 use crate::gossipsub::config::GossipsubConfig;
-use crate::gossipsub::topic::{GossipsubKind, get_topics};
+use crate::gossipsub::topic::{ATTESTATION_SUBNET_COUNT, GossipsubKind, get_topics};
 
 #[test]
 fn test_default_parameters() {
@@ -43,9 +43,22 @@ fn test_set_topics() {
 
     config.set_topics(topics.clone());
 
-    assert_eq!(config.topics.len(), 2);
+    // Block + Aggregation + ATTESTATION_SUBNET_COUNT subnets (no legacy Attestation)
+    let expected_count = 2 + ATTESTATION_SUBNET_COUNT as usize;
+    assert_eq!(config.topics.len(), expected_count);
+
+    // Verify topics
     assert_eq!(config.topics[0].fork, "genesis");
     assert_eq!(config.topics[0].kind, GossipsubKind::Block);
     assert_eq!(config.topics[1].fork, "genesis");
-    assert_eq!(config.topics[1].kind, GossipsubKind::Attestation);
+    assert_eq!(config.topics[1].kind, GossipsubKind::Aggregation);
+
+    // Verify subnet topics
+    for i in 0..ATTESTATION_SUBNET_COUNT as usize {
+        assert_eq!(config.topics[2 + i].fork, "genesis");
+        assert_eq!(
+            config.topics[2 + i].kind,
+            GossipsubKind::AttestationSubnet(i as u64)
+        );
+    }
 }

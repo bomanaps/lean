@@ -10,9 +10,11 @@ use ssz::{H256, SszHash};
 use xmss::Signature;
 
 pub type Interval = u64;
-pub const INTERVALS_PER_SLOT: Interval = 4;
+pub const INTERVALS_PER_SLOT: Interval = 5;
 pub const SECONDS_PER_SLOT: u64 = 4;
-pub const SECONDS_PER_INTERVAL: u64 = SECONDS_PER_SLOT / INTERVALS_PER_SLOT;
+/// Milliseconds per interval: (4 * 1000) / 5 = 800ms
+/// Using milliseconds avoids integer division truncation (4/5 = 0 in integer math)
+pub const MILLIS_PER_INTERVAL: u64 = (SECONDS_PER_SLOT * 1000) / INTERVALS_PER_SLOT;
 
 /// Forkchoice store tracking chain state and validator attestations
 
@@ -42,7 +44,20 @@ pub struct Store {
 
     pub gossip_signatures: HashMap<SignatureKey, Signature>,
 
-    pub aggregated_payloads: HashMap<SignatureKey, Vec<AggregatedSignatureProof>>,
+    /// Devnet-3: Aggregated signature proofs from block bodies (on-chain).
+    /// These are attestations that have been included in blocks and are part of
+    /// the "known" pool for safe target computation.
+    pub latest_known_aggregated_payloads: HashMap<SignatureKey, Vec<AggregatedSignatureProof>>,
+
+    /// Devnet-3: Aggregated signature proofs from gossip aggregation topic.
+    /// These are newly received aggregations that haven't been migrated to "known" yet.
+    /// At interval 3, we merge this with latest_known_aggregated_payloads for safe target.
+    pub latest_new_aggregated_payloads: HashMap<SignatureKey, Vec<AggregatedSignatureProof>>,
+
+    /// Attestation data indexed by hash (data_root).
+    /// Used to look up the exact attestation data that was signed,
+    /// matching ream's attestation_data_by_root_provider design.
+    pub attestation_data_by_root: HashMap<H256, AttestationData>,
 }
 
 const JUSTIFICATION_LOOKBACK_SLOTS: u64 = 3;
@@ -142,7 +157,9 @@ pub fn get_forkchoice_store(
         latest_new_attestations: HashMap::new(),
         blocks_queue: HashMap::new(),
         gossip_signatures: HashMap::new(),
-        aggregated_payloads: HashMap::new(),
+        latest_known_aggregated_payloads: HashMap::new(),
+        latest_new_aggregated_payloads: HashMap::new(),
+        attestation_data_by_root: HashMap::new(),
     }
 }
 
@@ -253,6 +270,52 @@ pub fn update_head(store: &mut Store) {
     );
 }
 
+/// Extract per-validator attestations from aggregated payloads.
+///
+/// Per leanSpec: walks through all aggregated proofs and extracts the latest
+/// attestation data for each validator based on their participation bits.
+fn extract_attestations_from_aggregated_payloads(
+    payloads: &HashMap<SignatureKey, Vec<AggregatedSignatureProof>>,
+    attestation_data_by_root: &HashMap<H256, AttestationData>,
+) -> HashMap<u64, AttestationData> {
+    let mut attestations: HashMap<u64, AttestationData> = HashMap::new();
+
+    for (sig_key, proofs) in payloads {
+        // Look up the attestation data for this signature key's data_root
+        let Some(attestation_data) = attestation_data_by_root.get(&sig_key.data_root) else {
+            continue;
+        };
+
+        // For each proof, extract participating validators
+        for proof in proofs {
+            for (bit_idx, bit) in proof.participants.0.iter().enumerate() {
+                if *bit {
+                    let validator_id = bit_idx as u64;
+                    // Only update if this is a newer attestation for this validator
+                    if attestations
+                        .get(&validator_id)
+                        .map_or(true, |existing| existing.slot < attestation_data.slot)
+                    {
+                        attestations.insert(validator_id, attestation_data.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    attestations
+}
+
+/// Devnet-3: Update safe target from aggregated attestations
+///
+/// Per leanSpec: Safe target is computed by merging BOTH aggregated payload pools:
+/// - latest_known_aggregated_payloads: from block bodies (on-chain)
+/// - latest_new_aggregated_payloads: from gossip aggregation topic
+///
+/// This merge is critical because at interval 3 (when this runs), the migration
+/// to "known" (interval 4) hasn't happened yet. Without merging:
+/// - Proposer's own attestation in block body (goes directly to known) would be invisible
+/// - Node's self-attestation (goes directly to known) would be invisible
 pub fn update_safe_target(store: &mut Store) {
     let n_validators = if let Some(state) = store.states.get(&store.head) {
         state.validators.len_usize()
@@ -260,11 +323,34 @@ pub fn update_safe_target(store: &mut Store) {
         0
     };
 
+    // Compute 2/3 supermajority threshold using ceiling division
+    // Formula: ceil(2n/3) = (2n + 2) / 3 for integer math
     let min_score = (n_validators * 2 + 2) / 3;
     let root = store.latest_justified.root;
-    let new_safe_target =
-        get_fork_choice_head(store, root, &store.latest_new_attestations, min_score);
+
+    // Per leanSpec: Merge both aggregated payload pools
+    // This ensures we see all attestations including proposer's own and self-attestations
+    let mut all_payloads: HashMap<SignatureKey, Vec<AggregatedSignatureProof>> =
+        store.latest_known_aggregated_payloads.clone();
+
+    for (sig_key, proofs) in &store.latest_new_aggregated_payloads {
+        all_payloads
+            .entry(sig_key.clone())
+            .or_default()
+            .extend(proofs.clone());
+    }
+
+    // Extract per-validator attestations from merged payloads
+    let attestations =
+        extract_attestations_from_aggregated_payloads(&all_payloads, &store.attestation_data_by_root);
+
+    // Run LMD-GHOST with 2/3 threshold to find safe target
+    let new_safe_target = get_fork_choice_head(store, root, &attestations, min_score);
     store.safe_target = new_safe_target;
+
+    // Clear the "new" pool after processing (will be repopulated by gossip)
+    // Note: We do NOT clear latest_known_aggregated_payloads as those persist
+    store.latest_new_aggregated_payloads.clear();
 
     set_gauge_u64(
         |metrics| &metrics.lean_safe_target_slot,
@@ -289,21 +375,25 @@ pub fn accept_new_attestations(store: &mut Store) {
 pub fn tick_interval(store: &mut Store, has_proposal: bool) {
     store.time += 1;
     // Calculate current interval within slot: time % INTERVALS_PER_SLOT
+    // Devnet-3: 5 intervals per slot (800ms each)
     let curr_interval = store.time % INTERVALS_PER_SLOT;
 
     match curr_interval {
-        0 if has_proposal => accept_new_attestations(store),
-        2 => update_safe_target(store),
-        3 => accept_new_attestations(store),
+        0 if has_proposal => accept_new_attestations(store), // Interval 0: Block proposal
+        1 => {}                                               // Interval 1: Attestation phase
+        2 => {}                                               // Interval 2: Aggregation phase (handled in main.rs)
+        3 => update_safe_target(store),                       // Interval 3: Safe target update
+        4 => accept_new_attestations(store),                  // Interval 4: Accept attestations
         _ => {}
     }
 }
 
 #[inline]
 pub fn get_proposal_head(store: &mut Store, slot: Slot) -> H256 {
-    let slot_time = store.config.genesis_time + (slot.0 * SECONDS_PER_SLOT);
+    // Convert to milliseconds for on_tick (devnet-3 uses 800ms intervals)
+    let slot_time_millis = (store.config.genesis_time + (slot.0 * SECONDS_PER_SLOT)) * 1000;
 
-    crate::handlers::on_tick(store, slot_time, true);
+    crate::handlers::on_tick(store, slot_time_millis, true);
     accept_new_attestations(store);
     store.head
 }
@@ -374,7 +464,7 @@ pub fn produce_block_with_signatures(
             Some(available_attestations),
             Some(&known_block_roots),
             Some(&store.gossip_signatures),
-            Some(&store.aggregated_payloads),
+            Some(&store.latest_known_aggregated_payloads),
         )?;
 
     // Compute block root using the header hash (canonical block root)
