@@ -2,3 +2,8 @@ lean_client/target/*
 lean_client/tests/mainnet
 lean_client/bin
 target/*
+*.local*
+
+.DS_Store
+.vscode
+.idea
