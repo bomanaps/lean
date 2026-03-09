@@ -1,0 +1,21 @@
+{
+    "tests/consensus/devnet/ssz/test_consensus_containers.py::test_block_signatures_empty[fork_Devnet][fork_devnet-ssz]": {
+        "network": "Devnet",
+        "leanEnv": "prod",
+        "typeName": "BlockSignatures",
+        "value": {
+            "attestationSignatures": {
+                "data": []
+            },
+            "proposerSignature": "0x24000000000000000000000000000000000000000000000000000000000000002800000004000000"
+        },
+        "serialized": "0x080000000800000024000000000000000000000000000000000000000000000000000000000000002800000004000000",
+        "_info": {
+            "hash": "0xc10a05fb7e3c469f924bc3be4130a5926d28d399e20fa0b20e9ff01f7a3e2285",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/devnet/ssz/test_consensus_containers.py::test_block_signatures_empty[fork_Devnet]",
+            "description": "SSZ roundtrip for BlockSignatures with no attestation signatures.",
+            "fixtureFormat": "ssz"
+        }
+    }
+}

@@ -104,8 +104,8 @@
                                 "slot": 1
                             },
                             "target": {
-                                "root": "0x816e46be76da2517089c7cc8339e2738daadd2d4ef6c2d3f82b5b20cb9bbe252",
-                                "slot": 1
+                                "root": "0xa7e0a4699554aefbc06aaf7738da9b04e918748fc41fc567c7a1965fe606748b",
+                                "slot": 0
                             },
                             "source": {
                                 "root": "0xa7e0a4699554aefbc06aaf7738da9b04e918748fc41fc567c7a1965fe606748b",
@@ -145,12 +145,12 @@
                                 "slot": 2
                             },
                             "target": {
-                                "root": "0xc1b73d8ccd16158f95a87d7d42e1427d67d6ca37e203caa64638e2156b073ee0",
-                                "slot": 2
+                                "root": "0xa7e0a4699554aefbc06aaf7738da9b04e918748fc41fc567c7a1965fe606748b",
+                                "slot": 0
                             },
                             "source": {
-                                "root": "0x816e46be76da2517089c7cc8339e2738daadd2d4ef6c2d3f82b5b20cb9bbe252",
-                                "slot": 1
+                                "root": "0xa7e0a4699554aefbc06aaf7738da9b04e918748fc41fc567c7a1965fe606748b",
+                                "slot": 0
                             }
                         }
                     },
@@ -186,12 +186,12 @@
                                 "slot": 2
                             },
                             "target": {
-                                "root": "0xc1b73d8ccd16158f95a87d7d42e1427d67d6ca37e203caa64638e2156b073ee0",
-                                "slot": 2
+                                "root": "0xa7e0a4699554aefbc06aaf7738da9b04e918748fc41fc567c7a1965fe606748b",
+                                "slot": 0
                             },
                             "source": {
-                                "root": "0x816e46be76da2517089c7cc8339e2738daadd2d4ef6c2d3f82b5b20cb9bbe252",
-                                "slot": 1
+                                "root": "0xa7e0a4699554aefbc06aaf7738da9b04e918748fc41fc567c7a1965fe606748b",
+                                "slot": 0
                             }
                         }
                     },
@@ -227,12 +227,12 @@
                                 "slot": 3
                             },
                             "target": {
-                                "root": "0x6dc96b404211bea53ddcf4d11ae29a99cdb92ebba31d728bbc19a907c86412b3",
-                                "slot": 3
+                                "root": "0xa7e0a4699554aefbc06aaf7738da9b04e918748fc41fc567c7a1965fe606748b",
+                                "slot": 0
                             },
                             "source": {
-                                "root": "0xc1b73d8ccd16158f95a87d7d42e1427d67d6ca37e203caa64638e2156b073ee0",
-                                "slot": 2
+                                "root": "0xa7e0a4699554aefbc06aaf7738da9b04e918748fc41fc567c7a1965fe606748b",
+                                "slot": 0
                             }
                         }
                     },
@@ -268,12 +268,12 @@
                                 "slot": 3
                             },
                             "target": {
-                                "root": "0x6dc96b404211bea53ddcf4d11ae29a99cdb92ebba31d728bbc19a907c86412b3",
-                                "slot": 3
+                                "root": "0xa7e0a4699554aefbc06aaf7738da9b04e918748fc41fc567c7a1965fe606748b",
+                                "slot": 0
                             },
                             "source": {
-                                "root": "0xc1b73d8ccd16158f95a87d7d42e1427d67d6ca37e203caa64638e2156b073ee0",
-                                "slot": 2
+                                "root": "0xa7e0a4699554aefbc06aaf7738da9b04e918748fc41fc567c7a1965fe606748b",
+                                "slot": 0
                             }
                         }
                     },
@@ -309,12 +309,12 @@
                                 "slot": 4
                             },
                             "target": {
-                                "root": "0x4025b184f719578ed0a8e11e7584cd04b7f517f9ff72e97a62d44bc1090a7f1f",
-                                "slot": 4
+                                "root": "0x816e46be76da2517089c7cc8339e2738daadd2d4ef6c2d3f82b5b20cb9bbe252",
+                                "slot": 1
                             },
                             "source": {
-                                "root": "0x6dc96b404211bea53ddcf4d11ae29a99cdb92ebba31d728bbc19a907c86412b3",
-                                "slot": 3
+                                "root": "0xa7e0a4699554aefbc06aaf7738da9b04e918748fc41fc567c7a1965fe606748b",
+                                "slot": 0
                             }
                         }
                     },
@@ -350,12 +350,12 @@
                                 "slot": 4
                             },
                             "target": {
-                                "root": "0x4025b184f719578ed0a8e11e7584cd04b7f517f9ff72e97a62d44bc1090a7f1f",
-                                "slot": 4
+                                "root": "0x816e46be76da2517089c7cc8339e2738daadd2d4ef6c2d3f82b5b20cb9bbe252",
+                                "slot": 1
                             },
                             "source": {
-                                "root": "0x6dc96b404211bea53ddcf4d11ae29a99cdb92ebba31d728bbc19a907c86412b3",
-                                "slot": 3
+                                "root": "0xa7e0a4699554aefbc06aaf7738da9b04e918748fc41fc567c7a1965fe606748b",
+                                "slot": 0
                             }
                         }
                     },
@@ -391,12 +391,12 @@
                                 "slot": 5
                             },
                             "target": {
-                                "root": "0x67dafaeeb64b2323fa08e3019ea7c341d99d554e77320667d366a105dff9428f",
-                                "slot": 5
+                                "root": "0xc1b73d8ccd16158f95a87d7d42e1427d67d6ca37e203caa64638e2156b073ee0",
+                                "slot": 2
                             },
                             "source": {
-                                "root": "0x4025b184f719578ed0a8e11e7584cd04b7f517f9ff72e97a62d44bc1090a7f1f",
-                                "slot": 4
+                                "root": "0xa7e0a4699554aefbc06aaf7738da9b04e918748fc41fc567c7a1965fe606748b",
+                                "slot": 0
                             }
                         }
                     },
@@ -406,10 +406,10 @@
         ],
         "maxSlot": 5,
         "_info": {
-            "hash": "0x6eb660974d0dd40d27c2e4a5eaeb5d72114f7a4fd70572ea1876f4a3ff08ec44",
+            "hash": "0xb30b4dc47b4eb5adbe3b27054a262cfdcc5f3153ca18d2a2c6cfe9b5fa7f898a",
             "comment": "`leanSpec` generated test",
             "testId": "tests/consensus/devnet/fc/test_fork_choice_reorgs.py::test_back_and_forth_reorg_oscillation[fork_Devnet]",
-            "description": "Multiple reorgs as two forks alternately extend (pathological case).\n\nScenario\n--------\nTwo forks alternate extensions, causing head to oscillate back and forth.\nThis is a pathological case that shouldn't happen in healthy networks but\ntests fork choice correctness under extreme conditions.\n\nOscillation Pattern:\n    Slot 2: Fork A leads (1 vs 0) \u2190 head\n    Slot 2: Fork B created (1 vs 1) \u2192 tie, A maintains\n    Slot 3: Fork B extends (2 vs 1) \u2190 head switches to B (REORG #1)\n    Slot 3: Fork A extends (2 vs 2) \u2192 tie, B maintains\n    Slot 4: Fork A extends (3 vs 2) \u2190 head switches to A (REORG #2)\n    Slot 4: Fork B extends (3 vs 3) \u2192 tie, A maintains\n    Slot 5: Fork B extends (4 vs 3) \u2190 head switches to B (REORG #3)\n\nExpected Behavior\n-----------------\n1. Head oscillates: A \u2192 B \u2192 A \u2192 B\n2. Each extension triggers reorg to that fork\n3. All reorgs are 1-2 blocks deep\n4. Fork choice remains consistent and correct throughout\n\nReorg Count: 3 reorgs in 4 slots (very high rate)\n\nWhy This Matters\n----------------\nWhile extremely rare, this scenario can theoretically occur:\n- Two validator groups in different network segments\n- Each group primarily seeing their own fork first\n- Alternating proposer selection between groups\n- High network latency preventing convergence\n\nProperties Tested:\n- Fork choice handles rapid reorg sequences\n- No state corruption despite frequent head changes\n- Tie-breaking remains consistent\n- Weight calculation correct after multiple reorgs\n- System eventually stabilizes to heaviest fork\n\nThis stress test verifies robustness under worst-case fork competition,\nensuring the protocol remains safe even in pathological network conditions.\nIn practice, networks self-heal from such scenarios through attestation\nconvergence.",
+            "description": "Multiple reorgs as two forks alternately extend (pathological case).\n\n    Scenario\n    --------\n    Two forks alternate extensions, causing head to oscillate back and forth.\n    This is a pathological case that shouldn't happen in healthy networks but\n    tests fork choice correctness under extreme conditions.\n\n    Oscillation Pattern:\n        Slot 2: Fork A leads (1 vs 0) \u2190 head\n        Slot 2: Fork B created (1 vs 1) \u2192 tie, A maintains\n        Slot 3: Fork B extends (2 vs 1) \u2190 head switches to B (REORG #1)\n        Slot 3: Fork A extends (2 vs 2) \u2192 tie, B maintains\n        Slot 4: Fork A extends (3 vs 2) \u2190 head switches to A (REORG #2)\n        Slot 4: Fork B extends (3 vs 3) \u2192 tie, A maintains\n        Slot 5: Fork B extends (4 vs 3) \u2190 head switches to B (REORG #3)\n\n    Expected Behavior\n    -----------------\n    1. Head oscillates: A \u2192 B \u2192 A \u2192 B\n    2. Each extension triggers reorg to that fork\n    3. All reorgs are 1-2 blocks deep\n    4. Fork choice remains consistent and correct throughout\n\n    Reorg Count: 3 reorgs in 4 slots (very high rate)\n\n    Why This Matters\n    ----------------\n    While extremely rare, this scenario can theoretically occur:\n    - Two validator groups in different network segments\n    - Each group primarily seeing their own fork first\n    - Alternating proposer selection between groups\n    - High network latency preventing convergence\n\n    Properties Tested:\n    - Fork choice handles rapid reorg sequences\n    - No state corruption despite frequent head changes\n    - Tie-breaking remains consistent\n    - Weight calculation correct after multiple reorgs\n    - System eventually stabilizes to heaviest fork\n\n    This stress test verifies robustness under worst-case fork competition,\n    ensuring the protocol remains safe even in pathological network conditions.\n    In practice, networks self-heal from such scenarios through attestation\n    convergence.",
             "fixtureFormat": "fork_choice_test"
         }
     }

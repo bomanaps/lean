@@ -1,8 +1,8 @@
 ### Variables
 
-# Commit of lean specification. Allows to specify which spec version to use, 
-#   when generating test vectors. Currently set to devnet-2 spec version.
-LEAN_SPEC_COMMIT ?= 4edcf7bc9271e6a70ded8aff17710d68beac4266
+# Commit of lean specification. Allows to specify which spec version to use,
+#   when generating test vectors. Currently set to devnet-3 spec version.
+LEAN_SPEC_COMMIT ?= 8b7636bb8a95fe4bec414cc4c24e74079e6256b6
 # Docker image name. Used for both release (with publish) and local builds.
 DOCKER_REPO ?= sifrai/lean
 # Image tag.
@@ -16,7 +16,7 @@ GIT_BRANCH := $(shell git rev-parse --abbrev-ref HEAD)
 # Build date. Used for docker image metadata.
 BUILD_DATE := $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 # Currently supported devnet. Used to publish devnet tag, along with `latest`.
-CURRENT_DEVNET := devnet-2
+CURRENT_DEVNET := devnet-3
 
 # Temporary variable, which constructs `--tag` arguments, to be passed into 
 #   docker build command. It is used as intermediatery step, not as config 
@@ -56,18 +56,6 @@ generate-test-vectors:
 	cd spec && uv run fill --clean --fork=devnet --scheme prod
 	rm -rf ./test_vectors && mkdir -p ./test_vectors
 	cp -r ./spec/fixtures/consensus/* ./test_vectors/
-
-.PHONY: generate-test-vectors
-generate-test-vectors:
-	@rm -rf spec && \
-		mkdir -p spec && \
-		cd spec && \
-		git init && \
-		git remote add origin https://github.com/leanEthereum/leanSpec.git && \
-		git fetch --depth 1 origin $(LEAN_SPEC_COMMIT) && \
-		git switch --detach FETCH_HEAD
-	cd spec && uv run fill --clean --fork=devnet
-	cp -r ./spec/fixtures/consensus/* ./tests/test_vectors/
 
 .PHONY: build
 build:
