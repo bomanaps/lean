@@ -1,8 +1,8 @@
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use containers::{
-    Attestation, AttestationData, Block, BlockBody, BlockSignatures, BlockWithAttestation,
-    Checkpoint, Config, SignedBlockWithAttestation, Slot, State, Validator,
+    Attestation, AttestationData, Block, BlockBody, BlockHeader, BlockSignatures,
+    BlockWithAttestation, Checkpoint, Config, SignedBlockWithAttestation, Slot, State, Status, Validator,
 };
 use ethereum_types::H256;
 use features::Feature;
@@ -16,8 +16,10 @@ use metrics::{METRICS, Metrics};
 use networking::gossipsub::config::GossipsubConfig;
 use networking::gossipsub::topic::{compute_subnet_id, get_subscription_topics};
 use networking::network::{NetworkService, NetworkServiceConfig};
-use networking::types::{ChainMessage, OutboundP2pRequest};
-use ssz::{PersistentList, SszHash};
+use networking::types::{ChainMessage, OutboundP2pRequest, SignedBlockProvider, StatusProvider};
+use parking_lot::RwLock;
+use std::collections::HashMap;
+use ssz::{PersistentList, SszHash, SszReadDefault as _};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -38,6 +40,92 @@ fn load_node_key(path: &str) -> Result<Keypair, Box<dyn std::error::Error>> {
     let secret = libp2p_identity::secp256k1::SecretKey::try_from_bytes(bytes)?;
     let keypair = libp2p_identity::secp256k1::Keypair::from(secret);
     Ok(Keypair::from(keypair))
+}
+
+async fn download_checkpoint_state(url: &str) -> Result<State> {
+    info!("Downloading checkpoint state from: {}", url);
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(url)
+        .header("Accept", "application/octet-stream")
+        .send()
+        .await
+        .context("Failed to send HTTP request for checkpoint state")?;
+
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "Checkpoint sync failed: HTTP {} from {}",
+            response.status(),
+            url
+        );
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .context("Failed to read checkpoint state response body")?;
+
+    let state = State::from_ssz_default(&bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to decode SSZ checkpoint state: {:?}", e))?;
+
+    info!(
+        "Downloaded checkpoint state at slot {} ({} bytes)",
+        state.latest_block_header.slot.0,
+        bytes.len()
+    );
+
+    Ok(state)
+}
+
+fn verify_checkpoint_state(
+    state: &State,
+    genesis_state: &State,
+) -> Result<()> {
+    //  Verify genesis time matches
+    anyhow::ensure!(
+        state.config.genesis_time == genesis_state.config.genesis_time,
+        "Genesis time mismatch: checkpoint has {}, expected {}. Wrong network?",
+        state.config.genesis_time,
+        genesis_state.config.genesis_time
+    );
+
+    //  Verify validator count matches
+    let state_validator_count = state.validators.len_u64();
+    let expected_validator_count = genesis_state.validators.len_u64();
+
+    anyhow::ensure!(
+        state_validator_count == expected_validator_count,
+        "Validator count mismatch: checkpoint has {}, genesis expects {}. Wrong network?",
+        state_validator_count,
+        expected_validator_count
+    );
+
+    //  Verify state has validators
+    anyhow::ensure!(
+        state_validator_count > 0,
+        "Invalid checkpoint state: no validators in registry"
+    );
+
+    //  Verify each validator pubkey matches genesis
+    for i in 0..state_validator_count {
+        let state_pubkey = &state.validators.get(i).expect("validator exists").pubkey;
+        let genesis_pubkey = &genesis_state.validators.get(i).expect("validator exists").pubkey;
+
+        anyhow::ensure!(
+            state_pubkey == genesis_pubkey,
+            "Validator pubkey mismatch at index {}: checkpoint has different validator set. Wrong network?",
+            i
+        );
+    }
+
+    info!(
+        "Checkpoint state verified: genesis_time={}, validators={}",
+        state.config.genesis_time,
+        state_validator_count
+    );
+
+    Ok(())
 }
 
 fn print_chain_status(store: &Store, connected_peers: u64) {
@@ -146,6 +234,9 @@ struct Args {
     /// When set, uses this value instead of the hardcoded default
     #[arg(long = "attestation-committee-count")]
     attestation_committee_count: Option<u64>,
+
+    #[arg(long)]
+    checkpoint_sync_url: Option<String>,
 }
 
 #[tokio::main]
@@ -260,10 +351,106 @@ async fn main() -> Result<()> {
     };
 
     let config = Config { genesis_time };
-    let store = get_forkchoice_store(genesis_state.clone(), genesis_signed_block, config);
 
-    let num_validators = genesis_state.validators.len_u64();
-    info!(num_validators = num_validators, "Genesis state loaded");
+    let (anchor_state, anchor_block) = if let Some(ref url) = args.checkpoint_sync_url {
+        info!("Checkpoint sync enabled, downloading from: {}", url);
+
+        match download_checkpoint_state(url).await {
+            Ok(checkpoint_state) => {
+                if let Err(e) = verify_checkpoint_state(&checkpoint_state, &genesis_state) {
+                    error!("Checkpoint verification failed: {}. Refusing to start.", e);
+                    return Err(e);
+                }
+
+                // Compute state root for the checkpoint state (like zeam's genStateBlockHeader)
+                let checkpoint_state_root = checkpoint_state.hash_tree_root();
+
+                // Reconstruct block header from state's latest_block_header with correct state_root
+                // The state's latest_block_header already contains the correct body_root from the original block
+                let checkpoint_block_header = BlockHeader {
+                    slot: checkpoint_state.latest_block_header.slot,
+                    proposer_index: checkpoint_state.latest_block_header.proposer_index,
+                    parent_root: checkpoint_state.latest_block_header.parent_root,
+                    state_root: checkpoint_state_root,
+                    body_root: checkpoint_state.latest_block_header.body_root,
+                };
+
+                // Compute block root from the BlockHeader (NOT from a synthetic Block with empty body)
+                let checkpoint_block_root = checkpoint_block_header.hash_tree_root();
+
+                // Create a Block structure for the SignedBlockWithAttestation
+                // Note: body is synthetic but block_root is computed correctly from header above
+                let checkpoint_block = Block {
+                    slot: checkpoint_block_header.slot,
+                    proposer_index: checkpoint_block_header.proposer_index,
+                    parent_root: checkpoint_block_header.parent_root,
+                    state_root: checkpoint_state_root,
+                    body: BlockBody {
+                        attestations: Default::default(),
+                    },
+                };
+
+                let checkpoint_proposer_attestation = Attestation {
+                    validator_id: checkpoint_state.latest_block_header.proposer_index,
+                    data: AttestationData {
+                        slot: checkpoint_state.slot,
+                        head: Checkpoint {
+                            root: checkpoint_block_root,
+                            slot: checkpoint_state.slot,
+                        },
+                        target: checkpoint_state.latest_finalized.clone(),
+                        source: checkpoint_state.latest_justified.clone(),
+                    },
+                };
+
+                let checkpoint_signed_block = SignedBlockWithAttestation {
+                    message: BlockWithAttestation {
+                        block: checkpoint_block,
+                        proposer_attestation: checkpoint_proposer_attestation,
+                    },
+                    signature: BlockSignatures {
+                        attestation_signatures: PersistentList::default(),
+                        proposer_signature: Signature::default(),
+                    },
+                };
+
+                info!(
+                    slot = checkpoint_state.slot.0,
+                    finalized = checkpoint_state.latest_finalized.slot.0,
+                    justified = checkpoint_state.latest_justified.slot.0,
+                    block_root = %format!("0x{:x}", checkpoint_block_root),
+                    state_root = %format!("0x{:x}", checkpoint_state_root),
+                    "Checkpoint sync successful"
+                );
+
+                (checkpoint_state, checkpoint_signed_block)
+            }
+            Err(e) => {
+                warn!("Checkpoint sync failed: {}. Falling back to genesis.", e);
+                (genesis_state.clone(), genesis_signed_block)
+            }
+        }
+    } else {
+        (genesis_state.clone(), genesis_signed_block)
+    };
+
+    // Clone anchor block for seeding the shared block provider later
+    let anchor_block_for_provider = anchor_block.clone();
+    // Compute block root from BlockHeader (NOT from Block with potentially empty body)
+    // Must match the computation in get_forkchoice_store
+    let anchor_block_header = BlockHeader {
+        slot: anchor_state.latest_block_header.slot,
+        proposer_index: anchor_state.latest_block_header.proposer_index,
+        parent_root: anchor_state.latest_block_header.parent_root,
+        state_root: anchor_state.hash_tree_root(),
+        body_root: anchor_state.latest_block_header.body_root,
+    };
+    let anchor_block_root = anchor_block_header.hash_tree_root();
+
+    let store = get_forkchoice_store(anchor_state.clone(), anchor_block, config);
+
+    let num_validators = anchor_state.validators.len_u64();
+    info!(num_validators = num_validators, "Anchor state loaded");
 
     let validator_service = if let (Some(node_id), Some(registry_path)) =
         (&args.node_id, &args.validator_registry_path)
@@ -358,6 +545,26 @@ async fn main() -> Result<()> {
     let peer_count = Arc::new(AtomicU64::new(0));
     let peer_count_for_status = peer_count.clone();
 
+    // Create shared block provider for BlocksByRoot requests (checkpoint sync backfill)
+    // Seed with anchor block so we can serve it to peers doing checkpoint sync
+    let mut initial_blocks = HashMap::new();
+    initial_blocks.insert(anchor_block_root, anchor_block_for_provider.clone());
+
+    let signed_block_provider: SignedBlockProvider = Arc::new(RwLock::new(initial_blocks));
+    let signed_block_provider_for_network = signed_block_provider.clone();
+
+    // Create shared status provider for Status req/resp protocol
+    // Initialize with current store state so we send accurate status to peers
+    let initial_status = Status::new(
+        store.latest_finalized.clone(),
+        Checkpoint {
+            root: store.head,
+            slot: store.blocks.get(&store.head).map(|b| b.slot).unwrap_or(Slot(0)),
+        },
+    );
+    let status_provider: StatusProvider = Arc::new(RwLock::new(initial_status));
+    let status_provider_for_network = status_provider.clone();
+
     // LOAD NODE KEY
     let mut network_service = if let Some(key_path) = &args.node_key {
         match load_node_key(key_path) {
@@ -370,6 +577,8 @@ async fn main() -> Result<()> {
                     chain_message_sender.clone(),
                     peer_count,
                     keypair,
+                    signed_block_provider_for_network,
+                    status_provider_for_network,
                 )
                 .await
                 .expect("Failed to create network service with custom key")
@@ -381,6 +590,8 @@ async fn main() -> Result<()> {
                     outbound_p2p_receiver,
                     chain_message_sender.clone(),
                     peer_count,
+                    signed_block_provider_for_network,
+                    status_provider_for_network,
                 )
                 .await
                 .expect("Failed to create network service")
@@ -392,6 +603,8 @@ async fn main() -> Result<()> {
             outbound_p2p_receiver,
             chain_message_sender.clone(),
             peer_count,
+            signed_block_provider_for_network,
+            status_provider_for_network,
         )
         .await
         .expect("Failed to create network service")
@@ -571,6 +784,7 @@ async fn main() -> Result<()> {
                             info!(
                                 slot = block_slot.0,
                                 block_root = %format!("0x{:x}", block_root),
+                                parent_root = %format!("0x{:x}", parent_root),
                                 "Processing block built by Validator {}",
                                 proposer
                             );
@@ -586,6 +800,19 @@ async fn main() -> Result<()> {
                                 Ok(()) => {
                                     info!("Block processed successfully");
 
+                                    // Sync to shared block provider for BlocksByRoot requests
+                                    signed_block_provider.write().insert(block_root, signed_block_with_attestation.clone());
+
+                                    // Update status provider with current chain state
+                                    {
+                                        let mut status = status_provider.write();
+                                        status.finalized = store.latest_finalized.clone();
+                                        status.head = Checkpoint {
+                                            root: store.head,
+                                            slot: store.blocks.get(&store.head).map(|b| b.slot).unwrap_or(Slot(0)),
+                                        };
+                                    }
+
                                     if should_gossip {
                                         if let Err(e) = outbound_p2p_sender.send(
                                             OutboundP2pRequest::GossipBlockWithAttestation(signed_block_with_attestation)
@@ -597,7 +824,12 @@ async fn main() -> Result<()> {
                                     }
                                 }
                                 Err(e) if format!("{e:?}").starts_with("Err: (Fork-choice::Handlers::OnBlock) Block queued") => {
-                                    debug!("Block queued, requesting missing parent: {}", e);
+                                    warn!(
+                                        child_slot = block_slot.0,
+                                        child_block_root = %format!("0x{:x}", block_root),
+                                        missing_parent_root = %format!("0x{:x}", parent_root),
+                                        "Block queued - parent not found, will request via BlocksByRoot"
+                                    );
 
                                     // Request missing parent block from peers
                                     if !parent_root.is_zero() {
@@ -605,8 +837,6 @@ async fn main() -> Result<()> {
                                             OutboundP2pRequest::RequestBlocksByRoot(vec![parent_root])
                                         ) {
                                             warn!("Failed to request missing parent block: {}", req_err);
-                                        } else {
-                                            debug!("Requested missing parent block: 0x{:x}", parent_root);
                                         }
                                     }
                                 }
