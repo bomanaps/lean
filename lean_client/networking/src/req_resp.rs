@@ -2,7 +2,6 @@ use std::io;
 use std::io::{Read, Write};
 
 use async_trait::async_trait;
-use tracing::warn;
 use containers::{SignedBlockWithAttestation, Status};
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use libp2p::request_response::{
@@ -11,6 +10,7 @@ use libp2p::request_response::{
 use snap::read::FrameDecoder;
 use snap::write::FrameEncoder;
 use ssz::{H256, PersistentList, Ssz, SszReadDefault as _, SszWrite as _};
+use tracing::warn;
 use typenum::U1024;
 
 pub const MAX_REQUEST_BLOCKS: usize = 1024;
@@ -124,7 +124,9 @@ impl LeanCodec {
                         io::Error::new(io::ErrorKind::Other, format!("Failed to add root: {e:?}"))
                     })?;
                 }
-                let request = BlocksByRootRequest { roots: request_roots };
+                let request = BlocksByRootRequest {
+                    roots: request_roots,
+                };
                 request.to_ssz().map_err(|e| {
                     io::Error::new(io::ErrorKind::Other, format!("SSZ encode failed: {e}"))
                 })?
@@ -134,7 +136,11 @@ impl LeanCodec {
         if ssz_bytes.len() > MAX_PAYLOAD_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Payload too large: {} > {}", ssz_bytes.len(), MAX_PAYLOAD_SIZE),
+                format!(
+                    "Payload too large: {} > {}",
+                    ssz_bytes.len(),
+                    MAX_PAYLOAD_SIZE
+                ),
             ));
         }
 
@@ -158,7 +164,10 @@ impl LeanCodec {
         if declared_len as usize > MAX_PAYLOAD_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Declared length too large: {} > {}", declared_len, MAX_PAYLOAD_SIZE),
+                format!(
+                    "Declared length too large: {} > {}",
+                    declared_len, MAX_PAYLOAD_SIZE
+                ),
             ));
         }
 
@@ -270,7 +279,10 @@ impl LeanCodec {
         if declared_len as usize > MAX_PAYLOAD_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Declared length too large: {} > {}", declared_len, MAX_PAYLOAD_SIZE),
+                format!(
+                    "Declared length too large: {} > {}",
+                    declared_len, MAX_PAYLOAD_SIZE
+                ),
             ));
         }
 
@@ -326,10 +338,7 @@ impl LeanCodec {
 
             if code != RESPONSE_SUCCESS {
                 // Non-success codes indicate block not found or error
-                warn!(
-                    response_code = code,
-                    "BlocksByRoot non-success response"
-                );
+                warn!(response_code = code, "BlocksByRoot non-success response");
                 return Ok(LeanResponse::BlocksByRoot(Vec::new()));
             }
 

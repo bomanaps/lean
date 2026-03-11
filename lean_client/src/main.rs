@@ -2,7 +2,8 @@ use anyhow::{Context as _, Result};
 use clap::Parser;
 use containers::{
     Attestation, AttestationData, Block, BlockBody, BlockHeader, BlockSignatures,
-    BlockWithAttestation, Checkpoint, Config, SignedBlockWithAttestation, Slot, State, Status, Validator,
+    BlockWithAttestation, Checkpoint, Config, SignedBlockWithAttestation, Slot, State, Status,
+    Validator,
 };
 use ethereum_types::H256;
 use features::Feature;
@@ -18,8 +19,8 @@ use networking::gossipsub::topic::{compute_subnet_id, get_subscription_topics};
 use networking::network::{NetworkService, NetworkServiceConfig};
 use networking::types::{ChainMessage, OutboundP2pRequest, SignedBlockProvider, StatusProvider};
 use parking_lot::RwLock;
-use std::collections::HashMap;
 use ssz::{PersistentList, SszHash, SszReadDefault as _};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -78,10 +79,7 @@ async fn download_checkpoint_state(url: &str) -> Result<State> {
     Ok(state)
 }
 
-fn verify_checkpoint_state(
-    state: &State,
-    genesis_state: &State,
-) -> Result<()> {
+fn verify_checkpoint_state(state: &State, genesis_state: &State) -> Result<()> {
     //  Verify genesis time matches
     anyhow::ensure!(
         state.config.genesis_time == genesis_state.config.genesis_time,
@@ -110,7 +108,11 @@ fn verify_checkpoint_state(
     //  Verify each validator pubkey matches genesis
     for i in 0..state_validator_count {
         let state_pubkey = &state.validators.get(i).expect("validator exists").pubkey;
-        let genesis_pubkey = &genesis_state.validators.get(i).expect("validator exists").pubkey;
+        let genesis_pubkey = &genesis_state
+            .validators
+            .get(i)
+            .expect("validator exists")
+            .pubkey;
 
         anyhow::ensure!(
             state_pubkey == genesis_pubkey,
@@ -121,8 +123,7 @@ fn verify_checkpoint_state(
 
     info!(
         "Checkpoint state verified: genesis_time={}, validators={}",
-        state.config.genesis_time,
-        state_validator_count
+        state.config.genesis_time, state_validator_count
     );
 
     Ok(())
@@ -559,7 +560,11 @@ async fn main() -> Result<()> {
         store.latest_finalized.clone(),
         Checkpoint {
             root: store.head,
-            slot: store.blocks.get(&store.head).map(|b| b.slot).unwrap_or(Slot(0)),
+            slot: store
+                .blocks
+                .get(&store.head)
+                .map(|b| b.slot)
+                .unwrap_or(Slot(0)),
         },
     );
     let status_provider: StatusProvider = Arc::new(RwLock::new(initial_status));
