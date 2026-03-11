@@ -448,7 +448,11 @@ async fn main() -> Result<()> {
     };
     let anchor_block_root = anchor_block_header.hash_tree_root();
 
-    let store = get_forkchoice_store(anchor_state.clone(), anchor_block, config);
+    let store = Arc::new(RwLock::new(get_forkchoice_store(
+        anchor_state.clone(),
+        anchor_block,
+        config,
+    )));
 
     let num_validators = anchor_state.validators.len_u64();
     info!(num_validators = num_validators, "Anchor state loaded");
@@ -554,19 +558,16 @@ async fn main() -> Result<()> {
     let signed_block_provider: SignedBlockProvider = Arc::new(RwLock::new(initial_blocks));
     let signed_block_provider_for_network = signed_block_provider.clone();
 
-    // Create shared status provider for Status req/resp protocol
-    // Initialize with current store state so we send accurate status to peers
-    let initial_status = Status::new(
-        store.latest_finalized.clone(),
-        Checkpoint {
-            root: store.head,
-            slot: store
-                .blocks
-                .get(&store.head)
-                .map(|b| b.slot)
-                .unwrap_or(Slot(0)),
-        },
-    );
+    let initial_status = {
+        let s = store.read();
+        Status::new(
+            s.latest_finalized.clone(),
+            Checkpoint {
+                root: s.head,
+                slot: s.blocks.get(&s.head).map(|b| b.slot).unwrap_or(Slot(0)),
+            },
+        )
+    };
     let status_provider: StatusProvider = Arc::new(RwLock::new(initial_status));
     let status_provider_for_network = status_provider.clone();
 
@@ -623,16 +624,16 @@ async fn main() -> Result<()> {
 
     let chain_outbound_sender = outbound_p2p_sender.clone();
 
+    let http_store = store.clone();
     task::spawn(async move {
-        if args.http_config.metrics_enabled() {
-            if let Err(err) = http_api::run_server(args.http_config, genesis_time).await {
-                error!("HTTP Server failed with error: {err:?}");
-            }
+        if let Err(err) =
+            http_api::run_server(args.http_config, genesis_time, Some(http_store)).await
+        {
+            error!("HTTP Server failed with error: {err:?}");
         }
     });
 
     let chain_handle = task::spawn(async move {
-        // Devnet-3: 5 intervals per slot at 800ms each (4 second slots)
         let mut tick_interval = interval(Duration::from_millis(800));
         let mut last_logged_slot = 0u64;
         let mut last_status_slot: Option<u64> = None;
@@ -640,24 +641,24 @@ async fn main() -> Result<()> {
         let mut last_attestation_slot: Option<u64> = None;
 
         let peer_count = peer_count_for_status;
-        let mut store = store;
 
         loop {
             tokio::select! {
                 _ = tick_interval.tick() => {
-                    // Devnet-3: on_tick expects time in milliseconds
                     let now_millis = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap()
                         .as_millis() as u64;
-                    on_tick(&mut store, now_millis, false);
+                    on_tick(&mut *store.write(), now_millis, false);
 
-                    let current_slot = store.time / INTERVALS_PER_SLOT;
-                    let current_interval = store.time % INTERVALS_PER_SLOT;
+                    let (current_slot, current_interval) = {
+                        let s = store.read();
+                        (s.time / INTERVALS_PER_SLOT, s.time % INTERVALS_PER_SLOT)
+                    };
 
                     if last_status_slot != Some(current_slot) {
                         let peers = peer_count.load(Ordering::Relaxed);
-                        print_chain_status(&store, peers);
+                        print_chain_status(&*store.read(), peers);
                         last_status_slot = Some(current_slot);
                     }
 
@@ -672,7 +673,7 @@ async fn main() -> Result<()> {
                                             "Our turn to propose block!"
                                         );
 
-                                        match vs.build_block_proposal(&mut store, Slot(current_slot), proposer_idx) {
+                                        match vs.build_block_proposal(&mut *store.write(), Slot(current_slot), proposer_idx) {
                                             Ok(signed_block) => {
                                                 let block_root = signed_block.message.block.hash_tree_root();
                                                 info!(
@@ -681,14 +682,13 @@ async fn main() -> Result<()> {
                                                     "Built block, processing and gossiping"
                                                 );
 
-                                                // Synchronize store time with wall clock before processing own block
                                                 let now_millis = SystemTime::now()
                                                     .duration_since(UNIX_EPOCH)
                                                     .unwrap()
                                                     .as_millis() as u64;
-                                                on_tick(&mut store, now_millis, false);
+                                                on_tick(&mut *store.write(), now_millis, false);
 
-                                                match on_block(&mut store, signed_block.clone()) {
+                                                match on_block(&mut *store.write(), signed_block.clone()) {
                                                     Ok(()) => {
                                                         info!("Own block processed successfully");
                                                         // GOSSIP TO NETWORK
@@ -711,7 +711,7 @@ async fn main() -> Result<()> {
                         1 => {
                             if let Some(ref vs) = validator_service {
                                 if last_attestation_slot != Some(current_slot) {
-                                    let attestations = vs.create_attestations(&store, Slot(current_slot));
+                                    let attestations = vs.create_attestations(&*store.read(), Slot(current_slot));
                                     for signed_att in attestations {
                                         let validator_id = signed_att.validator_id;
                                         let subnet_id = compute_subnet_id(validator_id);
@@ -722,7 +722,7 @@ async fn main() -> Result<()> {
                                             "Broadcasting attestation to subnet"
                                         );
 
-                                        match on_attestation(&mut store, signed_att.clone(), false) {
+                                        match on_attestation(&mut *store.write(), signed_att.clone(), false) {
                                             Ok(()) => {
                                                 if let Err(e) = chain_outbound_sender.send(
                                                     OutboundP2pRequest::GossipAttestation(signed_att, subnet_id)
@@ -738,9 +738,8 @@ async fn main() -> Result<()> {
                             }
                         }
                         2 => {
-                            // Interval 2: Aggregation phase (devnet-3)
                             if let Some(ref vs) = validator_service {
-                                if let Some(aggregations) = vs.maybe_aggregate(&store, Slot(current_slot)) {
+                                if let Some(aggregations) = vs.maybe_aggregate(&*store.read(), Slot(current_slot)) {
                                     for aggregation in aggregations {
                                         if let Err(e) = chain_outbound_sender.send(
                                             OutboundP2pRequest::GossipAggregation(aggregation)
@@ -748,19 +747,17 @@ async fn main() -> Result<()> {
                                             warn!("Failed to gossip aggregation: {}", e);
                                         }
                                     }
-                                    info!(slot = current_slot, tick = store.time, "Aggregation phase - broadcast aggregated attestations");
+                                    info!(slot = current_slot, tick = store.read().time, "Aggregation phase - broadcast aggregated attestations");
                                 } else {
-                                    info!(slot = current_slot, tick = store.time, "Aggregation phase - no aggregation duty or no attestations");
+                                    info!(slot = current_slot, tick = store.read().time, "Aggregation phase - no aggregation duty or no attestations");
                                 }
                             }
                         }
                         3 => {
-                            // Interval 3: Safe target update (devnet-3)
-                            info!(slot = current_slot, tick = store.time, "Computing safe target");
+                            info!(slot = current_slot, tick = store.read().time, "Computing safe target");
                         }
                         4 => {
-                            // Interval 4: Accept attestations (devnet-3)
-                            info!(slot = current_slot, tick = store.time, "Accepting new attestations");
+                            info!(slot = current_slot, tick = store.read().time, "Accepting new attestations");
                         }
                         _ => {}
                     }
@@ -768,7 +765,7 @@ async fn main() -> Result<()> {
                     if current_slot != last_logged_slot && current_slot % 10 == 0 {
                         debug!("(Okay)Store time updated : slot {}, pending blocks: {}",
                             current_slot,
-                            store.blocks_queue.values().map(|v| v.len()).sum::<usize>()
+                            store.read().blocks_queue.values().map(|v| v.len()).sum::<usize>()
                         );
                         last_logged_slot = current_slot;
                     }
@@ -794,27 +791,25 @@ async fn main() -> Result<()> {
                                 proposer
                             );
 
-                            // Synchronize store time with wall clock before processing block
                             let now_millis = SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
                                 .unwrap()
                                 .as_millis() as u64;
-                            on_tick(&mut store, now_millis, false);
+                            on_tick(&mut *store.write(), now_millis, false);
 
-                            match on_block(&mut store, signed_block_with_attestation.clone()) {
+                            match on_block(&mut *store.write(), signed_block_with_attestation.clone()) {
                                 Ok(()) => {
                                     info!("Block processed successfully");
 
-                                    // Sync to shared block provider for BlocksByRoot requests
                                     signed_block_provider.write().insert(block_root, signed_block_with_attestation.clone());
 
-                                    // Update status provider with current chain state
                                     {
+                                        let s = store.read();
                                         let mut status = status_provider.write();
-                                        status.finalized = store.latest_finalized.clone();
+                                        status.finalized = s.latest_finalized.clone();
                                         status.head = Checkpoint {
-                                            root: store.head,
-                                            slot: store.blocks.get(&store.head).map(|b| b.slot).unwrap_or(Slot(0)),
+                                            root: s.head,
+                                            slot: s.blocks.get(&s.head).map(|b| b.slot).unwrap_or(Slot(0)),
                                         };
                                     }
 
@@ -866,7 +861,7 @@ async fn main() -> Result<()> {
                                 validator_id
                             );
 
-                            match on_attestation(&mut store, signed_attestation.clone(), false) {
+                            match on_attestation(&mut *store.write(), signed_attestation.clone(), false) {
                                 Ok(()) => {
                                     if should_gossip {
                                         let subnet_id = compute_subnet_id(validator_id);
@@ -896,8 +891,7 @@ async fn main() -> Result<()> {
                                 .filter(|b| **b)
                                 .count();
 
-                            // Devnet-3: Process aggregated attestation for safe target computation
-                            match on_aggregated_attestation(&mut store, signed_aggregated_attestation.clone()) {
+                            match on_aggregated_attestation(&mut *store.write(), signed_aggregated_attestation.clone()) {
                                 Ok(_) => {
                                     info!(
                                         slot = agg_slot,
