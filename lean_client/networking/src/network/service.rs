@@ -39,9 +39,10 @@ use crate::{
     enr_ext::EnrExt,
     gossipsub::{self, config::GossipsubConfig, message::GossipsubMessage, topic::GossipsubKind},
     network::behaviour::{LeanNetworkBehaviour, LeanNetworkBehaviourEvent},
-    req_resp::{self, BLOCKS_BY_ROOT_PROTOCOL_V1, LeanRequest, ReqRespMessage, STATUS_PROTOCOL_V1},
+    req_resp::{self, LeanRequest, ReqRespMessage},
     types::{
         ChainMessage, ChainMessageSink, ConnectionState, OutboundP2pRequest, P2pRequestSource,
+        SignedBlockProvider, StatusProvider,
     },
 };
 
@@ -168,6 +169,10 @@ where
     peer_count: Arc<AtomicU64>,
     outbound_p2p_requests: R,
     chain_message_sink: S,
+    /// Shared block provider for serving BlocksByRoot requests
+    signed_block_provider: SignedBlockProvider,
+    /// Shared status provider for Status req/resp protocol
+    status_provider: StatusProvider,
 }
 
 impl<R, S> NetworkService<R, S>
@@ -179,12 +184,16 @@ where
         network_config: Arc<NetworkServiceConfig>,
         outbound_p2p_requests: R,
         chain_message_sink: S,
+        signed_block_provider: SignedBlockProvider,
+        status_provider: StatusProvider,
     ) -> Result<Self> {
         Self::new_with_peer_count(
             network_config,
             outbound_p2p_requests,
             chain_message_sink,
             Arc::new(AtomicU64::new(0)),
+            signed_block_provider,
+            status_provider,
         )
         .await
     }
@@ -194,6 +203,8 @@ where
         outbound_p2p_requests: R,
         chain_message_sink: S,
         peer_count: Arc<AtomicU64>,
+        signed_block_provider: SignedBlockProvider,
+        status_provider: StatusProvider,
     ) -> Result<Self> {
         let local_key = Keypair::generate_secp256k1();
         Self::new_with_keypair(
@@ -202,6 +213,8 @@ where
             chain_message_sink,
             peer_count,
             local_key,
+            signed_block_provider,
+            status_provider,
         )
         .await
     }
@@ -212,6 +225,8 @@ where
         chain_message_sink: S,
         peer_count: Arc<AtomicU64>,
         local_key: Keypair,
+        signed_block_provider: SignedBlockProvider,
+        status_provider: StatusProvider,
     ) -> Result<Self> {
         let behaviour = Self::build_behaviour(&local_key, &network_config)?;
 
@@ -262,6 +277,8 @@ where
             peer_count,
             outbound_p2p_requests,
             chain_message_sink,
+            signed_block_provider,
+            status_provider,
         };
 
         service.listen(&multiaddr)?;
@@ -333,8 +350,11 @@ where
                     LeanNetworkBehaviourEvent::Gossipsub(event) => {
                         self.handle_gossipsub_event(event).await
                     }
-                    LeanNetworkBehaviourEvent::ReqResp(event) => {
-                        self.handle_request_response_event(event)
+                    LeanNetworkBehaviourEvent::StatusReqResp(event) => {
+                        self.handle_status_req_resp_event(event)
+                    }
+                    LeanNetworkBehaviourEvent::BlocksByRootReqResp(event) => {
+                        self.handle_blocks_by_root_req_resp_event(event)
                     }
                     LeanNetworkBehaviourEvent::Identify(event) => self.handle_identify_event(event),
                     LeanNetworkBehaviourEvent::ConnectionLimits(_) => {
@@ -553,7 +573,63 @@ where
         None
     }
 
-    fn handle_request_response_event(&mut self, event: ReqRespMessage) -> Option<NetworkEvent> {
+    fn handle_status_req_resp_event(&mut self, event: ReqRespMessage) -> Option<NetworkEvent> {
+        use crate::req_resp::LeanResponse;
+        use libp2p::request_response::{Event, Message};
+
+        match event {
+            Event::Message { peer, message, .. } => match message {
+                Message::Response { response, .. } => {
+                    match response {
+                        LeanResponse::Status(_) => {
+                            info!(peer = %peer, "Received Status response");
+                        }
+                        _ => {
+                            warn!(peer = %peer, "Unexpected response type on Status protocol");
+                        }
+                    }
+                }
+                Message::Request {
+                    request, channel, ..
+                } => {
+                    use crate::req_resp::{LeanRequest, LeanResponse};
+
+                    let response = match request {
+                        LeanRequest::Status(_) => {
+                            let status = self.status_provider.read().clone();
+                            info!(peer = %peer, finalized_slot = status.finalized.slot.0, head_slot = status.head.slot.0, "Received Status request");
+                            LeanResponse::Status(status)
+                        }
+                        _ => {
+                            warn!(peer = %peer, "Unexpected request type on Status protocol");
+                            return None;
+                        }
+                    };
+
+                    if let Err(e) = self
+                        .swarm
+                        .behaviour_mut()
+                        .status_req_resp
+                        .send_response(channel, response)
+                    {
+                        warn!(peer = %peer, ?e, "Failed to send Status response");
+                    }
+                }
+            },
+            Event::OutboundFailure { peer, error, .. } => {
+                warn!(peer = %peer, ?error, "Status outbound request failed");
+            }
+            Event::InboundFailure { peer, error, .. } => {
+                warn!(peer = %peer, ?error, "Status inbound request failed");
+            }
+            Event::ResponseSent { peer, .. } => {
+                trace!(peer = %peer, "Status response sent");
+            }
+        }
+        None
+    }
+
+    fn handle_blocks_by_root_req_resp_event(&mut self, event: ReqRespMessage) -> Option<NetworkEvent> {
         use crate::req_resp::LeanResponse;
         use libp2p::request_response::{Event, Message};
 
@@ -595,11 +671,11 @@ where
                                 }
                             });
                         }
-                        LeanResponse::Status(_) => {
-                            info!(peer = %peer, "Received Status response");
-                        }
                         LeanResponse::Empty => {
-                            warn!(peer = %peer, "Received empty response");
+                            warn!(peer = %peer, "Received empty BlocksByRoot response");
+                        }
+                        _ => {
+                            warn!(peer = %peer, "Unexpected response type on BlocksByRoot protocol");
                         }
                     }
                 }
@@ -609,36 +685,43 @@ where
                     use crate::req_resp::{LeanRequest, LeanResponse};
 
                     let response = match request {
-                        LeanRequest::Status(_) => {
-                            info!(peer = %peer, "Received Status request");
-                            LeanResponse::Status(containers::Status::default())
-                        }
                         LeanRequest::BlocksByRoot(roots) => {
                             info!(peer = %peer, num_roots = roots.len(), "Received BlocksByRoot request");
-                            // TODO: Lookup blocks from our store and return them
-                            // For now, return empty to prevent timeout
-                            LeanResponse::BlocksByRoot(vec![])
+
+                            // Look up blocks from our signed_blocks store
+                            let blocks_guard = self.signed_block_provider.read();
+
+                            let blocks: Vec<_> = roots
+                                .iter()
+                                .filter_map(|root| blocks_guard.get(root).cloned())
+                                .collect();
+                            info!(peer = %peer, found = blocks.len(), requested = roots.len(), "Serving BlocksByRoot response");
+                            LeanResponse::BlocksByRoot(blocks)
+                        }
+                        _ => {
+                            warn!(peer = %peer, "Unexpected request type on BlocksByRoot protocol");
+                            return None;
                         }
                     };
 
                     if let Err(e) = self
                         .swarm
                         .behaviour_mut()
-                        .req_resp
+                        .blocks_by_root_req_resp
                         .send_response(channel, response)
                     {
-                        warn!(peer = %peer, ?e, "Failed to send response");
+                        warn!(peer = %peer, ?e, "Failed to send BlocksByRoot response");
                     }
                 }
             },
             Event::OutboundFailure { peer, error, .. } => {
-                warn!(peer = %peer, ?error, "Request failed");
+                warn!(peer = %peer, ?error, "BlocksByRoot outbound request failed");
             }
             Event::InboundFailure { peer, error, .. } => {
-                warn!(peer = %peer, ?error, "Inbound request failed");
+                warn!(peer = %peer, ?error, "BlocksByRoot inbound request failed");
             }
             Event::ResponseSent { peer, .. } => {
-                trace!(peer = %peer, "Response sent");
+                trace!(peer = %peer, "BlocksByRoot response sent");
             }
         }
         None
@@ -841,14 +924,13 @@ where
     }
 
     fn send_status_request(&mut self, peer_id: PeerId) {
-        let status = containers::Status::default();
+        let status = self.status_provider.read().clone();
+        info!(peer = %peer_id, finalized_slot = status.finalized.slot.0, head_slot = status.head.slot.0, "Sending Status request for handshake");
         let request = LeanRequest::Status(status);
-
-        info!(peer = %peer_id, "Sending Status request for handshake");
         let _request_id = self
             .swarm
             .behaviour_mut()
-            .req_resp
+            .status_req_resp
             .send_request(&peer_id, request);
     }
 
@@ -872,7 +954,7 @@ where
         let _request_id = self
             .swarm
             .behaviour_mut()
-            .req_resp
+            .blocks_by_root_req_resp
             .send_request(&peer_id, request);
     }
 
@@ -888,10 +970,8 @@ where
         )
         .map_err(|err| anyhow!("Failed to create gossipsub behaviour: {err:?}"))?;
 
-        let req_resp = req_resp::build(vec![
-            STATUS_PROTOCOL_V1.to_string(),
-            BLOCKS_BY_ROOT_PROTOCOL_V1.to_string(),
-        ]);
+        let status_req_resp = req_resp::build_status();
+        let blocks_by_root_req_resp = req_resp::build_blocks_by_root();
 
         let connection_limits = connection_limits::Behaviour::new(
             ConnectionLimits::default()
@@ -902,7 +982,8 @@ where
 
         Ok(LeanNetworkBehaviour {
             identify,
-            req_resp,
+            status_req_resp,
+            blocks_by_root_req_resp,
             gossipsub,
             connection_limits,
         })

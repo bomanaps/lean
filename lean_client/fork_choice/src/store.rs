@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use anyhow::{Result, anyhow, ensure};
 use containers::{
-    AggregatedSignatureProof, Attestation, AttestationData, Block, Checkpoint, Config,
-    SignatureKey, SignedBlockWithAttestation, Slot, State,
+    AggregatedSignatureProof, Attestation, AttestationData, Block, BlockHeader, Checkpoint,
+    Config, SignatureKey, SignedBlockWithAttestation, Slot, State,
 };
 use metrics::set_gauge_u64;
 use ssz::{H256, SszHash};
@@ -58,6 +58,10 @@ pub struct Store {
     /// Used to look up the exact attestation data that was signed,
     /// matching ream's attestation_data_by_root_provider design.
     pub attestation_data_by_root: HashMap<H256, AttestationData>,
+
+    /// Signed blocks indexed by block root.
+    /// Used to serve BlocksByRoot requests to peers for checkpoint sync backfill.
+    pub signed_blocks: HashMap<H256, SignedBlockWithAttestation>,
 }
 
 const JUSTIFICATION_LOOKBACK_SLOTS: u64 = 3;
@@ -120,25 +124,43 @@ pub fn get_forkchoice_store(
     let block = anchor_block.message.block.clone();
     let block_slot = block.slot;
 
-    // Compute block root using the header hash (canonical block root)
-    let block_root = block.hash_tree_root();
-
-    let latest_justified = if anchor_state.latest_justified.root.is_zero() {
-        Checkpoint {
-            root: block_root,
-            slot: block_slot,
-        }
+    // Compute block root differently for genesis vs checkpoint sync:
+    // - Genesis (slot 0): Use block.hash_tree_root() directly
+    // - Checkpoint sync (slot > 0): Use BlockHeader from state.latest_block_header
+    //   because we have the correct body_root there but may have synthetic empty body in Block
+    let block_root = if block_slot.0 == 0 {
+        block.hash_tree_root()
     } else {
-        anchor_state.latest_justified.clone()
+        let block_header = BlockHeader {
+            slot: anchor_state.latest_block_header.slot,
+            proposer_index: anchor_state.latest_block_header.proposer_index,
+            parent_root: anchor_state.latest_block_header.parent_root,
+            state_root: anchor_state.hash_tree_root(),
+            body_root: anchor_state.latest_block_header.body_root,
+        };
+        block_header.hash_tree_root()
     };
 
-    let latest_finalized = if anchor_state.latest_finalized.root.is_zero() {
-        Checkpoint {
-            root: block_root,
-            slot: block_slot,
-        }
-    } else {
-        anchor_state.latest_finalized.clone()
+    // Per checkpoint sync: always use anchor block's root for checkpoints.
+    // The original checkpoint roots point to blocks that don't exist in our store.
+    // We only have the anchor block, so use its root. Keep the slot from state
+    // to preserve justification/finalization progress information.
+    let latest_justified = Checkpoint {
+        root: block_root,
+        slot: if anchor_state.latest_justified.root.is_zero() {
+            block_slot
+        } else {
+            anchor_state.latest_justified.slot
+        },
+    };
+
+    let latest_finalized = Checkpoint {
+        root: block_root,
+        slot: if anchor_state.latest_finalized.root.is_zero() {
+            block_slot
+        } else {
+            anchor_state.latest_finalized.slot
+        },
     };
 
     // Store the original anchor_state - do NOT modify it
@@ -160,6 +182,7 @@ pub fn get_forkchoice_store(
         latest_known_aggregated_payloads: HashMap::new(),
         latest_new_aggregated_payloads: HashMap::new(),
         attestation_data_by_root: HashMap::new(),
+        signed_blocks: [(block_root, anchor_block)].into(),
     }
 }
 

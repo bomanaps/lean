@@ -25,6 +25,7 @@ sha2 = { workspace = true }
 snap = { workspace = true }
 ssz = { workspace = true }
 tiny-keccak = { workspace = true }
+typenum = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 yamux = { workspace = true }

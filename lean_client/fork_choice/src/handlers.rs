@@ -403,6 +403,8 @@ fn process_block_internal(
     // Store block and state, store the plain Block (not SignedBlockWithAttestation)
     store.blocks.insert(block_root, block.clone());
     store.states.insert(block_root, new_state.clone());
+    // Also store signed block for serving BlocksByRoot requests (checkpoint sync backfill)
+    store.signed_blocks.insert(block_root, signed_block.clone());
 
     let justified_updated = new_state.latest_justified.slot > store.latest_justified.slot;
     let finalized_updated = new_state.latest_finalized.slot > store.latest_finalized.slot;

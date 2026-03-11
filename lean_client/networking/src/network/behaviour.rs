@@ -6,7 +6,8 @@ use crate::req_resp::ReqResp;
 #[derive(NetworkBehaviour)]
 pub struct LeanNetworkBehaviour {
     pub identify: identify::Behaviour,
-    pub req_resp: ReqResp,
+    pub status_req_resp: ReqResp,
+    pub blocks_by_root_req_resp: ReqResp,
     pub gossipsub: GossipsubBehaviour,
     pub connection_limits: connection_limits::Behaviour,
 }

@@ -1,15 +1,24 @@
-use std::{collections::HashMap, fmt::Display};
+use std::{collections::HashMap, fmt::Display, sync::Arc};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use containers::{SignedAggregatedAttestation, SignedAttestation, SignedBlockWithAttestation};
+use containers::{SignedAggregatedAttestation, SignedAttestation, SignedBlockWithAttestation, Status};
 use metrics::METRICS;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use ssz::H256;
 use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::serde_utils::quoted_u64;
+
+/// Shared block provider for serving BlocksByRoot requests.
+/// Allows NetworkService to look up signed blocks for checkpoint sync backfill.
+pub type SignedBlockProvider = Arc<RwLock<HashMap<H256, SignedBlockWithAttestation>>>;
+
+/// Shared status provider for Status req/resp protocol.
+/// Allows NetworkService to send accurate finalized/head checkpoints to peers.
+pub type StatusProvider = Arc<RwLock<Status>>;
 
 /// 1-byte domain for gossip message-id isolation of valid snappy messages.
 /// Per leanSpec, prepended to the message hash when decompression succeeds.

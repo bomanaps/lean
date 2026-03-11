@@ -2,6 +2,7 @@ use std::io;
 use std::io::{Read, Write};
 
 use async_trait::async_trait;
+use tracing::warn;
 use containers::{SignedBlockWithAttestation, Status};
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use libp2p::request_response::{
@@ -9,12 +10,27 @@ use libp2p::request_response::{
 };
 use snap::read::FrameDecoder;
 use snap::write::FrameEncoder;
-use ssz::{H256, SszReadDefault as _, SszWrite as _};
+use ssz::{H256, PersistentList, Ssz, SszReadDefault as _, SszWrite as _};
+use typenum::U1024;
 
 pub const MAX_REQUEST_BLOCKS: usize = 1024;
+pub const MAX_PAYLOAD_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
 
 pub const STATUS_PROTOCOL_V1: &str = "/leanconsensus/req/status/1/ssz_snappy";
 pub const BLOCKS_BY_ROOT_PROTOCOL_V1: &str = "/leanconsensus/req/blocks_by_root/1/ssz_snappy";
+
+/// Response codes for req/resp protocol messages.
+pub const RESPONSE_SUCCESS: u8 = 0;
+pub const RESPONSE_INVALID_REQUEST: u8 = 1;
+pub const RESPONSE_SERVER_ERROR: u8 = 2;
+pub const RESPONSE_RESOURCE_UNAVAILABLE: u8 = 3;
+
+pub type RequestedBlockRoots = PersistentList<H256, U1024>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Ssz)]
+pub struct BlocksByRootRequest {
+    pub roots: RequestedBlockRoots,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct LeanProtocol(pub String);
@@ -42,6 +58,41 @@ pub enum LeanResponse {
 pub struct LeanCodec;
 
 impl LeanCodec {
+    /// Encode a u32 as an unsigned LEB128 varint.
+    fn encode_varint(value: u32) -> Vec<u8> {
+        let mut result = Vec::new();
+        let mut v = value;
+        loop {
+            let mut byte = (v & 0x7F) as u8;
+            v >>= 7;
+            if v != 0 {
+                byte |= 0x80;
+            }
+            result.push(byte);
+            if v == 0 {
+                break;
+            }
+        }
+        result
+    }
+
+    /// Decode an unsigned LEB128 varint from data.
+    /// Returns (value, bytes_consumed) on success.
+    fn decode_varint(data: &[u8]) -> io::Result<(u32, usize)> {
+        let mut result = 0u32;
+        for (i, &byte) in data.iter().enumerate().take(5) {
+            let value = (byte & 0x7F) as u32;
+            result |= value << (7 * i);
+            if byte & 0x80 == 0 {
+                return Ok((result, i + 1));
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Invalid or truncated varint",
+        ))
+    }
+
     /// Compress data using Snappy framing format (required for req/resp protocol)
     fn compress(data: &[u8]) -> io::Result<Vec<u8>> {
         let mut encoder = FrameEncoder::new(Vec::new());
@@ -59,28 +110,73 @@ impl LeanCodec {
         Ok(decompressed)
     }
 
+    /// Encode request with varint length prefix per spec:
+    /// [varint: uncompressed_length][snappy_framed_payload]
     fn encode_request(request: &LeanRequest) -> io::Result<Vec<u8>> {
         let ssz_bytes = match request {
             LeanRequest::Status(status) => status.to_ssz().map_err(|e| {
                 io::Error::new(io::ErrorKind::Other, format!("SSZ encode failed: {e}"))
             })?,
             LeanRequest::BlocksByRoot(roots) => {
-                let mut bytes = Vec::new();
+                let mut request_roots = RequestedBlockRoots::default();
                 for root in roots {
-                    bytes.extend_from_slice(root.as_bytes());
+                    request_roots.push(*root).map_err(|e| {
+                        io::Error::new(io::ErrorKind::Other, format!("Failed to add root: {e:?}"))
+                    })?;
                 }
-                bytes
+                let request = BlocksByRootRequest { roots: request_roots };
+                request.to_ssz().map_err(|e| {
+                    io::Error::new(io::ErrorKind::Other, format!("SSZ encode failed: {e}"))
+                })?
             }
         };
-        Self::compress(&ssz_bytes)
+
+        if ssz_bytes.len() > MAX_PAYLOAD_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Payload too large: {} > {}", ssz_bytes.len(), MAX_PAYLOAD_SIZE),
+            ));
+        }
+
+        let compressed = Self::compress(&ssz_bytes)?;
+        let mut result = Self::encode_varint(ssz_bytes.len() as u32);
+        result.extend(compressed);
+
+        Ok(result)
     }
 
+    /// Decode request with varint length prefix per spec:
+    /// [varint: uncompressed_length][snappy_framed_payload]
     fn decode_request(protocol: &str, data: &[u8]) -> io::Result<LeanRequest> {
         if data.is_empty() {
             return Ok(LeanRequest::Status(Status::default()));
         }
 
-        let ssz_bytes = Self::decompress(data)?;
+        // Parse varint length prefix
+        let (declared_len, varint_size) = Self::decode_varint(data)?;
+
+        if declared_len as usize > MAX_PAYLOAD_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Declared length too large: {} > {}", declared_len, MAX_PAYLOAD_SIZE),
+            ));
+        }
+
+        // Decompress payload after varint
+        let compressed = &data[varint_size..];
+        let ssz_bytes = Self::decompress(compressed)?;
+
+        // Validate length matches
+        if ssz_bytes.len() != declared_len as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Length mismatch: declared {}, got {}",
+                    declared_len,
+                    ssz_bytes.len()
+                ),
+            ));
+        }
 
         if protocol.contains("status") {
             let status = Status::from_ssz_default(&ssz_bytes).map_err(|e| {
@@ -91,14 +187,13 @@ impl LeanCodec {
             })?;
             Ok(LeanRequest::Status(status))
         } else if protocol.contains("blocks_by_root") {
-            let mut roots = Vec::new();
-            for chunk in ssz_bytes.chunks(32) {
-                if chunk.len() == 32 {
-                    let mut root = [0u8; 32];
-                    root.copy_from_slice(chunk);
-                    roots.push(H256::from(root));
-                }
-            }
+            let request = BlocksByRootRequest::from_ssz_default(&ssz_bytes).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("SSZ decode BlocksByRootRequest failed: {e:?}"),
+                )
+            })?;
+            let roots: Vec<H256> = request.roots.into_iter().copied().collect();
             if roots.len() > MAX_REQUEST_BLOCKS {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -118,39 +213,107 @@ impl LeanCodec {
         }
     }
 
-    fn encode_response(response: &LeanResponse) -> io::Result<Vec<u8>> {
-        let ssz_bytes = match response {
-            LeanResponse::Status(status) => status.to_ssz().map_err(|e| {
-                io::Error::new(io::ErrorKind::Other, format!("SSZ encode failed: {e}"))
-            })?,
-            LeanResponse::BlocksByRoot(blocks) => {
-                let mut bytes = Vec::new();
-                for block in blocks {
-                    let block_bytes = block.to_ssz().map_err(|e| {
-                        io::Error::new(io::ErrorKind::Other, format!("SSZ encode failed: {e}"))
-                    })?;
-                    bytes.extend_from_slice(&block_bytes);
-                }
-                bytes
-            }
-            LeanResponse::Empty => Vec::new(),
-        };
-
-        if ssz_bytes.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        Self::compress(&ssz_bytes)
+    /// Encode a single response chunk with response code and varint length prefix per spec:
+    /// [response_code: 1 byte][varint: uncompressed_length][snappy_framed_payload]
+    fn encode_response_chunk(code: u8, ssz_bytes: &[u8]) -> io::Result<Vec<u8>> {
+        let compressed = Self::compress(ssz_bytes)?;
+        let mut result = vec![code];
+        result.extend(Self::encode_varint(ssz_bytes.len() as u32));
+        result.extend(compressed);
+        Ok(result)
     }
 
+    /// Encode response per spec. For BlocksByRoot, each block is a separate chunk:
+    /// [code][varint][snappy(block1)][code][varint][snappy(block2)]...
+    fn encode_response(response: &LeanResponse) -> io::Result<Vec<u8>> {
+        match response {
+            LeanResponse::Status(status) => {
+                let ssz_bytes = status.to_ssz().map_err(|e| {
+                    io::Error::new(io::ErrorKind::Other, format!("SSZ encode failed: {e}"))
+                })?;
+                Self::encode_response_chunk(RESPONSE_SUCCESS, &ssz_bytes)
+            }
+            LeanResponse::BlocksByRoot(blocks) => {
+                // Each block is a separate chunk with its own response code
+                let mut result = Vec::new();
+                for block in blocks {
+                    let ssz_bytes = block.to_ssz().map_err(|e| {
+                        io::Error::new(io::ErrorKind::Other, format!("SSZ encode failed: {e}"))
+                    })?;
+                    let chunk = Self::encode_response_chunk(RESPONSE_SUCCESS, &ssz_bytes)?;
+                    result.extend(chunk);
+                }
+                // Empty response: no chunks written (stream just ends)
+                Ok(result)
+            }
+            LeanResponse::Empty => Ok(Vec::new()),
+        }
+    }
+
+    /// Decode a single response chunk per spec:
+    /// [response_code: 1 byte][varint: uncompressed_length][snappy_framed_payload]
+    /// Returns (code, ssz_bytes, total_bytes_consumed)
+    fn decode_response_chunk(data: &[u8]) -> io::Result<(u8, Vec<u8>, usize)> {
+        if data.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Empty response chunk",
+            ));
+        }
+
+        // First byte is response code
+        let code = data[0];
+
+        // Parse varint length starting at offset 1
+        let (declared_len, varint_size) = Self::decode_varint(&data[1..])?;
+
+        if declared_len as usize > MAX_PAYLOAD_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Declared length too large: {} > {}", declared_len, MAX_PAYLOAD_SIZE),
+            ));
+        }
+
+        // Decompress payload after code + varint
+        let payload_start = 1 + varint_size;
+        let compressed = &data[payload_start..];
+        let ssz_bytes = Self::decompress(compressed)?;
+
+        // Validate length matches
+        if ssz_bytes.len() != declared_len as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Length mismatch: declared {}, got {}",
+                    declared_len,
+                    ssz_bytes.len()
+                ),
+            ));
+        }
+
+        // Calculate total bytes consumed (approximate - we consumed all remaining data)
+        let total_consumed = data.len();
+
+        Ok((code, ssz_bytes, total_consumed))
+    }
+
+    /// Decode response per spec. For BlocksByRoot, handle chunked format:
+    /// [code][varint][snappy(block1)][code][varint][snappy(block2)]...
     fn decode_response(protocol: &str, data: &[u8]) -> io::Result<LeanResponse> {
         if data.is_empty() {
             return Ok(LeanResponse::Empty);
         }
 
-        let ssz_bytes = Self::decompress(data)?;
-
         if protocol.contains("status") {
+            let (code, ssz_bytes, _) = Self::decode_response_chunk(data)?;
+
+            if code != RESPONSE_SUCCESS {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Status request failed with code: {}", code),
+                ));
+            }
+
             let status = Status::from_ssz_default(&ssz_bytes).map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::Other,
@@ -159,9 +322,21 @@ impl LeanCodec {
             })?;
             Ok(LeanResponse::Status(status))
         } else if protocol.contains("blocks_by_root") {
+            let (code, ssz_bytes, _) = Self::decode_response_chunk(data)?;
+
+            if code != RESPONSE_SUCCESS {
+                // Non-success codes indicate block not found or error
+                warn!(
+                    response_code = code,
+                    "BlocksByRoot non-success response"
+                );
+                return Ok(LeanResponse::BlocksByRoot(Vec::new()));
+            }
+
             if ssz_bytes.is_empty() {
                 return Ok(LeanResponse::BlocksByRoot(Vec::new()));
             }
+
             let block = SignedBlockWithAttestation::from_ssz_default(&ssz_bytes).map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::Other,
@@ -329,9 +504,12 @@ pub fn build(protocols: impl IntoIterator<Item = String>) -> ReqResp {
     RequestResponse::with_codec(LeanCodec::default(), protocols, Config::default())
 }
 
-pub fn build_default() -> ReqResp {
-    build(vec![
-        STATUS_PROTOCOL_V1.to_string(),
-        BLOCKS_BY_ROOT_PROTOCOL_V1.to_string(),
-    ])
+/// Build a RequestResponse behavior for Status protocol only
+pub fn build_status() -> ReqResp {
+    build(vec![STATUS_PROTOCOL_V1.to_string()])
+}
+
+/// Build a RequestResponse behavior for BlocksByRoot protocol only
+pub fn build_blocks_by_root() -> ReqResp {
+    build(vec![BLOCKS_BY_ROOT_PROTOCOL_V1.to_string()])
 }
