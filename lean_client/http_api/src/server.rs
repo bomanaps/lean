@@ -4,10 +4,14 @@ use anyhow::{Context, Error as AnyhowError, Result};
 use futures::{TryFutureExt as _, future::FutureExt as _};
 use tracing::info;
 
-use crate::{config::HttpServerConfig, routing::normal_routes};
+use crate::{config::HttpServerConfig, handlers::SharedStore, routing::normal_routes};
 
-pub async fn run_server(config: HttpServerConfig, genesis_time: u64) -> Result<()> {
-    let router = normal_routes(&config, genesis_time);
+pub async fn run_server(
+    config: HttpServerConfig,
+    genesis_time: u64,
+    store: Option<SharedStore>,
+) -> Result<()> {
+    let router = normal_routes(&config, genesis_time, store);
 
     let listener = config
         .listener()

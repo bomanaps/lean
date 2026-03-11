@@ -112,6 +112,30 @@ impl Store {
             slot: block_target.slot,
         }
     }
+
+    pub fn compute_block_weights(&self) -> HashMap<H256, i64> {
+        let attestations = extract_attestations_from_aggregated_payloads(
+            &self.latest_known_aggregated_payloads,
+            &self.attestation_data_by_root,
+        );
+
+        let start_slot = self.latest_finalized.slot;
+        let mut weights: HashMap<H256, i64> = HashMap::new();
+
+        for attestation_data in attestations.values() {
+            let mut current_root = attestation_data.head.root;
+
+            while let Some(block) = self.blocks.get(&current_root) {
+                if block.slot <= start_slot {
+                    break;
+                }
+                *weights.entry(current_root).or_insert(0) += 1;
+                current_root = block.parent_root;
+            }
+        }
+
+        weights
+    }
 }
 
 /// Initialize forkchoice store from an anchor state and block
