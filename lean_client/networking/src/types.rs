@@ -2,7 +2,9 @@ use std::{collections::HashMap, fmt::Display, sync::Arc};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use containers::{SignedAggregatedAttestation, SignedAttestation, SignedBlockWithAttestation, Status};
+use containers::{
+    SignedAggregatedAttestation, SignedAttestation, SignedBlockWithAttestation, Status,
+};
 use metrics::METRICS;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};

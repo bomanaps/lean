@@ -579,16 +579,14 @@ where
 
         match event {
             Event::Message { peer, message, .. } => match message {
-                Message::Response { response, .. } => {
-                    match response {
-                        LeanResponse::Status(_) => {
-                            info!(peer = %peer, "Received Status response");
-                        }
-                        _ => {
-                            warn!(peer = %peer, "Unexpected response type on Status protocol");
-                        }
+                Message::Response { response, .. } => match response {
+                    LeanResponse::Status(_) => {
+                        info!(peer = %peer, "Received Status response");
                     }
-                }
+                    _ => {
+                        warn!(peer = %peer, "Unexpected response type on Status protocol");
+                    }
+                },
                 Message::Request {
                     request, channel, ..
                 } => {
@@ -629,7 +627,10 @@ where
         None
     }
 
-    fn handle_blocks_by_root_req_resp_event(&mut self, event: ReqRespMessage) -> Option<NetworkEvent> {
+    fn handle_blocks_by_root_req_resp_event(
+        &mut self,
+        event: ReqRespMessage,
+    ) -> Option<NetworkEvent> {
         use crate::req_resp::LeanResponse;
         use libp2p::request_response::{Event, Message};
 
