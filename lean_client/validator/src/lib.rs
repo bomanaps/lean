@@ -237,7 +237,9 @@ impl ValidatorService {
             let participants = AggregationBits::from_validator_indices(&validator_ids);
 
             // Create the aggregated signature proof
-            // Uses attestation_data.slot as epoch (matches ream's approach)
+            let timer = METRICS
+                .get()
+                .map(|m| m.lean_committee_signatures_aggregation_time_seconds.start_timer());
             let proof = match AggregatedSignatureProof::aggregate(
                 participants,
                 public_keys,
@@ -245,8 +247,12 @@ impl ValidatorService {
                 data_root,
                 attestation_data.slot.0 as u32,
             ) {
-                Ok(p) => p,
+                Ok(p) => {
+                    stop_and_record(timer);
+                    p
+                }
                 Err(e) => {
+                    stop_and_discard(timer);
                     warn!(error = %e, "Failed to create aggregated signature proof");
                     continue;
                 }
@@ -383,12 +389,6 @@ impl ValidatorService {
                 };
 
                 let signature = if let Some(ref key_manager) = self.key_manager {
-                    let _timer = METRICS.get().map(|metrics| {
-                        metrics
-                            .lean_pq_sig_attestation_signing_time_seconds
-                            .start_timer()
-                    });
-
                     // Sign with XMSS
                     let message = attestation.hash_tree_root();
                     let epoch = slot.0 as u32;
@@ -400,6 +400,10 @@ impl ValidatorService {
                     });
                     match key_manager.sign(idx, epoch, message) {
                         Ok(sig) => {
+                            // Record successful attestation signature
+                            METRICS.get().map(|metrics| {
+                                metrics.lean_pq_sig_attestation_signatures_total.inc();
+                            });
                             info!(
                                 slot = slot.0,
                                 validator = idx,

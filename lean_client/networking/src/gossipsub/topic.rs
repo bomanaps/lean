@@ -44,41 +44,28 @@ impl GossipsubKind {
     }
 }
 
-/// Get all topics (for testing or full subscription)
-pub fn get_topics(fork: String) -> Vec<GossipsubTopic> {
-    get_subscription_topics(fork, true)
-}
-
-/// Get topics for subscription based on node role (devnet-3)
-/// - All nodes subscribe to Block and Aggregation topics
-/// - Only aggregators subscribe to AttestationSubnet topics to collect attestations
-/// - Non-aggregators publish to subnet topics but don't subscribe
-pub fn get_subscription_topics(fork: String, is_aggregator: bool) -> Vec<GossipsubTopic> {
+pub fn get_subscription_topics(fork: String) -> Vec<GossipsubTopic> {
     let mut topics = vec![
         GossipsubTopic {
             fork: fork.clone(),
             kind: GossipsubKind::Block,
         },
-        // Aggregation topic - all nodes subscribe to receive aggregated attestations
         GossipsubTopic {
             fork: fork.clone(),
             kind: GossipsubKind::Aggregation,
         },
     ];
 
-    // Only aggregators subscribe to attestation subnet topics (devnet-3)
-    // Non-aggregators publish to these topics but don't subscribe
-    if is_aggregator {
-        for subnet_id in 0..ATTESTATION_SUBNET_COUNT {
-            topics.push(GossipsubTopic {
-                fork: fork.clone(),
-                kind: GossipsubKind::AttestationSubnet(subnet_id),
-            });
-        }
+    for subnet_id in 0..ATTESTATION_SUBNET_COUNT {
+        topics.push(GossipsubTopic {
+            fork: fork.clone(),
+            kind: GossipsubKind::AttestationSubnet(subnet_id),
+        });
     }
 
     topics
 }
+
 
 impl GossipsubTopic {
     pub fn decode(topic: &TopicHash) -> Result<Self, String> {

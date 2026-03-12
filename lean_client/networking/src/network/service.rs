@@ -20,6 +20,7 @@ use libp2p::{
     gossipsub::{Event, IdentTopic, MessageAuthenticity},
     identify,
     multiaddr::Protocol,
+    request_response::OutboundRequestId,
     swarm::{Config, ConnectionError, Swarm, SwarmEvent},
 };
 use libp2p_identity::{Keypair, PeerId};
@@ -45,6 +46,15 @@ use crate::{
         SignedBlockProvider, StatusProvider,
     },
 };
+
+const MAX_BLOCKS_BY_ROOT_RETRIES: u8 = 3;
+const MAX_BLOCK_FETCH_DEPTH: u32 = 512;
+
+struct PendingBlocksRequest {
+    roots: Vec<H256>,
+    retries: u8,
+    depth: u32,
+}
 
 #[derive(Debug, Clone)]
 pub struct NetworkServiceConfig {
@@ -173,6 +183,10 @@ where
     signed_block_provider: SignedBlockProvider,
     /// Shared status provider for Status req/resp protocol
     status_provider: StatusProvider,
+    /// Pending BlocksByRoot requests for retry on empty response
+    pending_blocks_by_root: HashMap<OutboundRequestId, PendingBlocksRequest>,
+    /// Depth tracking per block root for limiting backward chain walking
+    pending_block_depths: HashMap<H256, u32>,
 }
 
 impl<R, S> NetworkService<R, S>
@@ -279,6 +293,8 @@ where
             chain_message_sink,
             signed_block_provider,
             status_provider,
+            pending_blocks_by_root: HashMap::new(),
+            pending_block_depths: HashMap::new(),
         };
 
         service.listen(&multiaddr)?;
@@ -636,14 +652,30 @@ where
 
         match event {
             Event::Message { peer, message, .. } => match message {
-                Message::Response { response, .. } => {
+                Message::Response {
+                    response,
+                    request_id,
+                } => {
+                    let pending = self.pending_blocks_by_root.remove(&request_id);
+                    let request_depth = pending.as_ref().map(|p| p.depth).unwrap_or(0);
+
                     match response {
                         LeanResponse::BlocksByRoot(blocks) => {
                             info!(
                                 peer = %peer,
                                 num_blocks = blocks.len(),
+                                depth = request_depth,
                                 "Received BlocksByRoot response"
                             );
+
+                            // Track depth for potential parent block requests
+                            // Each block's parent will be requested at depth + 1
+                            for block in &blocks {
+                                let parent_root = block.message.block.parent_root;
+                                if !parent_root.is_zero() {
+                                    self.pending_block_depths.insert(parent_root, request_depth + 1);
+                                }
+                            }
 
                             // Feed received blocks back into chain processing
                             let chain_sink = self.chain_message_sink.clone();
@@ -673,7 +705,11 @@ where
                             });
                         }
                         LeanResponse::Empty => {
-                            warn!(peer = %peer, "Received empty BlocksByRoot response");
+                            if let Some(req) = pending {
+                                self.retry_blocks_by_root_request(peer, req);
+                            } else {
+                                warn!(peer = %peer, "Received empty BlocksByRoot response (no pending request)");
+                            }
                         }
                         _ => {
                             warn!(peer = %peer, "Unexpected response type on BlocksByRoot protocol");
@@ -715,8 +751,16 @@ where
                     }
                 }
             },
-            Event::OutboundFailure { peer, error, .. } => {
+            Event::OutboundFailure {
+                peer,
+                error,
+                request_id,
+                ..
+            } => {
                 warn!(peer = %peer, ?error, "BlocksByRoot outbound request failed");
+                if let Some(req) = self.pending_blocks_by_root.remove(&request_id) {
+                    self.retry_blocks_by_root_request(peer, req);
+                }
             }
             Event::InboundFailure { peer, error, .. } => {
                 warn!(peer = %peer, ?error, "BlocksByRoot inbound request failed");
@@ -726,6 +770,42 @@ where
             }
         }
         None
+    }
+
+    fn retry_blocks_by_root_request(&mut self, failed_peer: PeerId, req: PendingBlocksRequest) {
+        if req.retries >= MAX_BLOCKS_BY_ROOT_RETRIES {
+            warn!(
+                retries = req.retries,
+                num_roots = req.roots.len(),
+                depth = req.depth,
+                "BlocksByRoot max retries exceeded, giving up"
+            );
+            return;
+        }
+
+        let connected_peers: Vec<PeerId> = self
+            .peer_table
+            .lock()
+            .iter()
+            .filter(|(id, state)| **state == ConnectionState::Connected && **id != failed_peer)
+            .map(|(id, _)| *id)
+            .collect();
+
+        if let Some(peer_id) = connected_peers.choose(&mut rand::rng()).cloned() {
+            info!(
+                peer = %peer_id,
+                retries = req.retries + 1,
+                depth = req.depth,
+                num_roots = req.roots.len(),
+                "Retrying BlocksByRoot request with different peer"
+            );
+            self.send_blocks_by_root_request_internal(peer_id, req.roots, req.retries + 1, req.depth);
+        } else {
+            warn!(
+                num_roots = req.roots.len(),
+                "No other connected peers to retry BlocksByRoot request"
+            );
+        }
     }
 
     fn handle_identify_event(&mut self, event: identify::Event) -> Option<NetworkEvent> {
@@ -876,13 +956,40 @@ where
                 }
             }
             OutboundP2pRequest::RequestBlocksByRoot(roots) => {
+                // Look up and validate depth for each root
+                // Depth is set when we receive a block and track its parent
+                // For initial gossip-triggered requests, depth will be 0 (not found)
+                let mut roots_to_request = Vec::new();
+                for root in roots {
+                    let depth = self.pending_block_depths.remove(&root).unwrap_or(0);
+                    if depth >= MAX_BLOCK_FETCH_DEPTH {
+                        warn!(
+                            root = %root,
+                            depth = depth,
+                            max_depth = MAX_BLOCK_FETCH_DEPTH,
+                            "Skipping block request: exceeded max fetch depth"
+                        );
+                    } else {
+                        roots_to_request.push((root, depth));
+                    }
+                }
+
+                if roots_to_request.is_empty() {
+                    return;
+                }
+
                 if let Some(peer_id) = self.get_random_connected_peer() {
+                    // Use max depth among requested roots for the batch
+                    let depth = roots_to_request.iter().map(|(_, d)| *d).max().unwrap_or(0);
+                    let roots: Vec<H256> = roots_to_request.into_iter().map(|(r, _)| r).collect();
+
                     info!(
                         peer = %peer_id,
                         num_blocks = roots.len(),
+                        depth = depth,
                         "Requesting missing blocks from peer"
                     );
-                    self.send_blocks_by_root_request(peer_id, roots);
+                    self.send_blocks_by_root_request_with_depth(peer_id, roots, depth);
                 } else {
                     warn!("Cannot request blocks: no connected peers");
                 }
@@ -936,6 +1043,25 @@ where
     }
 
     pub fn send_blocks_by_root_request(&mut self, peer_id: PeerId, roots: Vec<H256>) {
+        self.send_blocks_by_root_request_with_depth(peer_id, roots, 0);
+    }
+
+    pub fn send_blocks_by_root_request_with_depth(
+        &mut self,
+        peer_id: PeerId,
+        roots: Vec<H256>,
+        depth: u32,
+    ) {
+        self.send_blocks_by_root_request_internal(peer_id, roots, 0, depth);
+    }
+
+    fn send_blocks_by_root_request_internal(
+        &mut self,
+        peer_id: PeerId,
+        roots: Vec<H256>,
+        retries: u8,
+        depth: u32,
+    ) {
         if roots.is_empty() {
             return;
         }
@@ -950,13 +1076,18 @@ where
             return;
         }
 
+        // Depth is tracked in PendingBlocksRequest for retries
+        // No need to store in pending_block_depths here - it's set when blocks are received
         let request = LeanRequest::BlocksByRoot(roots.clone());
-        info!(peer = %peer_id, num_roots = roots.len(), "Sending BlocksByRoot request");
-        let _request_id = self
+        info!(peer = %peer_id, num_roots = roots.len(), retries, depth, "Sending BlocksByRoot request");
+        let request_id = self
             .swarm
             .behaviour_mut()
             .blocks_by_root_req_resp
             .send_request(&peer_id, request);
+
+        self.pending_blocks_by_root
+            .insert(request_id, PendingBlocksRequest { roots, retries, depth });
     }
 
     fn build_behaviour(

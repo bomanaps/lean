@@ -276,6 +276,15 @@ async fn main() -> Result<()> {
         .transpose()
         .context("failed to set metrics on start")?;
 
+    // Record aggregator and network metrics on startup
+    METRICS.get().map(|metrics| {
+        metrics
+            .lean_is_aggregator
+            .set(if args.is_aggregator { 1 } else { 0 });
+        // ATTESTATION_SUBNET_COUNT is 1 in current implementation
+        metrics.lean_attestation_committee_count.set(1);
+    });
+
     let (outbound_p2p_sender, outbound_p2p_receiver) =
         mpsc::unbounded_channel::<OutboundP2pRequest>();
     let (chain_message_sender, mut chain_message_receiver) =
@@ -529,10 +538,20 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Record validator subnet metric if validator is configured
+    if let Some(ref service) = validator_service {
+        if let Some(&first_validator_id) = service.config.validator_indices.first() {
+            let subnet_id = compute_subnet_id(first_validator_id);
+            METRICS.get().map(|metrics| {
+                metrics
+                    .lean_attestation_committee_subnet
+                    .set(subnet_id as i64);
+            });
+        }
+    }
+
     let fork = "devnet0".to_string();
-    // Devnet-3: Non-aggregators only subscribe to Block, Attestation, Aggregation
-    // Aggregators also subscribe to AttestationSubnet topics to collect attestations
-    let gossipsub_topics = get_subscription_topics(fork, args.is_aggregator);
+    let gossipsub_topics = get_subscription_topics(fork);
     let mut gossipsub_config = GossipsubConfig::new();
     gossipsub_config.set_topics(gossipsub_topics);
 
@@ -797,6 +816,39 @@ async fn main() -> Result<()> {
                                 .as_millis() as u64;
                             on_tick(&mut *store.write(), now_millis, false);
 
+                            // Proactive parent check: verify parent exists BEFORE calling on_block.
+                            // This avoids unnecessary state transition attempts and is more efficient
+                            // than catching the "Block queued" error after the fact.
+                            let parent_exists = {
+                                let s = store.read();
+                                parent_root.is_zero() || s.states.contains_key(&parent_root)
+                            };
+
+                            if !parent_exists {
+                                // Queue the block and request parent without calling on_block
+                                {
+                                    let mut s = store.write();
+                                    s.blocks_queue
+                                        .entry(parent_root)
+                                        .or_insert_with(Vec::new)
+                                        .push(signed_block_with_attestation.clone());
+                                }
+
+                                warn!(
+                                    child_slot = block_slot.0,
+                                    child_block_root = %format!("0x{:x}", block_root),
+                                    missing_parent_root = %format!("0x{:x}", parent_root),
+                                    "Block queued (proactive) - parent not found, requesting via BlocksByRoot"
+                                );
+
+                                if let Err(req_err) = outbound_p2p_sender.send(
+                                    OutboundP2pRequest::RequestBlocksByRoot(vec![parent_root])
+                                ) {
+                                    warn!("Failed to request missing parent block: {}", req_err);
+                                }
+                                continue;
+                            }
+
                             match on_block(&mut *store.write(), signed_block_with_attestation.clone()) {
                                 Ok(()) => {
                                     info!("Block processed successfully");
@@ -824,14 +876,15 @@ async fn main() -> Result<()> {
                                     }
                                 }
                                 Err(e) if format!("{e:?}").starts_with("Err: (Fork-choice::Handlers::OnBlock) Block queued") => {
+                                    // This path should be rare now due to proactive check,
+                                    // but handle it for edge cases (e.g., parent pruned between check and call)
                                     warn!(
                                         child_slot = block_slot.0,
                                         child_block_root = %format!("0x{:x}", block_root),
                                         missing_parent_root = %format!("0x{:x}", parent_root),
-                                        "Block queued - parent not found, will request via BlocksByRoot"
+                                        "Block queued (fallback) - parent not found, requesting via BlocksByRoot"
                                     );
 
-                                    // Request missing parent block from peers
                                     if !parent_root.is_zero() {
                                         if let Err(req_err) = outbound_p2p_sender.send(
                                             OutboundP2pRequest::RequestBlocksByRoot(vec![parent_root])

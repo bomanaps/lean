@@ -544,6 +544,14 @@ impl State {
                     let old_finalized_slot = finalized_slot;
                     latest_finalized = source;
                     finalized_slot = latest_finalized.slot;
+
+                    // Record successful finalization
+                    METRICS.get().map(|metrics| {
+                        metrics
+                            .lean_finalizations_total
+                            .with_label_values(&["success"])
+                            .inc();
+                    });
                     let delta = finalized_slot.0.checked_sub(old_finalized_slot.0);
 
                     if let Some(delta) = delta

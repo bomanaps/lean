@@ -1,7 +1,7 @@
 use crate::gossipsub::topic::{
     AGGREGATION_TOPIC, ATTESTATION_SUBNET_COUNT, ATTESTATION_SUBNET_PREFIX, BLOCK_TOPIC,
     GossipsubKind, GossipsubTopic, SSZ_SNAPPY_ENCODING_POSTFIX, TOPIC_PREFIX,
-    get_subscription_topics, get_topics,
+    get_subscription_topics,
 };
 use libp2p::gossipsub::TopicHash;
 
@@ -94,28 +94,6 @@ fn test_topic_encoding_decoding_roundtrip() {
     assert_eq!(original.kind, decoded.kind);
 }
 
-#[test]
-fn test_get_topics_all_same_fork() {
-    let topics = get_topics("myfork".to_string());
-
-    // Block + Aggregation + ATTESTATION_SUBNET_COUNT subnets (no legacy Attestation)
-    let expected_count = 2 + ATTESTATION_SUBNET_COUNT as usize;
-    assert_eq!(topics.len(), expected_count);
-
-    let kinds: Vec<_> = topics.iter().map(|t| t.kind.clone()).collect();
-    assert!(kinds.contains(&GossipsubKind::Block));
-    assert!(kinds.contains(&GossipsubKind::Aggregation));
-
-    // Check subnet topics
-    for subnet_id in 0..ATTESTATION_SUBNET_COUNT {
-        assert!(kinds.contains(&GossipsubKind::AttestationSubnet(subnet_id)));
-    }
-
-    // All should have the same fork
-    for topic in &topics {
-        assert_eq!(topic.fork, "myfork");
-    }
-}
 
 #[test]
 fn test_gossipsub_kind_display() {
@@ -254,11 +232,9 @@ fn test_topic_hash_conversion() {
 }
 
 #[test]
-fn test_get_subscription_topics_aggregator() {
-    // Aggregators subscribe to all topics including attestation subnets
-    let topics = get_subscription_topics("myfork".to_string(), true);
+fn test_get_subscription_topics() {
+    let topics = get_subscription_topics("myfork".to_string());
 
-    // Block + Aggregation + ATTESTATION_SUBNET_COUNT subnets
     let expected_count = 2 + ATTESTATION_SUBNET_COUNT as usize;
     assert_eq!(topics.len(), expected_count);
 
@@ -266,27 +242,11 @@ fn test_get_subscription_topics_aggregator() {
     assert!(kinds.contains(&GossipsubKind::Block));
     assert!(kinds.contains(&GossipsubKind::Aggregation));
 
-    // Aggregators should have subnet topics
     for subnet_id in 0..ATTESTATION_SUBNET_COUNT {
         assert!(kinds.contains(&GossipsubKind::AttestationSubnet(subnet_id)));
     }
-}
 
-#[test]
-fn test_get_subscription_topics_non_aggregator() {
-    // Non-aggregators only subscribe to Block and Aggregation
-    // They do NOT subscribe to attestation subnet topics (they publish to them but don't subscribe)
-    let topics = get_subscription_topics("myfork".to_string(), false);
-
-    // Block + Aggregation only (no subnet topics)
-    assert_eq!(topics.len(), 2);
-
-    let kinds: Vec<_> = topics.iter().map(|t| t.kind.clone()).collect();
-    assert!(kinds.contains(&GossipsubKind::Block));
-    assert!(kinds.contains(&GossipsubKind::Aggregation));
-
-    // Non-aggregators should NOT have subnet topics
-    for subnet_id in 0..ATTESTATION_SUBNET_COUNT {
-        assert!(!kinds.contains(&GossipsubKind::AttestationSubnet(subnet_id)));
+    for topic in &topics {
+        assert_eq!(topic.fork, "myfork");
     }
 }

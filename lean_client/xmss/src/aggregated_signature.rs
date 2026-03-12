@@ -64,7 +64,7 @@ impl AggregatedSignature {
 
         let timer = METRICS.get().map(|metrics| {
             metrics
-                .lean_pq_sig_attestation_signatures_building_time_seconds
+                .lean_pq_sig_aggregated_signatures_building_time_seconds
                 .start_timer()
         });
 
