@@ -17,6 +17,15 @@ pub struct Metrics {
     lean_node_start_time_seconds: IntGauge,
 
     // PQ Signature metrics
+    /// Total number of individual attestation signatures
+    pub lean_pq_sig_attestation_signatures_total: IntCounter,
+
+    /// Total number of valid individual attestation signatures
+    pub lean_pq_sig_attestation_signatures_valid_total: IntCounter,
+
+    /// Total number of invalid individual attestation signatures
+    pub lean_pq_sig_attestation_signatures_invalid_total: IntCounter,
+
     /// Time taken to sign an attestation
     pub lean_pq_sig_attestation_signing_time_seconds: Histogram,
 
@@ -30,7 +39,7 @@ pub struct Metrics {
     pub lean_pq_sig_attestations_in_aggregated_signatures_total: IntCounter,
 
     /// Time taken to build an aggregated attestation signature
-    pub lean_pq_sig_attestation_signatures_building_time_seconds: Histogram,
+    pub lean_pq_sig_aggregated_signatures_building_time_seconds: Histogram,
 
     /// Time taken to verify an aggregated attestation signature
     pub lean_pq_sig_aggregated_signatures_verification_time_seconds: Histogram,
@@ -64,10 +73,10 @@ pub struct Metrics {
     pub lean_attestation_validation_time_seconds: Histogram,
 
     /// Total number of fork choice reorgs
-    lean_fork_choice_reorgs_total: IntCounter,
+    pub lean_fork_choice_reorgs_total: IntCounter,
 
     /// Depth of fork choice reorgs (in blocks)
-    lean_fork_choice_reorg_depth: Histogram,
+    pub lean_fork_choice_reorg_depth: Histogram,
 
     // State Transition Metrics
     /// Latest justified slot
@@ -77,7 +86,7 @@ pub struct Metrics {
     pub lean_latest_finalized_slot: IntGauge,
 
     /// Total number of finalization attempts
-    lean_finalizations_total: IntCounterVec,
+    pub lean_finalizations_total: IntCounterVec,
 
     /// Time to process state transition
     pub lean_state_transition_time_seconds: Histogram,
@@ -110,6 +119,27 @@ pub struct Metrics {
 
     /// Total number of peer disconnection events
     lean_peer_disconnection_events_total: IntCounterVec,
+
+    /// Number of gossip signatures in fork-choice store
+    pub lean_gossip_signatures: IntGauge,
+
+    /// Number of new aggregated payload items
+    pub lean_latest_new_aggregated_payloads: IntGauge,
+
+    /// Number of known aggregated payload items
+    pub lean_latest_known_aggregated_payloads: IntGauge,
+
+    /// Time taken to aggregate committee signatures
+    pub lean_committee_signatures_aggregation_time_seconds: Histogram,
+
+    /// Validator's is_aggregator status (1=true, 0=false)
+    pub lean_is_aggregator: IntGauge,
+
+    /// Node's attestation committee subnet
+    pub lean_attestation_committee_subnet: IntGauge,
+
+    /// Number of attestation committees (ATTESTATION_COMMITTEE_COUNT)
+    pub lean_attestation_committee_count: IntGauge,
 }
 
 impl Metrics {
@@ -125,6 +155,18 @@ impl Metrics {
             )?,
 
             // PQ Signature metrics
+            lean_pq_sig_attestation_signatures_total: IntCounter::new(
+                "lean_pq_sig_attestation_signatures_total",
+                "Total number of individual attestation signatures",
+            )?,
+            lean_pq_sig_attestation_signatures_valid_total: IntCounter::new(
+                "lean_pq_sig_attestation_signatures_valid_total",
+                "Total number of valid individual attestation signatures",
+            )?,
+            lean_pq_sig_attestation_signatures_invalid_total: IntCounter::new(
+                "lean_pq_sig_attestation_signatures_invalid_total",
+                "Total number of invalid individual attestation signatures",
+            )?,
             lean_pq_sig_attestation_signing_time_seconds: Histogram::with_opts(histogram_opts!(
                 "lean_pq_sig_attestation_signing_time_seconds",
                 "Time taken to sign an attestation",
@@ -145,23 +187,23 @@ impl Metrics {
                 "lean_pq_sig_attestations_in_aggregated_signatures_total",
                 "Total number of attestations included into aggregated signatures",
             )?,
-            lean_pq_sig_attestation_signatures_building_time_seconds: Histogram::with_opts(
+            lean_pq_sig_aggregated_signatures_building_time_seconds: Histogram::with_opts(
                 histogram_opts!(
-                    "lean_pq_sig_attestation_signatures_building_time_seconds",
-                    "Time taken to verify an aggregated attestation signature",
-                    vec![0.005, 0.01, 0.025, 0.05, 0.1, 1.0]
+                    "lean_pq_sig_aggregated_signatures_building_time_seconds",
+                    "Time taken to build an aggregated attestation signature",
+                    vec![0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 4.0]
                 ),
             )?,
             lean_pq_sig_aggregated_signatures_verification_time_seconds: Histogram::with_opts(
                 histogram_opts!(
                     "lean_pq_sig_aggregated_signatures_verification_time_seconds",
                     "Time taken to verify an aggregated attestation signature",
-                    vec![0.005, 0.01, 0.025, 0.05, 0.1, 1.0]
+                    vec![0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 4.0]
                 ),
             )?,
             lean_pq_sig_aggregated_signatures_valid_total: IntCounter::new(
                 "lean_pq_sig_aggregated_signatures_valid_total",
-                "On validate aggregated signature",
+                "Total number of valid aggregated signatures",
             )?,
             lean_pq_sig_aggregated_signatures_invalid_total: IntCounter::new(
                 "lean_pq_sig_aggregated_signatures_invalid_total",
@@ -178,7 +220,7 @@ impl Metrics {
             lean_fork_choice_block_processing_time_seconds: Histogram::with_opts(histogram_opts!(
                 "lean_fork_choice_block_processing_time_seconds",
                 "Time taken to process block",
-                vec![0.005, 0.01, 0.025, 0.05, 0.1, 1.0]
+                vec![0.005, 0.01, 0.025, 0.05, 0.1, 1.0, 1.25, 1.5, 2.0, 4.0]
             ))?,
             lean_attestations_valid_total: IntCounterVec::new(
                 opts!(
@@ -285,6 +327,40 @@ impl Metrics {
                 ),
                 &["direction", "reason"],
             )?,
+
+            lean_gossip_signatures: IntGauge::new(
+                "lean_gossip_signatures",
+                "Number of gossip signatures in fork-choice store",
+            )?,
+            lean_latest_new_aggregated_payloads: IntGauge::new(
+                "lean_latest_new_aggregated_payloads",
+                "Number of new aggregated payload items",
+            )?,
+            lean_latest_known_aggregated_payloads: IntGauge::new(
+                "lean_latest_known_aggregated_payloads",
+                "Number of known aggregated payload items",
+            )?,
+            lean_committee_signatures_aggregation_time_seconds: Histogram::with_opts(
+                histogram_opts!(
+                    "lean_committee_signatures_aggregation_time_seconds",
+                    "Time taken to aggregate committee signatures",
+                    vec![0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0]
+                ),
+            )?,
+
+            lean_is_aggregator: IntGauge::new(
+                "lean_is_aggregator",
+                "Validator's is_aggregator status (1=true, 0=false)",
+            )?,
+
+            lean_attestation_committee_subnet: IntGauge::new(
+                "lean_attestation_committee_subnet",
+                "Node's attestation committee subnet",
+            )?,
+            lean_attestation_committee_count: IntGauge::new(
+                "lean_attestation_committee_count",
+                "Number of attestation committees (ATTESTATION_COMMITTEE_COUNT)",
+            )?,
         })
     }
 
@@ -293,6 +369,15 @@ impl Metrics {
 
         default_registry.register(Box::new(self.lean_node_info.clone()))?;
         default_registry.register(Box::new(self.lean_node_start_time_seconds.clone()))?;
+        default_registry.register(Box::new(
+            self.lean_pq_sig_attestation_signatures_total.clone(),
+        ))?;
+        default_registry.register(Box::new(
+            self.lean_pq_sig_attestation_signatures_valid_total.clone(),
+        ))?;
+        default_registry.register(Box::new(
+            self.lean_pq_sig_attestation_signatures_invalid_total.clone(),
+        ))?;
         default_registry.register(Box::new(
             self.lean_pq_sig_attestation_signing_time_seconds.clone(),
         ))?;
@@ -308,7 +393,7 @@ impl Metrics {
                 .clone(),
         ))?;
         default_registry.register(Box::new(
-            self.lean_pq_sig_attestation_signatures_building_time_seconds
+            self.lean_pq_sig_aggregated_signatures_building_time_seconds
                 .clone(),
         ))?;
         default_registry.register(Box::new(
@@ -361,6 +446,19 @@ impl Metrics {
         default_registry.register(Box::new(self.lean_connected_peers.clone()))?;
         default_registry.register(Box::new(self.lean_peer_connection_events_total.clone()))?;
         default_registry.register(Box::new(self.lean_peer_disconnection_events_total.clone()))?;
+
+        // Additional Fork-Choice Metrics
+        default_registry.register(Box::new(self.lean_gossip_signatures.clone()))?;
+        default_registry.register(Box::new(self.lean_latest_new_aggregated_payloads.clone()))?;
+        default_registry.register(Box::new(self.lean_latest_known_aggregated_payloads.clone()))?;
+        default_registry.register(Box::new(
+            self.lean_committee_signatures_aggregation_time_seconds.clone(),
+        ))?;
+
+        default_registry.register(Box::new(self.lean_is_aggregator.clone()))?;
+
+        default_registry.register(Box::new(self.lean_attestation_committee_subnet.clone()))?;
+        default_registry.register(Box::new(self.lean_attestation_committee_count.clone()))?;
 
         Ok(())
     }

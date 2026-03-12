@@ -1,5 +1,5 @@
 use crate::gossipsub::config::GossipsubConfig;
-use crate::gossipsub::topic::{ATTESTATION_SUBNET_COUNT, GossipsubKind, get_topics};
+use crate::gossipsub::topic::{ATTESTATION_SUBNET_COUNT, GossipsubKind, get_subscription_topics};
 
 #[test]
 fn test_default_parameters() {
@@ -39,7 +39,7 @@ fn test_default_parameters() {
 #[test]
 fn test_set_topics() {
     let mut config = GossipsubConfig::new();
-    let topics = get_topics("genesis".to_string());
+    let topics = get_subscription_topics("genesis".to_string());
 
     config.set_topics(topics.clone());
 

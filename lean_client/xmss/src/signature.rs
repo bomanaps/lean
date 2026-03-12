@@ -8,6 +8,7 @@ use anyhow::{Error, anyhow, Result};
 use eth_ssz::DecodeError;
 use leansig::{serialization::Serializable, signature::SignatureScheme};
 use leansig::signature::generalized_xmss::instantiations_poseidon_top_level::lifetime_2_to_the_32::hashing_optimized::SIGTopLevelTargetSumLifetime32Dim64Base8;
+use metrics::METRICS;
 use serde::de;
 use serde::{Deserialize, Serialize};
 use ssz::{ByteVector, H256, Ssz};
@@ -42,7 +43,17 @@ impl Signature {
             &self.as_lean(),
         );
 
-        is_valid.then_some(()).ok_or(anyhow!("invalid signature"))
+        if is_valid {
+            METRICS.get().map(|metrics| {
+                metrics.lean_pq_sig_attestation_signatures_valid_total.inc();
+            });
+            Ok(())
+        } else {
+            METRICS.get().map(|metrics| {
+                metrics.lean_pq_sig_attestation_signatures_invalid_total.inc();
+            });
+            Err(anyhow!("invalid signature"))
+        }
     }
 
     pub(crate) fn from_lean(signature: LeanSigSignature) -> Self {

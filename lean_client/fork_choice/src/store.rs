@@ -5,7 +5,7 @@ use containers::{
     AggregatedSignatureProof, Attestation, AttestationData, Block, BlockHeader, Checkpoint, Config,
     SignatureKey, SignedBlockWithAttestation, Slot, State,
 };
-use metrics::set_gauge_u64;
+use metrics::{set_gauge_u64, METRICS};
 use ssz::{H256, SszHash};
 use xmss::Signature;
 
@@ -295,6 +295,8 @@ pub fn get_latest_justified(states: &HashMap<H256, State>) -> Option<&Checkpoint
 }
 
 pub fn update_head(store: &mut Store) {
+    let old_head = store.head;
+
     // Compute new head using LMD-GHOST from latest justified root
     let new_head = get_fork_choice_head(
         store,
@@ -303,6 +305,48 @@ pub fn update_head(store: &mut Store) {
         0,
     );
     store.head = new_head;
+
+    // Detect reorg if head changed and new head's parent is not old head
+    if new_head != old_head && !old_head.is_zero() {
+        if let Some(new_head_block) = store.blocks.get(&new_head) {
+            if new_head_block.parent_root != old_head {
+                let mut depth = 0u64;
+                let mut current = old_head;
+
+                
+                while !current.is_zero() && depth < 100 {
+                    if let Some(block) = store.blocks.get(&current) {
+                        // Check if new head descends from this block
+                        let mut check = new_head;
+                        while !check.is_zero() {
+                            if check == current {
+                                // Found common ancestor
+                                break;
+                            }
+                            if let Some(b) = store.blocks.get(&check) {
+                                check = b.parent_root;
+                            } else {
+                                break;
+                            }
+                        }
+                        if check == current {
+                            break;
+                        }
+                        depth += 1;
+                        current = block.parent_root;
+                    } else {
+                        break;
+                    }
+                }
+
+                // Record reorg metrics
+                METRICS.get().map(|metrics| {
+                    metrics.lean_fork_choice_reorgs_total.inc();
+                    metrics.lean_fork_choice_reorg_depth.observe(depth as f64);
+                });
+            }
+        }
+    }
 
     set_gauge_u64(
         |m| &m.lean_head_slot,

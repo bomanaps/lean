@@ -25,6 +25,12 @@ pub fn on_tick(store: &mut Store, time_millis: u64, has_proposal: bool) {
         // Advance by one interval with appropriate signaling
         tick_interval(store, should_signal_proposal);
     }
+
+    // Record current slot metric
+    let current_slot = store.time / INTERVALS_PER_SLOT;
+    METRICS.get().map(|metrics| {
+        metrics.lean_current_slot.set(current_slot as i64);
+    });
 }
 
 /// 1. The blocks voted for must exist in our store.
@@ -128,6 +134,11 @@ pub fn on_gossip_attestation(
     store
         .gossip_signatures
         .insert(sig_key, signed_attestation.signature);
+
+    // Update gossip signatures gauge
+    METRICS.get().map(|metrics| {
+        metrics.lean_gossip_signatures.set(store.gossip_signatures.len() as i64);
+    });
 
     // Store attestation data indexed by hash for aggregation lookup
     store
@@ -274,7 +285,11 @@ pub fn on_aggregated_attestation(
         metrics
             .lean_attestations_valid_total
             .with_label_values(&["aggregation"])
-            .inc()
+            .inc();
+        // Update gauge for new aggregated payloads count
+        metrics
+            .lean_latest_new_aggregated_payloads
+            .set(store.latest_new_aggregated_payloads.len() as i64);
     });
 
     Ok(())
@@ -483,6 +498,13 @@ fn process_block_internal(
             }
         }
     }
+
+    // Update gauge for known aggregated payloads count
+    METRICS.get().map(|metrics| {
+        metrics
+            .lean_latest_known_aggregated_payloads
+            .set(store.latest_known_aggregated_payloads.len() as i64);
+    });
 
     // Process each aggregated attestation's validators for fork choice
     // Signature verification is done in verify_signatures() before on_block()
