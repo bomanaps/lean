@@ -673,7 +673,8 @@ where
                             for block in &blocks {
                                 let parent_root = block.message.block.parent_root;
                                 if !parent_root.is_zero() {
-                                    self.pending_block_depths.insert(parent_root, request_depth + 1);
+                                    self.pending_block_depths
+                                        .insert(parent_root, request_depth + 1);
                                 }
                             }
 
@@ -799,7 +800,12 @@ where
                 num_roots = req.roots.len(),
                 "Retrying BlocksByRoot request with different peer"
             );
-            self.send_blocks_by_root_request_internal(peer_id, req.roots, req.retries + 1, req.depth);
+            self.send_blocks_by_root_request_internal(
+                peer_id,
+                req.roots,
+                req.retries + 1,
+                req.depth,
+            );
         } else {
             warn!(
                 num_roots = req.roots.len(),
@@ -1086,8 +1092,14 @@ where
             .blocks_by_root_req_resp
             .send_request(&peer_id, request);
 
-        self.pending_blocks_by_root
-            .insert(request_id, PendingBlocksRequest { roots, retries, depth });
+        self.pending_blocks_by_root.insert(
+            request_id,
+            PendingBlocksRequest {
+                roots,
+                retries,
+                depth,
+            },
+        );
     }
 
     fn build_behaviour(

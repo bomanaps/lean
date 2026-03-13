@@ -5,7 +5,7 @@ use containers::{
     AggregatedSignatureProof, Attestation, AttestationData, Block, BlockHeader, Checkpoint, Config,
     SignatureKey, SignedBlockWithAttestation, Slot, State,
 };
-use metrics::{set_gauge_u64, METRICS};
+use metrics::{METRICS, set_gauge_u64};
 use ssz::{H256, SszHash};
 use xmss::Signature;
 
@@ -313,7 +313,6 @@ pub fn update_head(store: &mut Store) {
                 let mut depth = 0u64;
                 let mut current = old_head;
 
-                
                 while !current.is_zero() && depth < 100 {
                     if let Some(block) = store.blocks.get(&current) {
                         // Check if new head descends from this block

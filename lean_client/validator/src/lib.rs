@@ -237,9 +237,10 @@ impl ValidatorService {
             let participants = AggregationBits::from_validator_indices(&validator_ids);
 
             // Create the aggregated signature proof
-            let timer = METRICS
-                .get()
-                .map(|m| m.lean_committee_signatures_aggregation_time_seconds.start_timer());
+            let timer = METRICS.get().map(|m| {
+                m.lean_committee_signatures_aggregation_time_seconds
+                    .start_timer()
+            });
             let proof = match AggregatedSignatureProof::aggregate(
                 participants,
                 public_keys,

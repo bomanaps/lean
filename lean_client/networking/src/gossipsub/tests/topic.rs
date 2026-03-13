@@ -1,7 +1,7 @@
 use crate::gossipsub::topic::{
     AGGREGATION_TOPIC, ATTESTATION_SUBNET_COUNT, ATTESTATION_SUBNET_PREFIX, BLOCK_TOPIC,
-    GossipsubKind, GossipsubTopic, SSZ_SNAPPY_ENCODING_POSTFIX, TOPIC_PREFIX,
-    compute_subnet_id, get_subscription_topics,
+    GossipsubKind, GossipsubTopic, SSZ_SNAPPY_ENCODING_POSTFIX, TOPIC_PREFIX, compute_subnet_id,
+    get_subscription_topics,
 };
 use libp2p::gossipsub::TopicHash;
 
@@ -93,7 +93,6 @@ fn test_topic_encoding_decoding_roundtrip() {
     assert_eq!(original.fork, decoded.fork);
     assert_eq!(original.kind, decoded.kind);
 }
-
 
 #[test]
 fn test_gossipsub_kind_display() {

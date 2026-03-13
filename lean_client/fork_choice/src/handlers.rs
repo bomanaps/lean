@@ -131,7 +131,9 @@ pub fn on_gossip_attestation(
 
     // Update gossip signatures gauge
     METRICS.get().map(|metrics| {
-        metrics.lean_gossip_signatures.set(store.gossip_signatures.len() as i64);
+        metrics
+            .lean_gossip_signatures
+            .set(store.gossip_signatures.len() as i64);
     });
 
     // Store attestation data indexed by hash for aggregation lookup

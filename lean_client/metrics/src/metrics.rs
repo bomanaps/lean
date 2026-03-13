@@ -376,7 +376,8 @@ impl Metrics {
             self.lean_pq_sig_attestation_signatures_valid_total.clone(),
         ))?;
         default_registry.register(Box::new(
-            self.lean_pq_sig_attestation_signatures_invalid_total.clone(),
+            self.lean_pq_sig_attestation_signatures_invalid_total
+                .clone(),
         ))?;
         default_registry.register(Box::new(
             self.lean_pq_sig_attestation_signing_time_seconds.clone(),
@@ -452,7 +453,8 @@ impl Metrics {
         default_registry.register(Box::new(self.lean_latest_new_aggregated_payloads.clone()))?;
         default_registry.register(Box::new(self.lean_latest_known_aggregated_payloads.clone()))?;
         default_registry.register(Box::new(
-            self.lean_committee_signatures_aggregation_time_seconds.clone(),
+            self.lean_committee_signatures_aggregation_time_seconds
+                .clone(),
         ))?;
 
         default_registry.register(Box::new(self.lean_is_aggregator.clone()))?;

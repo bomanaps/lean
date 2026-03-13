@@ -97,7 +97,6 @@ pub fn get_subscription_topics(
     topics
 }
 
-
 impl GossipsubTopic {
     pub fn decode(topic: &TopicHash) -> Result<Self, String> {
         let topic_parts = Self::split_topic(topic)?;

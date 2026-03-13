@@ -50,7 +50,9 @@ impl Signature {
             Ok(())
         } else {
             METRICS.get().map(|metrics| {
-                metrics.lean_pq_sig_attestation_signatures_invalid_total.inc();
+                metrics
+                    .lean_pq_sig_attestation_signatures_invalid_total
+                    .inc();
             });
             Err(anyhow!("invalid signature"))
         }
