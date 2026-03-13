@@ -39,7 +39,8 @@ fn test_default_parameters() {
 #[test]
 fn test_set_topics() {
     let mut config = GossipsubConfig::new();
-    let topics = get_subscription_topics("genesis".to_string());
+    // Use aggregator mode to get all subnets for this test
+    let topics = get_subscription_topics("genesis".to_string(), Some(0), true);
 
     config.set_topics(topics.clone());
 
