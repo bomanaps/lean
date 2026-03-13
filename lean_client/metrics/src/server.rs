@@ -33,10 +33,10 @@ pub struct MetricsServerConfig {
     #[arg(long = "metrics")]
     metrics_enabled: bool,
 
-    #[clap(default_value_t = Self::default().metrics_address)]
+    #[clap(long = "metrics-address", default_value_t = Self::default().metrics_address)]
     metrics_address: IpAddr,
 
-    #[clap(default_value_t = Self::default().metrics_port)]
+    #[clap(long = "metrics-port", default_value_t = Self::default().metrics_port)]
     metrics_port: u16,
 }
 
