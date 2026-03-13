@@ -44,7 +44,20 @@ impl GossipsubKind {
     }
 }
 
-pub fn get_subscription_topics(fork: String) -> Vec<GossipsubTopic> {
+/// Get gossipsub topics for subscription based on validator role.
+///
+/// Topic subscription rules:
+/// - Block and Aggregation topics: Always subscribed
+/// - Attestation subnet topics:
+///   - If `is_aggregator` is true: Subscribe to ALL attestation subnets (needed for aggregation)
+///   - If `is_aggregator` is false and `validator_id` is Some: Subscribe only to the validator's
+///     own subnet (validator_id % ATTESTATION_SUBNET_COUNT) for publishing attestations
+///   - If `validator_id` is None: Subscribe to all subnets (non-validator node for general sync)
+pub fn get_subscription_topics(
+    fork: String,
+    validator_id: Option<u64>,
+    is_aggregator: bool,
+) -> Vec<GossipsubTopic> {
     let mut topics = vec![
         GossipsubTopic {
             fork: fork.clone(),
@@ -56,11 +69,29 @@ pub fn get_subscription_topics(fork: String) -> Vec<GossipsubTopic> {
         },
     ];
 
-    for subnet_id in 0..ATTESTATION_SUBNET_COUNT {
+    if is_aggregator {
+        // Aggregators subscribe to ALL attestation subnets to collect attestations for aggregation
+        for subnet_id in 0..ATTESTATION_SUBNET_COUNT {
+            topics.push(GossipsubTopic {
+                fork: fork.clone(),
+                kind: GossipsubKind::AttestationSubnet(subnet_id),
+            });
+        }
+    } else if let Some(vid) = validator_id {
+        // Non-aggregator validators subscribe only to their own subnet for publishing attestations
+        let subnet_id = compute_subnet_id(vid);
         topics.push(GossipsubTopic {
             fork: fork.clone(),
             kind: GossipsubKind::AttestationSubnet(subnet_id),
         });
+    } else {
+        // Non-validator nodes subscribe to all subnets for general network participation
+        for subnet_id in 0..ATTESTATION_SUBNET_COUNT {
+            topics.push(GossipsubTopic {
+                fork: fork.clone(),
+                kind: GossipsubKind::AttestationSubnet(subnet_id),
+            });
+        }
     }
 
     topics

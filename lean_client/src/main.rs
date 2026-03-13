@@ -538,20 +538,27 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Extract first validator ID for subnet subscription and metrics
+    let first_validator_id: Option<u64> = validator_service
+        .as_ref()
+        .and_then(|service| service.config.validator_indices.first().copied());
+
     // Record validator subnet metric if validator is configured
-    if let Some(ref service) = validator_service {
-        if let Some(&first_validator_id) = service.config.validator_indices.first() {
-            let subnet_id = compute_subnet_id(first_validator_id);
-            METRICS.get().map(|metrics| {
-                metrics
-                    .lean_attestation_committee_subnet
-                    .set(subnet_id as i64);
-            });
-        }
+    if let Some(validator_id) = first_validator_id {
+        let subnet_id = compute_subnet_id(validator_id);
+        METRICS.get().map(|metrics| {
+            metrics
+                .lean_attestation_committee_subnet
+                .set(subnet_id as i64);
+        });
     }
 
     let fork = "devnet0".to_string();
-    let gossipsub_topics = get_subscription_topics(fork);
+    // Subscribe to topics based on validator role:
+    // - Aggregators: all attestation subnets
+    // - Non-aggregator validators: only their own subnet
+    // - Non-validators: all subnets for general sync
+    let gossipsub_topics = get_subscription_topics(fork, first_validator_id, args.is_aggregator);
     let mut gossipsub_config = GossipsubConfig::new();
     gossipsub_config.set_topics(gossipsub_topics);
 

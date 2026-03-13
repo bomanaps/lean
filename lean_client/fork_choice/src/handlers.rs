@@ -25,12 +25,6 @@ pub fn on_tick(store: &mut Store, time_millis: u64, has_proposal: bool) {
         // Advance by one interval with appropriate signaling
         tick_interval(store, should_signal_proposal);
     }
-
-    // Record current slot metric
-    let current_slot = store.time / INTERVALS_PER_SLOT;
-    METRICS.get().map(|metrics| {
-        metrics.lean_current_slot.set(current_slot as i64);
-    });
 }
 
 /// 1. The blocks voted for must exist in our store.
