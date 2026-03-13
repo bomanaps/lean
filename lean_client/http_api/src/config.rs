@@ -2,7 +2,6 @@ use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use anyhow::Result;
 use clap::Args;
-use metrics::MetricsServerConfig;
 use tokio::net::TcpListener;
 
 const DEFAULT_HTTP_PORT: u16 = 8080;
@@ -14,9 +13,6 @@ pub struct HttpServerConfig {
 
     #[clap(long = "http-port", default_value_t = DEFAULT_HTTP_PORT)]
     http_port: u16,
-
-    #[clap(flatten)]
-    pub(crate) metrics: MetricsServerConfig,
 }
 
 impl HttpServerConfig {
@@ -26,9 +22,5 @@ impl HttpServerConfig {
 
     pub fn address(&self) -> SocketAddr {
         (self.http_address, self.http_port).into()
-    }
-
-    pub fn metrics_enabled(&self) -> bool {
-        self.metrics.enabled()
     }
 }

@@ -13,7 +13,7 @@ use fork_choice::{
 };
 use http_api::HttpServerConfig;
 use libp2p_identity::Keypair;
-use metrics::{METRICS, Metrics};
+use metrics::{METRICS, Metrics, MetricsServerConfig};
 use networking::gossipsub::config::GossipsubConfig;
 use networking::gossipsub::topic::{compute_subnet_id, get_subscription_topics};
 use networking::network::{NetworkService, NetworkServiceConfig};
@@ -222,6 +222,9 @@ struct Args {
     #[command(flatten)]
     http_config: HttpServerConfig,
 
+    #[command(flatten)]
+    metrics_config: MetricsServerConfig,
+
     /// List of optional runtime features to enable
     #[clap(long, value_delimiter = ',')]
     features: Vec<Feature>,
@@ -257,7 +260,7 @@ async fn main() -> Result<()> {
         feature.enable();
     }
 
-    let metrics = if args.http_config.metrics_enabled() {
+    let metrics = if args.metrics_config.enabled() {
         let metrics = Metrics::new()?;
         metrics.register_with_default_metrics()?;
         let metrics = Arc::new(metrics);
@@ -652,10 +655,16 @@ async fn main() -> Result<()> {
 
     let http_store = store.clone();
     task::spawn(async move {
-        if let Err(err) =
-            http_api::run_server(args.http_config, genesis_time, Some(http_store)).await
-        {
+        if let Err(err) = http_api::run_server(args.http_config, http_store).await {
             error!("HTTP Server failed with error: {err:?}");
+        }
+    });
+
+    task::spawn(async move {
+        if args.metrics_config.enabled()
+            && let Err(err) = metrics::run_server(args.metrics_config, genesis_time).await
+        {
+            error!("Metrics server failed with error: {err:?}");
         }
     });
 

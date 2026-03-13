@@ -3510,6 +3510,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "futures",
  "http_api_utils",
  "itertools 0.14.0",
  "once_cell",
