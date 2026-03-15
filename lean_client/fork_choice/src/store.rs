@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, anyhow, ensure};
 use containers::{
     AggregatedSignatureProof, Attestation, AttestationData, Block, BlockHeader, Checkpoint, Config,
-    SignatureKey, SignedBlockWithAttestation, Slot, State,
+    SignatureKey, SignedAggregatedAttestation, SignedAttestation, SignedBlockWithAttestation, Slot,
+    State,
 };
 use metrics::{METRICS, set_gauge_u64};
 use ssz::{H256, SszHash};
@@ -62,6 +63,18 @@ pub struct Store {
     /// Signed blocks indexed by block root.
     /// Used to serve BlocksByRoot requests to peers for checkpoint sync backfill.
     pub signed_blocks: HashMap<H256, SignedBlockWithAttestation>,
+
+    /// Gossip attestations waiting for referenced blocks to arrive.
+    /// Keyed by the missing block root. Drained when that block is processed.
+    pub pending_attestations: HashMap<H256, Vec<SignedAttestation>>,
+
+    /// Aggregated attestations waiting for referenced blocks to arrive.
+    /// Keyed by the missing block root. Drained when that block is processed.
+    pub pending_aggregated_attestations: HashMap<H256, Vec<SignedAggregatedAttestation>>,
+
+    /// Block roots that were referenced by attestations but not found in the store.
+    /// Drained by the caller (main.rs) to trigger blocks-by-root RPC fetches.
+    pub pending_fetch_roots: HashSet<H256>,
 }
 
 const JUSTIFICATION_LOOKBACK_SLOTS: u64 = 3;
@@ -165,26 +178,25 @@ pub fn get_forkchoice_store(
         block_header.hash_tree_root()
     };
 
-    // Per checkpoint sync: always use anchor block's root for checkpoints.
+    // Per checkpoint sync: always use anchor block's root and slot for checkpoints.
     // The original checkpoint roots point to blocks that don't exist in our store.
-    // We only have the anchor block, so use its root. Keep the slot from state
-    // to preserve justification/finalization progress information.
+    // We only have the anchor block, so both root and slot must refer to it.
+    //
+    // Using the state's justified.slot with the anchor root creates an inconsistency:
+    // validate_attestation_data requires store.blocks[source.root].slot == source.slot,
+    // which fails when the chain has progressed beyond the last justified block
+    // (e.g., state downloaded at slot 2291, last justified at slot 2285).
+    //
+    // The first real justification event from on_block will replace these values
+    // with the correct ones, so the anchor slot is only used for the initial period.
     let latest_justified = Checkpoint {
         root: block_root,
-        slot: if anchor_state.latest_justified.root.is_zero() {
-            block_slot
-        } else {
-            anchor_state.latest_justified.slot
-        },
+        slot: block_slot,
     };
 
     let latest_finalized = Checkpoint {
         root: block_root,
-        slot: if anchor_state.latest_finalized.root.is_zero() {
-            block_slot
-        } else {
-            anchor_state.latest_finalized.slot
-        },
+        slot: block_slot,
     };
 
     // Store the original anchor_state - do NOT modify it
@@ -207,6 +219,9 @@ pub fn get_forkchoice_store(
         latest_new_aggregated_payloads: HashMap::new(),
         attestation_data_by_root: HashMap::new(),
         signed_blocks: [(block_root, anchor_block)].into(),
+        pending_attestations: HashMap::new(),
+        pending_aggregated_attestations: HashMap::new(),
+        pending_fetch_roots: HashSet::new(),
     }
 }
 
@@ -499,7 +514,10 @@ pub fn get_proposal_head(store: &mut Store, slot: Slot) -> H256 {
 /// 1. **Get Proposal Head**: Retrieve current chain head as parent
 /// 2. **Collect Attestations**: Convert known attestations to plain attestations
 /// 3. **Build Block**: Use State.build_block with signature caches
-/// 4. **Store Block**: Insert block and post-state into Store
+///
+/// The block and state are NOT inserted here. The caller signs the block and sends
+/// it back via `ChainMessage::ProcessBlock`, which runs the full `on_block` path:
+/// state transition, `update_head`, checkpoint updates, and proposer attestation.
 ///
 /// # Arguments
 /// * `store` - Mutable reference to the fork choice store
@@ -513,7 +531,6 @@ pub fn produce_block_with_signatures(
     slot: Slot,
     validator_index: u64,
 ) -> Result<(H256, Block, Vec<AggregatedSignatureProof>)> {
-    // Get parent block head
     let head_root = get_proposal_head(store, slot);
     let head_state = store
         .states
@@ -521,7 +538,6 @@ pub fn produce_block_with_signatures(
         .ok_or_else(|| anyhow!("Head state not found"))?
         .clone();
 
-    // Validate proposer authorization for this slot
     let num_validators = head_state.validators.len_u64();
     let expected_proposer = slot.0 % num_validators;
     ensure!(
@@ -532,8 +548,6 @@ pub fn produce_block_with_signatures(
         expected_proposer
     );
 
-    // Convert AttestationData to Attestation objects for build_block
-    // Per devnet-2, store now holds AttestationData directly
     let available_attestations: Vec<Attestation> = store
         .latest_known_attestations
         .iter()
@@ -543,28 +557,21 @@ pub fn produce_block_with_signatures(
         })
         .collect();
 
-    // Get known block roots for attestation validation
     let known_block_roots: std::collections::HashSet<H256> = store.blocks.keys().copied().collect();
 
-    // Build block with fixed-point attestation collection and signature aggregation
-    let (final_block, final_post_state, _aggregated_attestations, signatures) = head_state
+    let (final_block, _final_post_state, _aggregated_attestations, signatures) = head_state
         .build_block(
             slot,
             validator_index,
             head_root,
-            None, // initial_attestations - start with empty, let fixed-point collect
+            None,
             Some(available_attestations),
             Some(&known_block_roots),
             Some(&store.gossip_signatures),
             Some(&store.latest_known_aggregated_payloads),
         )?;
 
-    // Compute block root using the header hash (canonical block root)
     let block_root = final_block.hash_tree_root();
-
-    // Store block and state (per devnet-2, we store the plain Block)
-    store.blocks.insert(block_root, final_block.clone());
-    store.states.insert(block_root, final_post_state);
 
     Ok((block_root, final_block, signatures))
 }

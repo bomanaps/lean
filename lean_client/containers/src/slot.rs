@@ -56,7 +56,7 @@ impl Slot {
         // Rule 2: Slots at perfect square distances are justifiable.
         // Examples: delta = 1, 4, 9, 16, 25, 36, 49, 64, ...
         // Check: integer square root squared equals delta
-        let sqrt = (delta as f64).sqrt() as u64;
+        let sqrt = delta.isqrt();
         if sqrt * sqrt == delta {
             return true;
         }
@@ -66,10 +66,11 @@ impl Slot {
         // Mathematical insight: For pronic delta = n(n+1), we have:
         //   4*delta + 1 = 4n(n+1) + 1 = (2n+1)^2
         // Check: 4*delta+1 is an odd perfect square
-        let test = 4 * delta + 1;
-        let test_sqrt = (test as f64).sqrt() as u64;
-        if test_sqrt * test_sqrt == test && test_sqrt % 2 == 1 {
-            return true;
+        if let Some(test) = delta.checked_mul(4).and_then(|v| v.checked_add(1)) {
+            let test_sqrt = test.isqrt();
+            if test_sqrt * test_sqrt == test && test_sqrt % 2 == 1 {
+                return true;
+            }
         }
 
         false

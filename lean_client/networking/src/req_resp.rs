@@ -259,9 +259,50 @@ impl LeanCodec {
         }
     }
 
+    /// Returns the byte length of one snappy framing stream starting at data[0].
+    ///
+    /// Snappy framing format (https://github.com/google/snappy/blob/main/framing_format.txt):
+    ///   Stream identifier chunk: [0xFF][0x06][0x00][0x00][s][N][a][P][p][Y]
+    ///   Data chunk:              [type][len_lo][len_mid][len_hi][data...]
+    ///
+    /// We scan through chunk headers to advance without decompressing.  The
+    /// stream identifier byte 0xFF cannot legally appear as a chunk type inside
+    /// a stream, so hitting 0xFF after the first chunk signals the start of the
+    /// next framing stream and therefore the end of this one.
+    fn snappy_frame_size(data: &[u8]) -> io::Result<usize> {
+        // Stream identifier is 10 bytes: 4-byte header + 6-byte "sNaPpY"
+        const STREAM_ID: &[u8] = b"\xff\x06\x00\x00sNaPpY";
+        if data.len() < STREAM_ID.len() || &data[..STREAM_ID.len()] != STREAM_ID {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Missing snappy stream identifier",
+            ));
+        }
+
+        let mut pos = STREAM_ID.len();
+        while pos < data.len() {
+            // 0xFF marks the start of a new snappy stream — this stream ends here.
+            if data[pos] == 0xFF {
+                break;
+            }
+            if pos + 4 > data.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Truncated snappy chunk header",
+                ));
+            }
+            // 3-byte LE length field (bytes 1..=3 of header)
+            let chunk_len =
+                u32::from_le_bytes([data[pos + 1], data[pos + 2], data[pos + 3], 0]) as usize;
+            pos += 4 + chunk_len;
+        }
+
+        Ok(pos)
+    }
+
     /// Decode a single response chunk per spec:
     /// [response_code: 1 byte][varint: uncompressed_length][snappy_framed_payload]
-    /// Returns (code, ssz_bytes, total_bytes_consumed)
+    /// Returns (code, ssz_bytes, total_bytes_consumed) so the caller can advance the offset.
     fn decode_response_chunk(data: &[u8]) -> io::Result<(u8, Vec<u8>, usize)> {
         if data.is_empty() {
             return Err(io::Error::new(
@@ -273,40 +314,33 @@ impl LeanCodec {
         // First byte is response code
         let code = data[0];
 
-        // Parse varint length starting at offset 1
+        // Parse uncompressed length varint at offset 1
         let (declared_len, varint_size) = Self::decode_varint(&data[1..])?;
 
         if declared_len as usize > MAX_PAYLOAD_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "Declared length too large: {} > {}",
-                    declared_len, MAX_PAYLOAD_SIZE
-                ),
+                format!("Declared length too large: {} > {}", declared_len, MAX_PAYLOAD_SIZE),
             ));
         }
 
-        // Decompress payload after code + varint
         let payload_start = 1 + varint_size;
-        let compressed = &data[payload_start..];
-        let ssz_bytes = Self::decompress(compressed)?;
 
-        // Validate length matches
+        // Determine the byte length of this snappy framing stream so we know
+        // exactly where the next chunk begins (required for multi-block responses).
+        let frame_size = Self::snappy_frame_size(&data[payload_start..])?;
+        let payload_end = payload_start + frame_size;
+
+        let ssz_bytes = Self::decompress(&data[payload_start..payload_end])?;
+
         if ssz_bytes.len() != declared_len as usize {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "Length mismatch: declared {}, got {}",
-                    declared_len,
-                    ssz_bytes.len()
-                ),
+                format!("Length mismatch: declared {}, got {}", declared_len, ssz_bytes.len()),
             ));
         }
 
-        // Calculate total bytes consumed (approximate - we consumed all remaining data)
-        let total_consumed = data.len();
-
-        Ok((code, ssz_bytes, total_consumed))
+        Ok((code, ssz_bytes, payload_end))
     }
 
     /// Decode response per spec. For BlocksByRoot, handle chunked format:
@@ -334,25 +368,32 @@ impl LeanCodec {
             })?;
             Ok(LeanResponse::Status(status))
         } else if protocol.contains("blocks_by_root") {
-            let (code, ssz_bytes, _) = Self::decode_response_chunk(data)?;
+            // Multi-chunk response: each block is a separate chunk.
+            // Loop until all bytes are consumed.
+            let mut blocks = Vec::new();
+            let mut offset = 0;
+            while offset < data.len() {
+                let (code, ssz_bytes, consumed) = Self::decode_response_chunk(&data[offset..])?;
+                offset += consumed;
 
-            if code != RESPONSE_SUCCESS {
-                // Non-success codes indicate block not found or error
-                warn!(response_code = code, "BlocksByRoot non-success response");
-                return Ok(LeanResponse::BlocksByRoot(Vec::new()));
+                if code != RESPONSE_SUCCESS {
+                    warn!(response_code = code, "BlocksByRoot non-success response chunk");
+                    continue;
+                }
+                if ssz_bytes.is_empty() {
+                    continue;
+                }
+
+                let block =
+                    SignedBlockWithAttestation::from_ssz_default(&ssz_bytes).map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::Other,
+                            format!("SSZ decode Block failed: {e:?}"),
+                        )
+                    })?;
+                blocks.push(block);
             }
-
-            if ssz_bytes.is_empty() {
-                return Ok(LeanResponse::BlocksByRoot(Vec::new()));
-            }
-
-            let block = SignedBlockWithAttestation::from_ssz_default(&ssz_bytes).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("SSZ decode Block failed: {e:?}"),
-                )
-            })?;
-            Ok(LeanResponse::BlocksByRoot(vec![block]))
+            Ok(LeanResponse::BlocksByRoot(blocks))
         } else {
             Err(io::Error::new(
                 io::ErrorKind::Other,

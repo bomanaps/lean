@@ -5,10 +5,10 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow, bail};
 use containers::{
     AggregatedSignatureProof, AggregationBits, Attestation, AttestationData, AttestationSignatures,
-    Block, BlockSignatures, BlockWithAttestation, Checkpoint, SignatureKey,
+    Block, BlockSignatures, BlockWithAttestation,
     SignedAggregatedAttestation, SignedAttestation, SignedBlockWithAttestation, Slot,
 };
-use fork_choice::store::{Store, produce_block_with_signatures};
+use fork_choice::store::Store;
 use metrics::{METRICS, stop_and_discard, stop_and_record};
 use ssz::H256;
 use ssz::SszHash;
@@ -280,36 +280,19 @@ impl ValidatorService {
         }
     }
 
-    /// Build a block proposal for the given slot
-    pub fn build_block_proposal(
+    /// Sign a block given pre-fetched attestation data.
+    ///
+    /// Unlike `sign_block`, this method does not need a `&Store` reference.
+    /// The validator task calls `BuildAttestationData` on the chain task first,
+    /// receives the `AttestationData` via oneshot, then calls this method.
+    /// This keeps XMSS signing (~170ms) entirely off the chain task's thread.
+    pub fn sign_block_with_data(
         &self,
-        store: &mut Store,
-        slot: Slot,
-        proposer_index: u64,
-    ) -> Result<SignedBlockWithAttestation> {
-        info!(
-            slot = slot.0,
-            proposer = proposer_index,
-            "Building block proposal"
-        );
-
-        let (_, block, signatures) = produce_block_with_signatures(store, slot, proposer_index)
-            .context("failed to produce block")?;
-
-        let signed_block = self.sign_block(store, block, proposer_index, signatures)?;
-
-        Ok(signed_block)
-    }
-
-    fn sign_block(
-        &self,
-        store: &Store,
         block: Block,
         validator_index: u64,
         attestation_signatures: Vec<AggregatedSignatureProof>,
+        proposer_attestation_data: AttestationData,
     ) -> Result<SignedBlockWithAttestation> {
-        let proposer_attestation_data = store.produce_attestation_data(block.slot)?;
-
         let proposer_attestation = Attestation {
             validator_id: validator_index,
             data: proposer_attestation_data,
@@ -350,48 +333,32 @@ impl ValidatorService {
         Ok(SignedBlockWithAttestation { message, signature })
     }
 
-    /// Create attestations for all our validators for the given slot
-    pub fn create_attestations(&self, store: &Store, slot: Slot) -> Vec<SignedAttestation> {
-        let vote_target = store.get_attestation_target();
-
-        // Skip attestation creation if target slot is less than source slot
-        // At genesis, both target and source are slot 0, which is valid
-        if vote_target.slot < store.latest_justified.slot {
+    /// Create and sign attestations for all validators given pre-fetched attestation data.
+    ///
+    /// Unlike `create_attestations`, this method does not need a `&Store` reference.
+    /// The validator task calls `BuildAttestationData` on the chain task first,
+    /// receives the `AttestationData` via oneshot, then calls this method.
+    /// This keeps XMSS signing entirely off the chain task's thread.
+    pub fn create_attestations_from_data(
+        &self,
+        slot: Slot,
+        attestation_data: AttestationData,
+    ) -> Vec<SignedAttestation> {
+        if attestation_data.target.slot < attestation_data.source.slot {
             warn!(
-                target_slot = vote_target.slot.0,
-                source_slot = store.latest_justified.slot.0,
+                target_slot = attestation_data.target.slot.0,
+                source_slot = attestation_data.source.slot.0,
                 "Skipping attestation: target slot must be >= source slot"
             );
             return vec![];
         }
 
-        let head_block = match store.blocks.get(&store.head) {
-            Some(b) => b,
-            None => {
-                warn!("WARNING: Attestation skipped. (Reason: HEAD BLOCK NOT FOUND)");
-                return vec![];
-            }
-        };
-
-        let head_checkpoint = Checkpoint {
-            root: store.head,
-            slot: head_block.slot,
-        };
-
         self.config
             .validator_indices
             .iter()
             .filter_map(|&idx| {
-                let attestation = AttestationData {
-                    slot,
-                    head: head_checkpoint.clone(),
-                    target: vote_target.clone(),
-                    source: store.latest_justified.clone(),
-                };
-
                 let signature = if let Some(ref key_manager) = self.key_manager {
-                    // Sign with XMSS
-                    let message = attestation.hash_tree_root();
+                    let message = attestation_data.hash_tree_root();
                     let epoch = slot.0 as u32;
 
                     let _timer = METRICS.get().map(|metrics| {
@@ -399,17 +366,17 @@ impl ValidatorService {
                             .lean_pq_sig_attestation_signing_time_seconds
                             .start_timer()
                     });
+
                     match key_manager.sign(idx, epoch, message) {
                         Ok(sig) => {
-                            // Record successful attestation signature
                             METRICS.get().map(|metrics| {
                                 metrics.lean_pq_sig_attestation_signatures_total.inc();
                             });
                             info!(
                                 slot = slot.0,
                                 validator = idx,
-                                target_slot = vote_target.slot.0,
-                                source_slot = store.latest_justified.slot.0,
+                                target_slot = attestation_data.target.slot.0,
+                                source_slot = attestation_data.source.slot.0,
                                 "Created signed attestation"
                             );
                             sig
@@ -424,12 +391,9 @@ impl ValidatorService {
                         }
                     }
                 } else {
-                    // No key manager - use zero signature
                     info!(
                         slot = slot.0,
                         validator = idx,
-                        target_slot = vote_target.slot.0,
-                        source_slot = store.latest_justified.slot.0,
                         "Created attestation with zero signature"
                     );
                     Signature::default()
@@ -437,10 +401,11 @@ impl ValidatorService {
 
                 Some(SignedAttestation {
                     validator_id: idx,
-                    message: attestation,
+                    message: attestation_data.clone(),
                     signature,
                 })
             })
             .collect()
     }
+
 }

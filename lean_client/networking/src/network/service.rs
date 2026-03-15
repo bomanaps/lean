@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File,
     io,
     net::IpAddr,
@@ -48,7 +48,9 @@ use crate::{
 };
 
 const MAX_BLOCKS_BY_ROOT_RETRIES: u8 = 3;
-const MAX_BLOCK_FETCH_DEPTH: u32 = 512;
+const MAX_BLOCK_FETCH_DEPTH: u32 = 65536;
+/// Maximum roots per BlocksByRoot request, aligned with leanSpec BackfillSync.
+const MAX_BLOCKS_PER_REQUEST: usize = 10;
 
 struct PendingBlocksRequest {
     roots: Vec<H256>,
@@ -187,6 +189,8 @@ where
     pending_blocks_by_root: HashMap<OutboundRequestId, PendingBlocksRequest>,
     /// Depth tracking per block root for limiting backward chain walking
     pending_block_depths: HashMap<H256, u32>,
+    /// Roots currently in-flight to deduplicate network-layer pipelining vs chain-side requests
+    in_flight_roots: HashSet<H256>,
 }
 
 impl<R, S> NetworkService<R, S>
@@ -295,6 +299,7 @@ where
             status_provider,
             pending_blocks_by_root: HashMap::new(),
             pending_block_depths: HashMap::new(),
+            in_flight_roots: HashSet::new(),
         };
 
         service.listen(&multiaddr)?;
@@ -312,10 +317,18 @@ where
         let mut discovery_interval = interval(Duration::from_secs(30));
         discovery_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+        // Periodic sync trigger: send status to all connected peers so backfill re-fires
+        // whenever lean is behind, regardless of who dialed whom.
+        let mut sync_interval = interval(Duration::from_secs(30));
+        sync_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
         loop {
             select! {
                 _ = reconnect_interval.tick() => {
                     self.connect_to_peers(self.network_config.bootnodes.to_multiaddrs()).await;
+                }
+                _ = sync_interval.tick() => {
+                    self.send_status_to_all_connected_peers();
                 }
                 _ = discovery_interval.tick() => {
                     // Trigger active peer discovery
@@ -596,8 +609,31 @@ where
         match event {
             Event::Message { peer, message, .. } => match message {
                 Message::Response { response, .. } => match response {
-                    LeanResponse::Status(_) => {
-                        info!(peer = %peer, "Received Status response");
+                    LeanResponse::Status(peer_status) => {
+                        let (our_finalized_slot, our_head_slot) = {
+                            let s = self.status_provider.read();
+                            (s.finalized.slot.0, s.head.slot.0)
+                        };
+                        let peer_finalized_slot = peer_status.finalized.slot.0;
+                        let peer_head_root = peer_status.head.root;
+                        let peer_head_slot = peer_status.head.slot.0;
+
+                        info!(
+                            peer = %peer,
+                            our_finalized = our_finalized_slot,
+                            peer_finalized = peer_finalized_slot,
+                            peer_head = peer_head_slot,
+                            "Received Status response"
+                        );
+
+                        self.maybe_trigger_backfill(
+                            peer,
+                            peer_finalized_slot,
+                            peer_head_slot,
+                            peer_head_root,
+                            our_finalized_slot,
+                            our_head_slot,
+                        );
                     }
                     _ => {
                         warn!(peer = %peer, "Unexpected response type on Status protocol");
@@ -608,11 +644,16 @@ where
                 } => {
                     use crate::req_resp::{LeanRequest, LeanResponse};
 
-                    let response = match request {
-                        LeanRequest::Status(_) => {
+                    let (response, peer_finalized_slot, peer_head_root, peer_head_slot, our_finalized_slot, our_head_slot) = match request {
+                        LeanRequest::Status(peer_status) => {
                             let status = self.status_provider.read().clone();
-                            info!(peer = %peer, finalized_slot = status.finalized.slot.0, head_slot = status.head.slot.0, "Received Status request");
-                            LeanResponse::Status(status)
+                            let our_finalized = status.finalized.slot.0;
+                            let our_head = status.head.slot.0;
+                            info!(peer = %peer, finalized_slot = our_finalized, head_slot = our_head, "Received Status request");
+                            let pf = peer_status.finalized.slot.0;
+                            let ph = peer_status.head.root;
+                            let phs = peer_status.head.slot.0;
+                            (LeanResponse::Status(status), pf, ph, phs, our_finalized, our_head)
                         }
                         _ => {
                             warn!(peer = %peer, "Unexpected request type on Status protocol");
@@ -628,6 +669,15 @@ where
                     {
                         warn!(peer = %peer, ?e, "Failed to send Status response");
                     }
+
+                    self.maybe_trigger_backfill(
+                        peer,
+                        peer_finalized_slot,
+                        peer_head_slot,
+                        peer_head_root,
+                        our_finalized_slot,
+                        our_head_slot,
+                    );
                 }
             },
             Event::OutboundFailure { peer, error, .. } => {
@@ -659,6 +709,14 @@ where
                     let pending = self.pending_blocks_by_root.remove(&request_id);
                     let request_depth = pending.as_ref().map(|p| p.depth).unwrap_or(0);
 
+                    // Release in-flight tracking so these roots can be re-requested if needed.
+                    // Retry paths re-add them via send_blocks_by_root_request_internal.
+                    if let Some(ref req) = pending {
+                        for root in &req.roots {
+                            self.in_flight_roots.remove(root);
+                        }
+                    }
+
                     match response {
                         LeanResponse::BlocksByRoot(blocks) => {
                             info!(
@@ -668,17 +726,78 @@ where
                                 "Received BlocksByRoot response"
                             );
 
-                            // Track depth for potential parent block requests
-                            // Each block's parent will be requested at depth + 1
-                            for block in &blocks {
-                                let parent_root = block.message.block.parent_root;
-                                if !parent_root.is_zero() {
-                                    self.pending_block_depths
-                                        .insert(parent_root, request_depth + 1);
+                            // Step 1: Insert all received blocks into signed_block_provider
+                            // immediately — before chain processing. This mirrors leanSpec's
+                            // BlockCache.add(): blocks are "known" as soon as they arrive.
+                            // Siblings within the same response batch are visible to each other
+                            // during the parent check below.
+                            {
+                                let mut provider = self.signed_block_provider.write();
+                                for block in &blocks {
+                                    let root = block.message.block.hash_tree_root();
+                                    provider.insert(root, block.clone());
                                 }
                             }
 
-                            // Feed received blocks back into chain processing
+                            // Step 2: Collect unique parent roots that are not yet received.
+                            // Fire the next BlocksByRoot request immediately from the network
+                            // layer, overlapping the next RTT with chain processing time.
+                            // This is the leanSpec BackfillSync recursive pattern:
+                            //   _process_received_blocks → fill_missing(new_orphan_parents)
+                            let next_depth = request_depth + 1;
+                            if next_depth < MAX_BLOCK_FETCH_DEPTH {
+                                let unknown_parents: Vec<H256> = {
+                                    let provider = self.signed_block_provider.read();
+                                    let mut seen = HashSet::new();
+                                    blocks
+                                        .iter()
+                                        .filter_map(|block| {
+                                            let parent_root = block.message.block.parent_root;
+                                            if parent_root.is_zero() {
+                                                return None;
+                                            }
+                                            // Already received (in this batch or previously)?
+                                            if provider.contains_key(&parent_root) {
+                                                return None;
+                                            }
+                                            // Already in-flight from a prior request?
+                                            if self.in_flight_roots.contains(&parent_root) {
+                                                return None;
+                                            }
+                                            // Deduplicate within this batch
+                                            if !seen.insert(parent_root) {
+                                                return None;
+                                            }
+                                            Some(parent_root)
+                                        })
+                                        .collect()
+                                };
+
+                                if !unknown_parents.is_empty() {
+                                    info!(
+                                        num_parents = unknown_parents.len(),
+                                        depth = next_depth,
+                                        "Pipelining parent fetch before chain processing"
+                                    );
+                                    for &root in &unknown_parents {
+                                        self.pending_block_depths.insert(root, next_depth);
+                                    }
+                                    // Chunk and send; each chunk goes to a random peer.
+                                    for chunk in unknown_parents.chunks(MAX_BLOCKS_PER_REQUEST) {
+                                        if let Some(peer_id) = self.get_random_connected_peer() {
+                                            self.send_blocks_by_root_request_internal(
+                                                peer_id,
+                                                chunk.to_vec(),
+                                                0,
+                                                next_depth,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Step 3: Feed received blocks to chain for state processing.
+                            // This runs in parallel with the pipelined network request above.
                             let chain_sink = self.chain_message_sink.clone();
                             tokio::spawn(async move {
                                 for block in blocks {
@@ -687,7 +806,7 @@ where
                                         .send(ChainMessage::ProcessBlock {
                                             signed_block_with_attestation: block,
                                             is_trusted: false,
-                                            should_gossip: false, // Don't re-gossip requested blocks
+                                            should_gossip: false,
                                         })
                                         .await
                                     {
@@ -760,6 +879,10 @@ where
             } => {
                 warn!(peer = %peer, ?error, "BlocksByRoot outbound request failed");
                 if let Some(req) = self.pending_blocks_by_root.remove(&request_id) {
+                    // Release in-flight tracking before retry; retry re-adds via send_internal.
+                    for root in &req.roots {
+                        self.in_flight_roots.remove(root);
+                    }
                     self.retry_blocks_by_root_request(peer, req);
                 }
             }
@@ -900,6 +1023,54 @@ where
         }
     }
 
+    fn maybe_trigger_backfill(
+        &mut self,
+        peer: PeerId,
+        peer_finalized_slot: u64,
+        peer_head_slot: u64,
+        peer_head_root: H256,
+        our_finalized_slot: u64,
+        our_head_slot: u64,
+    ) {
+        if (peer_finalized_slot > our_finalized_slot || peer_head_slot > our_head_slot)
+            && !peer_head_root.is_zero()
+        {
+            info!(
+                peer = %peer,
+                peer_head_slot,
+                our_head_slot,
+                peer_finalized = peer_finalized_slot,
+                our_finalized = our_finalized_slot,
+                "Peer is ahead — requesting head block to trigger backfill"
+            );
+            self.send_blocks_by_root_request(peer, vec![peer_head_root]);
+        }
+    }
+
+    fn send_status_to_all_connected_peers(&mut self) {
+        let peers: Vec<PeerId> = self
+            .peer_table
+            .lock()
+            .iter()
+            .filter(|(_, state)| **state == ConnectionState::Connected)
+            .map(|(peer_id, _)| *peer_id)
+            .collect();
+
+        if peers.is_empty() {
+            return;
+        }
+
+        let our_finalized = self.status_provider.read().finalized.slot.0;
+        info!(
+            num_peers = peers.len(),
+            our_finalized,
+            "Periodic sync check: sending status to all connected peers"
+        );
+        for peer_id in peers {
+            self.send_status_request(peer_id);
+        }
+    }
+
     async fn dispatch_outbound_request(&mut self, request: OutboundP2pRequest) {
         match request {
             OutboundP2pRequest::GossipBlockWithAttestation(signed_block_with_attestation) => {
@@ -975,6 +1146,10 @@ where
                             max_depth = MAX_BLOCK_FETCH_DEPTH,
                             "Skipping block request: exceeded max fetch depth"
                         );
+                    } else if self.in_flight_roots.contains(&root) {
+                        // Network-layer pipelining already sent this request; skip the
+                        // duplicate from the chain-side pending_fetch_roots drain.
+                        debug!(root = %root, "Skipping chain-side request: root already in-flight");
                     } else {
                         roots_to_request.push((root, depth));
                     }
@@ -984,20 +1159,33 @@ where
                     return;
                 }
 
-                if let Some(peer_id) = self.get_random_connected_peer() {
-                    // Use max depth among requested roots for the batch
-                    let depth = roots_to_request.iter().map(|(_, d)| *d).max().unwrap_or(0);
-                    let roots: Vec<H256> = roots_to_request.into_iter().map(|(r, _)| r).collect();
+                // Split into chunks of MAX_BLOCKS_PER_REQUEST (aligned with leanSpec BackfillSync).
+                // Each chunk is sent to a random connected peer, spreading the load and allowing
+                // parallel fetches when multiple roots are needed.
+                let all_roots: Vec<(H256, u32)> = roots_to_request;
+                let chunks: Vec<Vec<(H256, u32)>> = all_roots
+                    .chunks(MAX_BLOCKS_PER_REQUEST)
+                    .map(|c| c.to_vec())
+                    .collect();
 
-                    info!(
-                        peer = %peer_id,
-                        num_blocks = roots.len(),
-                        depth = depth,
-                        "Requesting missing blocks from peer"
-                    );
-                    self.send_blocks_by_root_request_with_depth(peer_id, roots, depth);
-                } else {
-                    warn!("Cannot request blocks: no connected peers");
+                let num_chunks = chunks.len();
+                for chunk in chunks {
+                    let depth = chunk.iter().map(|(_, d)| *d).max().unwrap_or(0);
+                    let roots: Vec<H256> = chunk.into_iter().map(|(r, _)| r).collect();
+
+                    if let Some(peer_id) = self.get_random_connected_peer() {
+                        info!(
+                            peer = %peer_id,
+                            num_blocks = roots.len(),
+                            total_chunks = num_chunks,
+                            depth = depth,
+                            "Requesting missing blocks from peer (batch)"
+                        );
+                        self.send_blocks_by_root_request_with_depth(peer_id, roots, depth);
+                    } else {
+                        warn!("Cannot request blocks: no connected peers");
+                        break;
+                    }
                 }
             }
         }
@@ -1082,8 +1270,12 @@ where
             return;
         }
 
-        // Depth is tracked in PendingBlocksRequest for retries
-        // No need to store in pending_block_depths here - it's set when blocks are received
+        // Register roots as in-flight before sending so the chain-side drain
+        // (pending_fetch_roots) and the network-layer pipeline both see them and skip duplicates.
+        for &root in &roots {
+            self.in_flight_roots.insert(root);
+        }
+
         let request = LeanRequest::BlocksByRoot(roots.clone());
         info!(peer = %peer_id, num_roots = roots.len(), retries, depth, "Sending BlocksByRoot request");
         let request_id = self
