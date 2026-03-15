@@ -92,6 +92,18 @@ fn validate_attestation_data(store: &Store, data: &AttestationData) -> Result<()
     Ok(())
 }
 
+/// Returns the first block root (source, target, or head) referenced by `attestation_data`
+/// that is not yet present in the store, or `None` if all are known.
+fn find_unknown_attestation_block(store: &Store, attestation_data: &AttestationData) -> Option<H256> {
+    [
+        attestation_data.source.root,
+        attestation_data.target.root,
+        attestation_data.head.root,
+    ]
+    .into_iter()
+    .find(|root| !store.blocks.contains_key(root))
+}
+
 /// Process a signed attestation received via gossip network
 ///
 /// 1. Validates the attestation data
@@ -111,6 +123,18 @@ pub fn on_gossip_attestation(
 
     let validator_id = signed_attestation.validator_id;
     let attestation_data = signed_attestation.message.clone();
+
+    // Queue attestation if any referenced block is not yet in the store.
+    // When the missing block arrives, pending attestations are retried.
+    if let Some(missing_root) = find_unknown_attestation_block(store, &attestation_data) {
+        store
+            .pending_attestations
+            .entry(missing_root)
+            .or_default()
+            .push(signed_attestation);
+        store.pending_fetch_roots.insert(missing_root);
+        return Ok(());
+    }
 
     // Validate the attestation data first
     validate_attestation_data(store, &attestation_data).inspect_err(|_| {
@@ -184,6 +208,19 @@ pub fn on_attestation(
     let validator_id = signed_attestation.validator_id;
     let attestation_data = signed_attestation.message.clone();
 
+    // Queue gossip attestations if any referenced block is not yet in the store.
+    if !is_from_block {
+        if let Some(missing_root) = find_unknown_attestation_block(store, &attestation_data) {
+            store
+                .pending_attestations
+                .entry(missing_root)
+                .or_default()
+                .push(signed_attestation);
+            store.pending_fetch_roots.insert(missing_root);
+            return Ok(());
+        }
+    }
+
     // Validate attestation data
     validate_attestation_data(store, &attestation_data).inspect_err(|_| {
         METRICS.get().map(|metrics| {
@@ -206,6 +243,11 @@ pub fn on_attestation(
         store
             .gossip_signatures
             .insert(sig_key, signed_attestation.signature);
+        METRICS.get().map(|metrics| {
+            metrics
+                .lean_gossip_signatures
+                .set(store.gossip_signatures.len() as i64)
+        });
     }
 
     on_attestation_internal(store, validator_id, attestation_data, is_from_block)
@@ -241,9 +283,6 @@ pub fn on_attestation(
 /// For production, signature verification should be added:
 /// 1. Verify the `AggregatedSignatureProof` against the aggregation bits
 /// 2. Consider async/batched verification for throughput
-/// 3. Cache verification results to avoid re-verifying the same aggregations
-///
-/// See Ream's approach: deferred verification in gossip path with later validation
 #[inline]
 pub fn on_aggregated_attestation(
     store: &mut Store,
@@ -252,6 +291,17 @@ pub fn on_aggregated_attestation(
     // Structure: { data: AttestationData, proof: AggregatedSignatureProof }
     let attestation_data = signed_aggregated_attestation.data.clone();
     let proof = signed_aggregated_attestation.proof.clone();
+
+    // Queue if any referenced block is not yet in the store.
+    if let Some(missing_root) = find_unknown_attestation_block(store, &attestation_data) {
+        store
+            .pending_aggregated_attestations
+            .entry(missing_root)
+            .or_default()
+            .push(signed_aggregated_attestation);
+        store.pending_fetch_roots.insert(missing_root);
+        return Ok(());
+    }
 
     // Validate attestation data (slot bounds, target validity, etc.)
     // TODO(production): Add signature verification here or in caller
@@ -344,7 +394,6 @@ pub fn on_block(store: &mut Store, signed_block: SignedBlockWithAttestation) -> 
     let block_root = signed_block.message.block.hash_tree_root();
 
     if store.blocks.contains_key(&block_root) {
-        // stop_and_discard(timer);
         return Ok(());
     }
 
@@ -416,6 +465,29 @@ fn process_block_internal(
     store.states.insert(block_root, new_state.clone());
     // Also store signed block for serving BlocksByRoot requests (checkpoint sync backfill)
     store.signed_blocks.insert(block_root, signed_block.clone());
+
+    // Retry attestations that arrived before this block was known.
+    // Drain the queue for this root and re-process each attestation.
+    // Attestations that still reference other unknown blocks are re-queued automatically.
+    let pending = store
+        .pending_attestations
+        .remove(&block_root)
+        .unwrap_or_default();
+    for signed_att in pending {
+        if let Err(err) = on_attestation(store, signed_att, false) {
+            warn!(%err, "Pending attestation retry failed after block arrival");
+        }
+    }
+
+    let pending_agg = store
+        .pending_aggregated_attestations
+        .remove(&block_root)
+        .unwrap_or_default();
+    for signed_agg in pending_agg {
+        if let Err(err) = on_aggregated_attestation(store, signed_agg) {
+            warn!(%err, "Pending aggregated attestation retry failed after block arrival");
+        }
+    }
 
     let justified_updated = new_state.latest_justified.slot > store.latest_justified.slot;
     let finalized_updated = new_state.latest_finalized.slot > store.latest_finalized.slot;
@@ -535,6 +607,11 @@ fn process_block_internal(
     store
         .gossip_signatures
         .insert(proposer_sig_key, signed_block.signature.proposer_signature);
+    METRICS.get().map(|metrics| {
+        metrics
+            .lean_gossip_signatures
+            .set(store.gossip_signatures.len() as i64)
+    });
     store
         .attestation_data_by_root
         .insert(proposer_data_root, proposer_attestation.data.clone());

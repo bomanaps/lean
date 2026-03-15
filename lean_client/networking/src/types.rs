@@ -3,13 +3,14 @@ use std::{collections::HashMap, fmt::Display, sync::Arc};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use containers::{
-    SignedAggregatedAttestation, SignedAttestation, SignedBlockWithAttestation, Status,
+    AggregatedSignatureProof, AttestationData, Block, SignedAggregatedAttestation,
+    SignedAttestation, SignedBlockWithAttestation, Slot, Status,
 };
 use metrics::METRICS;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use ssz::H256;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 
 use crate::serde_utils::quoted_u64;
@@ -209,6 +210,30 @@ impl Display for ChainMessage {
             }
         }
     }
+}
+
+/// Messages from the validator task to the chain task (request-response pattern).
+/// This keeps `ChainMessage` Clone-able (for network use) while these variants
+/// carry non-Clone oneshot senders.
+#[derive(Debug)]
+pub enum ValidatorChainMessage {
+    /// Request block production for the given slot.
+    /// Chain executes the state transition under write lock (fast, no XMSS signing)
+    /// and returns the raw block + aggregated signature proofs via the sender.
+    /// XMSS signing is performed by the validator task after receiving the response,
+    /// so the chain task is free to process incoming peer messages during signing.
+    ProduceBlock {
+        slot: Slot,
+        proposer_index: u64,
+        sender: oneshot::Sender<Result<(Block, Vec<AggregatedSignatureProof>)>>,
+    },
+    /// Request attestation data for the given slot.
+    /// Chain reads the current head/justified/target state and returns it via sender.
+    /// The validator task uses this data to sign attestations without holding the store lock.
+    BuildAttestationData {
+        slot: Slot,
+        sender: oneshot::Sender<Result<AttestationData>>,
+    },
 }
 
 #[derive(Debug, Clone)]

@@ -9,7 +9,10 @@ use ethereum_types::H256;
 use features::Feature;
 use fork_choice::{
     handlers::{on_aggregated_attestation, on_attestation, on_block, on_tick},
-    store::{INTERVALS_PER_SLOT, Store, get_forkchoice_store},
+    store::{
+        INTERVALS_PER_SLOT, MILLIS_PER_INTERVAL, Store, get_forkchoice_store,
+        produce_block_with_signatures,
+    },
 };
 use http_api::HttpServerConfig;
 use libp2p_identity::Keypair;
@@ -17,7 +20,9 @@ use metrics::{METRICS, Metrics, MetricsServerConfig};
 use networking::gossipsub::config::GossipsubConfig;
 use networking::gossipsub::topic::{compute_subnet_id, get_subscription_topics};
 use networking::network::{NetworkService, NetworkServiceConfig};
-use networking::types::{ChainMessage, OutboundP2pRequest, SignedBlockProvider, StatusProvider};
+use networking::types::{
+    ChainMessage, OutboundP2pRequest, SignedBlockProvider, StatusProvider, ValidatorChainMessage,
+};
 use parking_lot::RwLock;
 use ssz::{PersistentList, SszHash, SszReadDefault as _};
 use std::collections::HashMap;
@@ -26,9 +31,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{io::IsTerminal, net::IpAddr};
 use tokio::{
-    sync::mpsc,
+    sync::{mpsc, oneshot},
     task,
-    time::{Duration, interval},
+    time::{Duration, Instant, interval_at},
 };
 use tracing::level_filters::LevelFilter;
 use tracing::{debug, error, info, warn};
@@ -292,6 +297,11 @@ async fn main() -> Result<()> {
         mpsc::unbounded_channel::<OutboundP2pRequest>();
     let (chain_message_sender, mut chain_message_receiver) =
         mpsc::unbounded_channel::<ChainMessage>();
+    // Separate channel for validator task → chain task request-response messages.
+    // Keeps ValidatorChainMessage (which carries oneshot senders) separate from
+    // ChainMessage (which is Clone and used by the network layer).
+    let (validator_chain_sender, mut validator_chain_receiver) =
+        mpsc::unbounded_channel::<ValidatorChainMessage>();
 
     let (genesis_time, validators) = if let Some(genesis_path) = &args.genesis {
         let genesis_config = containers::GenesisConfig::load_from_file(genesis_path)
@@ -541,6 +551,16 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Wrap in Arc so chain task (aggregation at tick 2) and validator task (proposal/attestation)
+    // can both access ValidatorService without cloning the XMSS keys.
+    let validator_service: Option<Arc<ValidatorService>> = validator_service.map(Arc::new);
+    // Chain task clone: used only for tick-2 aggregation (maybe_aggregate takes &self)
+    let vs_for_chain = validator_service.clone();
+    // Validator task: takes ownership for proposal and attestation duties
+    let vs_for_validator = validator_service.clone();
+    // Validator task needs to send ProcessBlock / ProcessAttestation back to the chain task
+    let chain_msg_sender_for_validator = chain_message_sender.clone();
+
     // Extract first validator ID for subnet subscription and metrics
     let first_validator_id: Option<u64> = validator_service
         .as_ref()
@@ -556,7 +576,7 @@ async fn main() -> Result<()> {
         });
     }
 
-    let fork = "devnet0".to_string();
+    let fork = "devnet3".to_string();
     // Subscribe to topics based on validator role:
     // - Aggregators: all attestation subnets
     // - Non-aggregator validators: only their own subnet
@@ -668,23 +688,40 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Compute genesis-aligned tick delay once; both tasks capture genesis_millis and
+    // genesis_tick_delay by copy (u64 / Duration are Copy).
+    let genesis_millis = genesis_time * 1000;
+    let genesis_tick_delay = {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let elapsed = now.saturating_sub(genesis_millis);
+        let next = elapsed / MILLIS_PER_INTERVAL + 1;
+        Duration::from_millis((genesis_millis + next * MILLIS_PER_INTERVAL).saturating_sub(now))
+    };
+
     let chain_handle = task::spawn(async move {
-        let mut tick_interval = interval(Duration::from_millis(800));
+        let mut tick_interval = interval_at(
+            Instant::now() + genesis_tick_delay,
+            Duration::from_millis(MILLIS_PER_INTERVAL),
+        );
         let mut last_logged_slot = 0u64;
         let mut last_status_slot: Option<u64> = None;
-        let mut last_proposal_slot: Option<u64> = None;
-        let mut last_attestation_slot: Option<u64> = None;
 
         let peer_count = peer_count_for_status;
 
         loop {
             tokio::select! {
+                biased;
                 _ = tick_interval.tick() => {
                     let now_millis = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap()
                         .as_millis() as u64;
-                    on_tick(&mut *store.write(), now_millis, false);
+                    let target_interval = now_millis.saturating_sub(genesis_millis) / MILLIS_PER_INTERVAL;
+                    let has_proposal = target_interval % INTERVALS_PER_SLOT == 0;
+                    on_tick(&mut *store.write(), now_millis, has_proposal);
 
                     let (current_slot, current_interval) = {
                         let s = store.read();
@@ -698,83 +735,9 @@ async fn main() -> Result<()> {
                     }
 
                     match current_interval {
-                        0 => {
-                            if let Some(ref vs) = validator_service {
-                                if last_proposal_slot != Some(current_slot) {
-                                    if let Some(proposer_idx) = vs.get_proposer_for_slot(Slot(current_slot)) {
-                                        info!(
-                                            slot = current_slot,
-                                            proposer = proposer_idx,
-                                            "Our turn to propose block!"
-                                        );
-
-                                        let result = {vs.build_block_proposal(&mut *store.write(), Slot(current_slot), proposer_idx)};
-                                        match result {
-                                            Ok(signed_block) => {
-                                                let block_root = signed_block.message.block.hash_tree_root();
-                                                info!(
-                                                    slot = current_slot,
-                                                    block_root = %format!("0x{:x}", block_root),
-                                                    "Built block, processing and gossiping"
-                                                );
-
-                                                let now_millis = SystemTime::now()
-                                                    .duration_since(UNIX_EPOCH)
-                                                    .unwrap()
-                                                    .as_millis() as u64;
-                                                on_tick(&mut *store.write(), now_millis, false);
-
-                                                match on_block(&mut *store.write(), signed_block.clone()) {
-                                                    Ok(()) => {
-                                                        info!("Own block processed successfully");
-                                                        // GOSSIP TO NETWORK
-                                                        if let Err(e) = chain_outbound_sender.send(
-                                                            OutboundP2pRequest::GossipBlockWithAttestation(signed_block)
-                                                        ) {
-                                                            warn!("Failed to gossip our block: {}", e);
-                                                        }
-                                                    }
-                                                    Err(e) => warn!("Failed to process our own block: {}", e),
-                                                }
-                                            }
-                                            Err(e) => warn!("Failed to build block proposal: {}", e),
-                                        }
-                                        last_proposal_slot = Some(current_slot);
-                                    }
-                                }
-                            }
-                        }
-                        1 => {
-                            if let Some(ref vs) = validator_service {
-                                if last_attestation_slot != Some(current_slot) {
-                                    let attestations = vs.create_attestations(&*store.read(), Slot(current_slot));
-                                    for signed_att in attestations {
-                                        let validator_id = signed_att.validator_id;
-                                        let subnet_id = compute_subnet_id(validator_id);
-                                        info!(
-                                            slot = current_slot,
-                                            validator = validator_id,
-                                            subnet_id = subnet_id,
-                                            "Broadcasting attestation to subnet"
-                                        );
-
-                                        match on_attestation(&mut *store.write(), signed_att.clone(), false) {
-                                            Ok(()) => {
-                                                if let Err(e) = chain_outbound_sender.send(
-                                                    OutboundP2pRequest::GossipAttestation(signed_att, subnet_id)
-                                                ) {
-                                                    warn!("Failed to gossip attestation: {}", e);
-                                                }
-                                            }
-                                            Err(e) => warn!("Error processing own attestation: {}", e),
-                                        }
-                                    }
-                                    last_attestation_slot = Some(current_slot);
-                                }
-                            }
-                        }
+                        0 | 1 => {}
                         2 => {
-                            if let Some(ref vs) = validator_service {
+                            if let Some(ref vs) = vs_for_chain {
                                 if let Some(aggregations) = vs.maybe_aggregate(&*store.read(), Slot(current_slot)) {
                                     for aggregation in aggregations {
                                         if let Err(e) = chain_outbound_sender.send(
@@ -833,22 +796,28 @@ async fn main() -> Result<()> {
                                 .as_millis() as u64;
                             on_tick(&mut *store.write(), now_millis, false);
 
-                            // Proactive parent check: verify parent exists BEFORE calling on_block.
-                            // This avoids unnecessary state transition attempts and is more efficient
-                            // than catching the "Block queued" error after the fact.
                             let parent_exists = {
                                 let s = store.read();
                                 parent_root.is_zero() || s.states.contains_key(&parent_root)
                             };
 
+                            // Store block immediately so we can serve it to peers via
+                            // BlocksByRoot even if it can't be processed yet (e.g. parent
+                            // missing).  This prevents STREAM_CLOSED errors when a peer
+                            // requests a block we received but haven't incorporated yet.
+                            signed_block_provider.write().insert(block_root, signed_block_with_attestation.clone());
+
                             if !parent_exists {
-                                // Queue the block and request parent without calling on_block
                                 {
                                     let mut s = store.write();
                                     s.blocks_queue
                                         .entry(parent_root)
                                         .or_insert_with(Vec::new)
                                         .push(signed_block_with_attestation.clone());
+                                    // Add to batch queue so this root is sent together with any
+                                    // other concurrently pending roots (attestation-triggered or
+                                    // from other unknown-parent blocks) in one BlocksByRoot request.
+                                    s.pending_fetch_roots.insert(parent_root);
                                 }
 
                                 warn!(
@@ -858,10 +827,13 @@ async fn main() -> Result<()> {
                                     "Block queued (proactive) - parent not found, requesting via BlocksByRoot"
                                 );
 
-                                if let Err(req_err) = outbound_p2p_sender.send(
-                                    OutboundP2pRequest::RequestBlocksByRoot(vec![parent_root])
-                                ) {
-                                    warn!("Failed to request missing parent block: {}", req_err);
+                                let missing: Vec<H256> = store.write().pending_fetch_roots.drain().collect();
+                                if !missing.is_empty() {
+                                    if let Err(req_err) = outbound_p2p_sender.send(
+                                        OutboundP2pRequest::RequestBlocksByRoot(missing)
+                                    ) {
+                                        warn!("Failed to request missing parent block: {}", req_err);
+                                    }
                                 }
                                 continue;
                             }
@@ -870,8 +842,6 @@ async fn main() -> Result<()> {
                             match result {
                                 Ok(()) => {
                                     info!("Block processed successfully");
-
-                                    signed_block_provider.write().insert(block_root, signed_block_with_attestation.clone());
 
                                     {
                                         let s = store.read();
@@ -894,8 +864,6 @@ async fn main() -> Result<()> {
                                     }
                                 }
                                 Err(e) if format!("{e:?}").starts_with("Err: (Fork-choice::Handlers::OnBlock) Block queued") => {
-                                    // This path should be rare now due to proactive check,
-                                    // but handle it for edge cases (e.g., parent pruned between check and call)
                                     warn!(
                                         child_slot = block_slot.0,
                                         child_block_root = %format!("0x{:x}", block_root),
@@ -903,15 +871,24 @@ async fn main() -> Result<()> {
                                         "Block queued (fallback) - parent not found, requesting via BlocksByRoot"
                                     );
 
+                                    // Add to batch queue; the drain below (pending_fetch_roots)
+                                    // will send this together with any attestation-triggered roots
+                                    // discovered during on_block processing.
                                     if !parent_root.is_zero() {
-                                        if let Err(req_err) = outbound_p2p_sender.send(
-                                            OutboundP2pRequest::RequestBlocksByRoot(vec![parent_root])
-                                        ) {
-                                            warn!("Failed to request missing parent block: {}", req_err);
-                                        }
+                                        store.write().pending_fetch_roots.insert(parent_root);
                                     }
                                 }
                                 Err(e) => warn!("Problem processing block: {}", e),
+                            }
+
+                            // Drain block roots queued by retried attestations inside on_block.
+                            let missing: Vec<H256> = store.write().pending_fetch_roots.drain().collect();
+                            if !missing.is_empty() {
+                                if let Err(e) = outbound_p2p_sender.send(
+                                    OutboundP2pRequest::RequestBlocksByRoot(missing)
+                                ) {
+                                    warn!("Failed to request blocks missing from retried attestations: {}", e);
+                                }
                             }
                         }
                         ChainMessage::ProcessAttestation {
@@ -947,6 +924,15 @@ async fn main() -> Result<()> {
                                 }
                                 Err(e) => warn!("Error processing attestation: {}", e),
                             }
+
+                            let missing: Vec<H256> = store.write().pending_fetch_roots.drain().collect();
+                            if !missing.is_empty() {
+                                if let Err(e) = outbound_p2p_sender.send(
+                                    OutboundP2pRequest::RequestBlocksByRoot(missing)
+                                ) {
+                                    warn!("Failed to request blocks missing from attestation: {}", e);
+                                }
+                            }
                         }
                         ChainMessage::ProcessAggregation {
                             signed_aggregated_attestation,
@@ -979,6 +965,15 @@ async fn main() -> Result<()> {
                                 }
                             }
 
+                            let missing: Vec<H256> = store.write().pending_fetch_roots.drain().collect();
+                            if !missing.is_empty() {
+                                if let Err(e) = outbound_p2p_sender.send(
+                                    OutboundP2pRequest::RequestBlocksByRoot(missing)
+                                ) {
+                                    warn!("Failed to request blocks missing from aggregated attestation: {}", e);
+                                }
+                            }
+
                             // Gossip the aggregation if needed
                             if should_gossip {
                                 if let Err(e) = outbound_p2p_sender.send(
@@ -992,6 +987,221 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                v_message = validator_chain_receiver.recv() => {
+                    let Some(v_message) = v_message else { break };
+                    match v_message {
+                        ValidatorChainMessage::ProduceBlock { slot, proposer_index, sender } => {
+                            let result = produce_block_with_signatures(
+                                &mut *store.write(), slot, proposer_index
+                            ).map(|(_, block, sigs)| (block, sigs));
+                            let _ = sender.send(result);
+                        }
+                        ValidatorChainMessage::BuildAttestationData { slot, sender } => {
+                            let result = store.read().produce_attestation_data(slot);
+                            let _ = sender.send(result);
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    let validator_handle = task::spawn(async move {
+        let Some(vs) = vs_for_validator else {
+            return;
+        };
+
+        let mut v_tick_interval = interval_at(
+            Instant::now() + genesis_tick_delay,
+            Duration::from_millis(MILLIS_PER_INTERVAL),
+        );
+        let mut last_proposal_slot: Option<u64> = None;
+        let mut last_attestation_slot: Option<u64> = None;
+
+        loop {
+            v_tick_interval.tick().await;
+
+            let now_millis = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            let elapsed = now_millis.saturating_sub(genesis_millis);
+            let tick_time = elapsed / MILLIS_PER_INTERVAL;
+            let current_slot = tick_time / INTERVALS_PER_SLOT;
+            let current_interval = tick_time % INTERVALS_PER_SLOT;
+
+            match current_interval {
+                0 => {
+                    if last_proposal_slot != Some(current_slot) {
+                        if current_slot > 0 {
+                            if let Some(proposer_idx) = vs.get_proposer_for_slot(Slot(current_slot))
+                            {
+                                info!(
+                                    slot = current_slot,
+                                    proposer = proposer_idx,
+                                    "Validator task: proposing block"
+                                );
+
+                                let (tx, rx) = oneshot::channel();
+                                if validator_chain_sender
+                                    .send(ValidatorChainMessage::ProduceBlock {
+                                        slot: Slot(current_slot),
+                                        proposer_index: proposer_idx,
+                                        sender: tx,
+                                    })
+                                    .is_err()
+                                {
+                                    warn!("Validator task: chain channel closed, stopping");
+                                    break;
+                                }
+
+                                let (block, signatures) = match rx.await {
+                                    Ok(Ok(pair)) => pair,
+                                    Ok(Err(e)) => {
+                                        warn!(slot = current_slot, error = %e, "Validator task: chain failed to produce block");
+                                        last_proposal_slot = Some(current_slot);
+                                        continue;
+                                    }
+                                    Err(_) => {
+                                        warn!(
+                                            slot = current_slot,
+                                            "Validator task: no response to ProduceBlock"
+                                        );
+                                        last_proposal_slot = Some(current_slot);
+                                        continue;
+                                    }
+                                };
+
+                                let (atx, arx) = oneshot::channel();
+                                if validator_chain_sender
+                                    .send(ValidatorChainMessage::BuildAttestationData {
+                                        slot: Slot(current_slot),
+                                        sender: atx,
+                                    })
+                                    .is_err()
+                                {
+                                    warn!("Validator task: chain channel closed, stopping");
+                                    break;
+                                }
+
+                                let attestation_data = match arx.await {
+                                    Ok(Ok(data)) => data,
+                                    Ok(Err(e)) => {
+                                        warn!(slot = current_slot, error = %e, "Validator task: chain failed to build attestation data");
+                                        last_proposal_slot = Some(current_slot);
+                                        continue;
+                                    }
+                                    Err(_) => {
+                                        warn!(
+                                            slot = current_slot,
+                                            "Validator task: no response to BuildAttestationData"
+                                        );
+                                        last_proposal_slot = Some(current_slot);
+                                        continue;
+                                    }
+                                };
+
+                                match vs.sign_block_with_data(
+                                    block,
+                                    proposer_idx,
+                                    signatures,
+                                    attestation_data,
+                                ) {
+                                    Ok(signed_block) => {
+                                        let block_root =
+                                            signed_block.message.block.hash_tree_root();
+                                        info!(
+                                            slot = current_slot,
+                                            block_root = %format!("0x{:x}", block_root),
+                                            "Validator task: block signed, sending to chain"
+                                        );
+                                        if chain_msg_sender_for_validator
+                                            .send(ChainMessage::ProcessBlock {
+                                                signed_block_with_attestation: signed_block,
+                                                is_trusted: true,
+                                                should_gossip: true,
+                                            })
+                                            .is_err()
+                                        {
+                                            warn!(
+                                                "Validator task: chain message channel closed, stopping"
+                                            );
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(slot = current_slot, error = %e, "Validator task: failed to sign block")
+                                    }
+                                }
+                            }
+                        }
+                        last_proposal_slot = Some(current_slot);
+                    }
+                }
+                1 => {
+                    if last_attestation_slot != Some(current_slot) {
+                        let (tx, rx) = oneshot::channel();
+                        if validator_chain_sender
+                            .send(ValidatorChainMessage::BuildAttestationData {
+                                slot: Slot(current_slot),
+                                sender: tx,
+                            })
+                            .is_err()
+                        {
+                            warn!("Validator task: chain channel closed, stopping");
+                            break;
+                        }
+
+                        match rx.await {
+                            Ok(Ok(attestation_data)) => {
+                                let proposer_index = if vs.num_validators > 0 {
+                                    current_slot % vs.num_validators
+                                } else {
+                                    u64::MAX
+                                };
+                                let attestations = vs.create_attestations_from_data(
+                                    Slot(current_slot),
+                                    attestation_data,
+                                );
+                                for signed_att in attestations {
+                                    if signed_att.validator_id == proposer_index {
+                                        continue;
+                                    }
+                                    let validator_id = signed_att.validator_id;
+                                    let subnet_id = compute_subnet_id(validator_id);
+                                    info!(
+                                        slot = current_slot,
+                                        validator = validator_id,
+                                        subnet_id = subnet_id,
+                                        "Validator task: broadcasting attestation"
+                                    );
+                                    if chain_msg_sender_for_validator
+                                        .send(ChainMessage::ProcessAttestation {
+                                            signed_attestation: signed_att,
+                                            is_trusted: true,
+                                            should_gossip: true,
+                                        })
+                                        .is_err()
+                                    {
+                                        warn!(
+                                            "Validator task: chain message channel closed, stopping"
+                                        );
+                                        return;
+                                    }
+                                }
+                            }
+                            Ok(Err(e)) => {
+                                warn!(slot = current_slot, error = %e, "Validator task: chain failed to build attestation data")
+                            }
+                            Err(_) => warn!(
+                                slot = current_slot,
+                                "Validator task: no response to BuildAttestationData"
+                            ),
+                        }
+                        last_attestation_slot = Some(current_slot);
+                    }
+                }
+                _ => {}
             }
         }
     });
@@ -1002,6 +1212,9 @@ async fn main() -> Result<()> {
         }
         _ = chain_handle => {
             info!("Chain service finished.");
+        }
+        _ = validator_handle => {
+            info!("Validator task finished.");
         }
     }
 
