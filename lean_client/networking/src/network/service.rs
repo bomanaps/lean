@@ -414,7 +414,11 @@ where
                 }
 
                 METRICS.get().map(|metrics| {
-                    metrics.register_peer_connection_success(endpoint.is_listener())
+                    metrics.register_peer_connection_success(endpoint.is_listener());
+                    metrics
+                        .lean_connected_peers
+                        .with_label_values(&["unknown"])
+                        .set(connected as i64);
                 });
 
                 None
@@ -452,7 +456,11 @@ where
                         Some(ConnectionError::KeepAliveTimeout) => DisconnectReason::Timeout,
                     };
 
-                    metrics.register_peer_disconnect(endpoint.is_listener(), reason)
+                    metrics.register_peer_disconnect(endpoint.is_listener(), reason);
+                    metrics
+                        .lean_connected_peers
+                        .with_label_values(&["unknown"])
+                        .set(connected as i64);
                 });
 
                 Some(NetworkEvent::PeerDisconnected(peer_id))
@@ -644,7 +652,14 @@ where
                 } => {
                     use crate::req_resp::{LeanRequest, LeanResponse};
 
-                    let (response, peer_finalized_slot, peer_head_root, peer_head_slot, our_finalized_slot, our_head_slot) = match request {
+                    let (
+                        response,
+                        peer_finalized_slot,
+                        peer_head_root,
+                        peer_head_slot,
+                        our_finalized_slot,
+                        our_head_slot,
+                    ) = match request {
                         LeanRequest::Status(peer_status) => {
                             let status = self.status_provider.read().clone();
                             let our_finalized = status.finalized.slot.0;
@@ -653,7 +668,14 @@ where
                             let pf = peer_status.finalized.slot.0;
                             let ph = peer_status.head.root;
                             let phs = peer_status.head.slot.0;
-                            (LeanResponse::Status(status), pf, ph, phs, our_finalized, our_head)
+                            (
+                                LeanResponse::Status(status),
+                                pf,
+                                ph,
+                                phs,
+                                our_finalized,
+                                our_head,
+                            )
                         }
                         _ => {
                             warn!(peer = %peer, "Unexpected request type on Status protocol");
@@ -1063,8 +1085,7 @@ where
         let our_finalized = self.status_provider.read().finalized.slot.0;
         info!(
             num_peers = peers.len(),
-            our_finalized,
-            "Periodic sync check: sending status to all connected peers"
+            our_finalized, "Periodic sync check: sending status to all connected peers"
         );
         for peer_id in peers {
             self.send_status_request(peer_id);
