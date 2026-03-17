@@ -5,8 +5,8 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow, bail};
 use containers::{
     AggregatedSignatureProof, AggregationBits, Attestation, AttestationData, AttestationSignatures,
-    Block, BlockSignatures, BlockWithAttestation,
-    SignedAggregatedAttestation, SignedAttestation, SignedBlockWithAttestation, Slot,
+    Block, BlockSignatures, BlockWithAttestation, SignedAggregatedAttestation, SignedAttestation,
+    SignedBlockWithAttestation, Slot,
 };
 use fork_choice::store::Store;
 use metrics::{METRICS, stop_and_discard, stop_and_record};
@@ -407,5 +407,4 @@ impl ValidatorService {
             })
             .collect()
     }
-
 }

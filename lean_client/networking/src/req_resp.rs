@@ -320,7 +320,10 @@ impl LeanCodec {
         if declared_len as usize > MAX_PAYLOAD_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Declared length too large: {} > {}", declared_len, MAX_PAYLOAD_SIZE),
+                format!(
+                    "Declared length too large: {} > {}",
+                    declared_len, MAX_PAYLOAD_SIZE
+                ),
             ));
         }
 
@@ -336,7 +339,11 @@ impl LeanCodec {
         if ssz_bytes.len() != declared_len as usize {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("Length mismatch: declared {}, got {}", declared_len, ssz_bytes.len()),
+                format!(
+                    "Length mismatch: declared {}, got {}",
+                    declared_len,
+                    ssz_bytes.len()
+                ),
             ));
         }
 
@@ -377,7 +384,10 @@ impl LeanCodec {
                 offset += consumed;
 
                 if code != RESPONSE_SUCCESS {
-                    warn!(response_code = code, "BlocksByRoot non-success response chunk");
+                    warn!(
+                        response_code = code,
+                        "BlocksByRoot non-success response chunk"
+                    );
                     continue;
                 }
                 if ssz_bytes.is_empty() {

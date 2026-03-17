@@ -576,7 +576,7 @@ async fn main() -> Result<()> {
         });
     }
 
-    let fork = "devnet3".to_string();
+    let fork = "devnet0".to_string();
     // Subscribe to topics based on validator role:
     // - Aggregators: all attestation subnets
     // - Non-aggregator validators: only their own subnet

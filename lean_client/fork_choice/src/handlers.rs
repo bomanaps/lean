@@ -94,7 +94,10 @@ fn validate_attestation_data(store: &Store, data: &AttestationData) -> Result<()
 
 /// Returns the first block root (source, target, or head) referenced by `attestation_data`
 /// that is not yet present in the store, or `None` if all are known.
-fn find_unknown_attestation_block(store: &Store, attestation_data: &AttestationData) -> Option<H256> {
+fn find_unknown_attestation_block(
+    store: &Store,
+    attestation_data: &AttestationData,
+) -> Option<H256> {
     [
         attestation_data.source.root,
         attestation_data.target.root,
