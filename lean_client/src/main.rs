@@ -21,7 +21,8 @@ use networking::gossipsub::config::GossipsubConfig;
 use networking::gossipsub::topic::{compute_subnet_id, get_subscription_topics};
 use networking::network::{NetworkService, NetworkServiceConfig};
 use networking::types::{
-    ChainMessage, OutboundP2pRequest, SignedBlockProvider, StatusProvider, ValidatorChainMessage,
+    ChainMessage, MAX_BLOCK_CACHE_SIZE, OutboundP2pRequest, SignedBlockProvider, StatusProvider,
+    ValidatorChainMessage,
 };
 use parking_lot::RwLock;
 use ssz::{PersistentList, SszHash, SszReadDefault as _};
@@ -48,10 +49,24 @@ fn load_node_key(path: &str) -> Result<Keypair, Box<dyn std::error::Error>> {
     Ok(Keypair::from(keypair))
 }
 
+/// Timeout for establishing the TCP/QUIC connection to the checkpoint peer.
+/// Fail fast if the peer is unreachable.
+const CHECKPOINT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Inactivity timeout for reading the state body.
+/// Resets on each successful read, so large states can download as long as
+/// data keeps flowing, while stalled connections are detected promptly.
+const CHECKPOINT_READ_TIMEOUT: Duration = Duration::from_secs(15);
+
 async fn download_checkpoint_state(url: &str) -> Result<State> {
     info!("Downloading checkpoint state from: {}", url);
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .connect_timeout(CHECKPOINT_CONNECT_TIMEOUT)
+        .read_timeout(CHECKPOINT_READ_TIMEOUT)
+        .build()
+        .context("Failed to build HTTP client")?;
+
     let response = client
         .get(url)
         .header("Accept", "application/octet-stream")
@@ -85,7 +100,13 @@ async fn download_checkpoint_state(url: &str) -> Result<State> {
 }
 
 fn verify_checkpoint_state(state: &State, genesis_state: &State) -> Result<()> {
-    //  Verify genesis time matches
+    // Checkpoint cannot be genesis
+    anyhow::ensure!(
+        state.slot.0 > 0,
+        "Checkpoint state slot must be > 0 (got genesis slot)"
+    );
+
+    // Verify genesis time matches
     anyhow::ensure!(
         state.config.genesis_time == genesis_state.config.genesis_time,
         "Genesis time mismatch: checkpoint has {}, expected {}. Wrong network?",
@@ -93,10 +114,16 @@ fn verify_checkpoint_state(state: &State, genesis_state: &State) -> Result<()> {
         genesis_state.config.genesis_time
     );
 
-    //  Verify validator count matches
+    // Verify state has validators
     let state_validator_count = state.validators.len_u64();
     let expected_validator_count = genesis_state.validators.len_u64();
 
+    anyhow::ensure!(
+        state_validator_count > 0,
+        "Invalid checkpoint state: no validators in registry"
+    );
+
+    // Verify validator count matches
     anyhow::ensure!(
         state_validator_count == expected_validator_count,
         "Validator count mismatch: checkpoint has {}, genesis expects {}. Wrong network?",
@@ -104,13 +131,17 @@ fn verify_checkpoint_state(state: &State, genesis_state: &State) -> Result<()> {
         expected_validator_count
     );
 
-    //  Verify state has validators
-    anyhow::ensure!(
-        state_validator_count > 0,
-        "Invalid checkpoint state: no validators in registry"
-    );
+    // Verify validator indices are sequential (0, 1, 2, ...)
+    for i in 0..state_validator_count {
+        let validator = state.validators.get(i).expect("validator exists");
+        anyhow::ensure!(
+            validator.index == i,
+            "Non-sequential validator index at position {i}: expected {i}, got {}",
+            validator.index
+        );
+    }
 
-    //  Verify each validator pubkey matches genesis
+    // Verify each validator pubkey matches genesis
     for i in 0..state_validator_count {
         let state_pubkey = &state.validators.get(i).expect("validator exists").pubkey;
         let genesis_pubkey = &genesis_state
@@ -121,14 +152,50 @@ fn verify_checkpoint_state(state: &State, genesis_state: &State) -> Result<()> {
 
         anyhow::ensure!(
             state_pubkey == genesis_pubkey,
-            "Validator pubkey mismatch at index {}: checkpoint has different validator set. Wrong network?",
-            i
+            "Validator pubkey mismatch at index {i}: checkpoint has different validator set. Wrong network?"
         );
     }
 
+    // Finalized checkpoint cannot be in the future relative to the state
+    anyhow::ensure!(
+        state.latest_finalized.slot <= state.slot,
+        "Finalized slot {} exceeds state slot {}",
+        state.latest_finalized.slot.0,
+        state.slot.0
+    );
+
+    // Justified must be at or after finalized
+    anyhow::ensure!(
+        state.latest_justified.slot >= state.latest_finalized.slot,
+        "Justified slot {} is before finalized slot {}",
+        state.latest_justified.slot.0,
+        state.latest_finalized.slot.0
+    );
+
+    // If justified and finalized are at the same slot, their roots must agree
+    if state.latest_justified.slot == state.latest_finalized.slot {
+        anyhow::ensure!(
+            state.latest_justified.root == state.latest_finalized.root,
+            "Justified and finalized are at the same slot ({}) but have different roots",
+            state.latest_justified.slot.0
+        );
+    }
+
+    // Block header cannot be ahead of the state
+    anyhow::ensure!(
+        state.latest_block_header.slot <= state.slot,
+        "Block header slot {} exceeds state slot {}",
+        state.latest_block_header.slot.0,
+        state.slot.0
+    );
+
     info!(
-        "Checkpoint state verified: genesis_time={}, validators={}",
-        state.config.genesis_time, state_validator_count
+        "Checkpoint state verified: slot={}, genesis_time={}, validators={}, finalized={}, justified={}",
+        state.slot.0,
+        state.config.genesis_time,
+        state_validator_count,
+        state.latest_finalized.slot.0,
+        state.latest_justified.slot.0,
     );
 
     Ok(())
@@ -385,7 +452,7 @@ async fn main() -> Result<()> {
                     return Err(e);
                 }
 
-                // Compute state root for the checkpoint state (like zeam's genStateBlockHeader)
+                // Compute state root for the checkpoint state
                 let checkpoint_state_root = checkpoint_state.hash_tree_root();
 
                 // Reconstruct block header from state's latest_block_header with correct state_root
@@ -449,8 +516,10 @@ async fn main() -> Result<()> {
                 (checkpoint_state, checkpoint_signed_block)
             }
             Err(e) => {
-                warn!("Checkpoint sync failed: {}. Falling back to genesis.", e);
-                (genesis_state.clone(), genesis_signed_block)
+                return Err(e.context(
+                    "Checkpoint sync failed. Fix the error and restart; \
+                     the node will not fall back to genesis when --checkpoint-sync-url is set.",
+                ));
             }
         }
     } else {
@@ -805,7 +874,25 @@ async fn main() -> Result<()> {
                             // BlocksByRoot even if it can't be processed yet (e.g. parent
                             // missing).  This prevents STREAM_CLOSED errors when a peer
                             // requests a block we received but haven't incorporated yet.
-                            signed_block_provider.write().insert(block_root, signed_block_with_attestation.clone());
+                            {
+                                let mut provider = signed_block_provider.write();
+                                provider.insert(block_root, signed_block_with_attestation.clone());
+                                // Prune finalized blocks — they can never be processed.
+                                let finalized_slot = status_provider.read().finalized.slot.0;
+                                provider.retain(|_, b| b.message.block.slot.0 > finalized_slot);
+                                // Hard cap: evict lowest-slot blocks if still over limit.
+                                if provider.len() > MAX_BLOCK_CACHE_SIZE {
+                                    let to_remove = provider.len() - MAX_BLOCK_CACHE_SIZE;
+                                    let mut slots: Vec<(H256, u64)> = provider
+                                        .iter()
+                                        .map(|(root, b)| (*root, b.message.block.slot.0))
+                                        .collect();
+                                    slots.sort_by_key(|(_, slot)| *slot);
+                                    for (root, _) in slots.into_iter().take(to_remove) {
+                                        provider.remove(&root);
+                                    }
+                                }
+                            }
 
                             if !parent_exists {
                                 {
