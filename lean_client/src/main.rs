@@ -997,8 +997,20 @@ async fn main() -> Result<()> {
                             let _ = sender.send(result);
                         }
                         ValidatorChainMessage::BuildAttestationData { slot, sender } => {
-                            let result = store.read().produce_attestation_data(slot);
-                            let _ = sender.send(result);
+                            let store_read = store.read();
+                            if !store_read.justified_ever_updated {
+                                warn!(
+                                    slot = slot.0,
+                                    "Skipping attestation: justified checkpoint has not yet \
+                                     advanced from anchor — node is not ready to attest"
+                                );
+                                let _ = sender.send(Err(anyhow::anyhow!(
+                                    "not ready: justified checkpoint has not advanced from anchor value"
+                                )));
+                            } else {
+                                let result = store_read.produce_attestation_data(slot);
+                                let _ = sender.send(result);
+                            }
                         }
                     }
                 }
