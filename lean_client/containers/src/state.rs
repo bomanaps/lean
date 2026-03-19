@@ -502,7 +502,7 @@ impl State {
                 continue;
             }
 
-            if !target.slot.is_justifiable_after(self.latest_finalized.slot) {
+            if !target.slot.is_justifiable_after(finalized_slot) {
                 info!("skipping attestation, target slot is not yet justifiable");
                 continue;
             }
@@ -538,7 +538,7 @@ impl State {
                 justifications.remove(&target.root);
 
                 if !(source.slot.0 + 1..target.slot.0)
-                    .any(|slot| Slot(slot).is_justifiable_after(self.latest_finalized.slot))
+                    .any(|slot| Slot(slot).is_justifiable_after(finalized_slot))
                 {
                     info!("finalizing {source:?}");
                     let old_finalized_slot = finalized_slot;

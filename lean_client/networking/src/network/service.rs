@@ -42,8 +42,8 @@ use crate::{
     network::behaviour::{LeanNetworkBehaviour, LeanNetworkBehaviourEvent},
     req_resp::{self, LeanRequest, ReqRespMessage},
     types::{
-        ChainMessage, ChainMessageSink, ConnectionState, OutboundP2pRequest, P2pRequestSource,
-        SignedBlockProvider, StatusProvider,
+        ChainMessage, ChainMessageSink, ConnectionState, MAX_BLOCK_CACHE_SIZE,
+        OutboundP2pRequest, P2pRequestSource, SignedBlockProvider, StatusProvider,
     },
 };
 
@@ -51,11 +51,15 @@ const MAX_BLOCKS_BY_ROOT_RETRIES: u8 = 3;
 const MAX_BLOCK_FETCH_DEPTH: u32 = 65536;
 /// Maximum roots per BlocksByRoot request, aligned with leanSpec BackfillSync.
 const MAX_BLOCKS_PER_REQUEST: usize = 10;
+/// Stalled request timeout. If a peer accepts the stream but never sends a response,
+/// the request is cancelled and retried with a different peer after this duration.
+const BLOCKS_BY_ROOT_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 
 struct PendingBlocksRequest {
     roots: Vec<H256>,
     retries: u8,
     depth: u32,
+    created_at: tokio::time::Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -322,6 +326,11 @@ where
         let mut sync_interval = interval(Duration::from_secs(30));
         sync_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+        // Sweep for stalled BlocksByRoot requests. Fires at the same cadence as the timeout
+        // so stale entries are caught within one extra period at most.
+        let mut timeout_interval = interval(BLOCKS_BY_ROOT_REQUEST_TIMEOUT);
+        timeout_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
         loop {
             select! {
                 _ = reconnect_interval.tick() => {
@@ -329,6 +338,9 @@ where
                 }
                 _ = sync_interval.tick() => {
                     self.send_status_to_all_connected_peers();
+                }
+                _ = timeout_interval.tick() => {
+                    self.sweep_timed_out_requests();
                 }
                 _ = discovery_interval.tick() => {
                     // Trigger active peer discovery
@@ -759,6 +771,21 @@ where
                                     let root = block.message.block.hash_tree_root();
                                     provider.insert(root, block.clone());
                                 }
+                                // Prune finalized blocks — they can never be processed.
+                                let finalized_slot = self.status_provider.read().finalized.slot.0;
+                                provider.retain(|_, b| b.message.block.slot.0 > finalized_slot);
+                                // Hard cap: evict lowest-slot blocks if still over limit.
+                                if provider.len() > MAX_BLOCK_CACHE_SIZE {
+                                    let to_remove = provider.len() - MAX_BLOCK_CACHE_SIZE;
+                                    let mut slots: Vec<(H256, u64)> = provider
+                                        .iter()
+                                        .map(|(root, b)| (*root, b.message.block.slot.0))
+                                        .collect();
+                                    slots.sort_by_key(|(_, slot)| *slot);
+                                    for (root, _) in slots.into_iter().take(to_remove) {
+                                        provider.remove(&root);
+                                    }
+                                }
                             }
 
                             // Step 2: Collect unique parent roots that are not yet received.
@@ -959,6 +986,30 @@ where
         }
     }
 
+    fn sweep_timed_out_requests(&mut self) {
+        let timed_out: Vec<OutboundRequestId> = self
+            .pending_blocks_by_root
+            .iter()
+            .filter(|(_, req)| req.created_at.elapsed() > BLOCKS_BY_ROOT_REQUEST_TIMEOUT)
+            .map(|(id, _)| *id)
+            .collect();
+
+        for request_id in timed_out {
+            if let Some(req) = self.pending_blocks_by_root.remove(&request_id) {
+                warn!(
+                    num_roots = req.roots.len(),
+                    depth = req.depth,
+                    "BlocksByRoot request timed out, retrying with different peer"
+                );
+                for root in &req.roots {
+                    self.in_flight_roots.remove(root);
+                }
+                // Pass a non-existent peer so all connected peers are eligible for retry.
+                self.retry_blocks_by_root_request(PeerId::random(), req);
+            }
+        }
+    }
+
     fn handle_identify_event(&mut self, event: identify::Event) -> Option<NetworkEvent> {
         match event {
             identify::Event::Received {
@@ -1010,9 +1061,9 @@ where
                 let current_state = self.peer_table.lock().get(&peer_id).cloned();
                 if !matches!(
                     current_state,
-                    Some(ConnectionState::Disconnected | ConnectionState::Connecting) | None
+                    Some(ConnectionState::Disconnected) | None
                 ) {
-                    trace!(?peer_id, "Already connected");
+                    trace!(?peer_id, "Already connected or connecting");
                     continue;
                 }
 
@@ -1311,6 +1362,7 @@ where
                 roots,
                 retries,
                 depth,
+                created_at: tokio::time::Instant::now(),
             },
         );
     }

@@ -15,6 +15,10 @@ use tracing::warn;
 
 use crate::serde_utils::quoted_u64;
 
+/// Hard cap on the number of blocks held in the signed block provider.
+/// Prevents unbounded memory growth during backfill.
+pub const MAX_BLOCK_CACHE_SIZE: usize = 1024;
+
 /// Shared block provider for serving BlocksByRoot requests.
 /// Allows NetworkService to look up signed blocks for checkpoint sync backfill.
 pub type SignedBlockProvider = Arc<RwLock<HashMap<H256, SignedBlockWithAttestation>>>;
