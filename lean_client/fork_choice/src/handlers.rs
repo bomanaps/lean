@@ -502,6 +502,7 @@ fn process_block_internal(
             "Store justified checkpoint updated!"
         );
         store.latest_justified = new_state.latest_justified.clone();
+        store.justified_ever_updated = true;
         METRICS.get().map(|metrics| {
             let Some(slot) = new_state.latest_justified.slot.0.try_into().ok() else {
                 warn!("unable to set latest_justified slot in metrics");

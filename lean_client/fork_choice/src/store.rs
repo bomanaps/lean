@@ -33,6 +33,13 @@ pub struct Store {
 
     pub latest_finalized: Checkpoint,
 
+    /// Set to `true` the first time `on_block` drives a justified checkpoint
+    /// update beyond the initial anchor value. Validator duties (attestation,
+    /// block proposal) must not run while this is `false` — the store's
+    /// `latest_justified` is still the placeholder anchor checkpoint and using
+    /// it as an attestation source would produce wrong source checkpoints.
+    pub justified_ever_updated: bool,
+
     pub blocks: HashMap<H256, Block>,
 
     pub states: HashMap<H256, State>,
@@ -209,6 +216,7 @@ pub fn get_forkchoice_store(
         safe_target: block_root,
         latest_justified,
         latest_finalized,
+        justified_ever_updated: false,
         blocks: [(block_root, block)].into(),
         states: [(block_root, anchor_state)].into(),
         latest_known_attestations: HashMap::new(),
