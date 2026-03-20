@@ -771,9 +771,6 @@ where
                                     let root = block.message.block.hash_tree_root();
                                     provider.insert(root, block.clone());
                                 }
-                                // Prune finalized blocks — they can never be processed.
-                                let finalized_slot = self.status_provider.read().finalized.slot.0;
-                                provider.retain(|_, b| b.message.block.slot.0 > finalized_slot);
                                 // Hard cap: evict lowest-slot blocks if still over limit.
                                 if provider.len() > MAX_BLOCK_CACHE_SIZE {
                                     let to_remove = provider.len() - MAX_BLOCK_CACHE_SIZE;

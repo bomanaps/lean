@@ -63,13 +63,9 @@ pub struct Store {
     pub latest_new_aggregated_payloads: HashMap<SignatureKey, Vec<AggregatedSignatureProof>>,
 
     /// Attestation data indexed by hash (data_root).
-    /// Used to look up the exact attestation data that was signed,
-    /// matching ream's attestation_data_by_root_provider design.
+    /// Used to look up the exact attestation data that was signed when
+    /// processing aggregated payloads for safe target computation.
     pub attestation_data_by_root: HashMap<H256, AttestationData>,
-
-    /// Signed blocks indexed by block root.
-    /// Used to serve BlocksByRoot requests to peers for checkpoint sync backfill.
-    pub signed_blocks: HashMap<H256, SignedBlockWithAttestation>,
 
     /// Gossip attestations waiting for referenced blocks to arrive.
     /// Keyed by the missing block root. Drained when that block is processed.
@@ -85,6 +81,13 @@ pub struct Store {
 }
 
 const JUSTIFICATION_LOOKBACK_SLOTS: u64 = 3;
+
+/// Number of slots before the finalized slot for which states are retained.
+/// States older than (finalized_slot - STATE_PRUNE_BUFFER) are pruned after
+/// each finalization advance. The buffer covers late-arriving blocks and rapid
+/// finalization jumps without risk of evicting a parent state still needed
+/// for an in-flight state transition.
+pub const STATE_PRUNE_BUFFER: u64 = 128;
 
 impl Store {
     pub fn produce_attestation_data(&self, slot: Slot) -> Result<AttestationData> {
@@ -226,7 +229,6 @@ pub fn get_forkchoice_store(
         latest_known_aggregated_payloads: HashMap::new(),
         latest_new_aggregated_payloads: HashMap::new(),
         attestation_data_by_root: HashMap::new(),
-        signed_blocks: [(block_root, anchor_block)].into(),
         pending_attestations: HashMap::new(),
         pending_aggregated_attestations: HashMap::new(),
         pending_fetch_roots: HashSet::new(),

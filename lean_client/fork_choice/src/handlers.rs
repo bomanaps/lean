@@ -7,7 +7,9 @@ use metrics::METRICS;
 use ssz::{H256, SszHash};
 use tracing::warn;
 
-use crate::store::{INTERVALS_PER_SLOT, MILLIS_PER_INTERVAL, Store, tick_interval, update_head};
+use crate::store::{
+    INTERVALS_PER_SLOT, MILLIS_PER_INTERVAL, STATE_PRUNE_BUFFER, Store, tick_interval, update_head,
+};
 
 #[inline]
 pub fn on_tick(store: &mut Store, time_millis: u64, has_proposal: bool) {
@@ -463,11 +465,8 @@ fn process_block_internal(
         "Block processed - new state info"
     );
 
-    // Store block and state, store the plain Block (not SignedBlockWithAttestation)
     store.blocks.insert(block_root, block.clone());
     store.states.insert(block_root, new_state.clone());
-    // Also store signed block for serving BlocksByRoot requests (checkpoint sync backfill)
-    store.signed_blocks.insert(block_root, signed_block.clone());
 
     // Retry attestations that arrived before this block was known.
     // Drain the queue for this root and re-process each attestation.
@@ -525,6 +524,13 @@ fn process_block_internal(
             };
             metrics.lean_latest_finalized_slot.set(slot);
         });
+
+        let keep_from = store
+            .latest_finalized
+            .slot
+            .0
+            .saturating_sub(STATE_PRUNE_BUFFER);
+        store.states.retain(|_, state| state.slot.0 >= keep_from);
     }
 
     if !justified_updated && !finalized_updated {
