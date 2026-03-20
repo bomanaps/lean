@@ -5,6 +5,7 @@ use containers::{
     State, Validator, Validators,
 };
 use fork_choice::{
+    block_cache::BlockCache,
     handlers::{on_block, on_tick},
     store::{Store, get_forkchoice_store},
 };
@@ -548,6 +549,7 @@ fn forkchoice(spec_file: &str) {
         };
 
         let mut store = get_forkchoice_store(anchor_state, anchor_block, config);
+        let mut cache = BlockCache::new();
         let mut block_labels: HashMap<String, H256> = HashMap::new();
 
         for (step_idx, step) in case.steps.into_iter().enumerate() {
@@ -574,7 +576,7 @@ fn forkchoice(spec_file: &str) {
                             * 1000;
                         on_tick(&mut store, block_time_millis, false);
 
-                        on_block(&mut store, signed_block).unwrap();
+                        on_block(&mut store, &mut cache, signed_block).unwrap();
                         Ok(block_root)
                     }));
 

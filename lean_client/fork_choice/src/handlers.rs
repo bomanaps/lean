@@ -7,6 +7,7 @@ use metrics::METRICS;
 use ssz::{H256, SszHash};
 use tracing::warn;
 
+use crate::block_cache::BlockCache;
 use crate::store::{
     INTERVALS_PER_SLOT, MILLIS_PER_INTERVAL, STATE_PRUNE_BUFFER, Store, tick_interval, update_head,
 };
@@ -395,7 +396,11 @@ fn on_attestation_internal(
 /// 3. Processing attestations included in the block body (on-chain)
 /// 4. Updating the forkchoice head
 /// 5. Processing the proposer's attestation (as if gossiped)
-pub fn on_block(store: &mut Store, signed_block: SignedBlockWithAttestation) -> Result<()> {
+pub fn on_block(
+    store: &mut Store,
+    cache: &mut BlockCache,
+    signed_block: SignedBlockWithAttestation,
+) -> Result<()> {
     let block_root = signed_block.message.block.hash_tree_root();
 
     if store.blocks.contains_key(&block_root) {
@@ -405,20 +410,14 @@ pub fn on_block(store: &mut Store, signed_block: SignedBlockWithAttestation) -> 
     let parent_root = signed_block.message.block.parent_root;
 
     if !store.states.contains_key(&parent_root) && !parent_root.is_zero() {
-        store
-            .blocks_queue
-            .entry(parent_root)
-            .or_insert_with(Vec::new)
-            .push(signed_block);
         bail!(
-            "Err: (Fork-choice::Handlers::OnBlock) Block queued: parent {:?} not yet available (pending: {} blocks)",
-            &parent_root.as_bytes()[..4],
-            store.blocks_queue.values().map(|v| v.len()).sum::<usize>()
+            "Err: (Fork-choice::Handlers::OnBlock) parent state not available for {:?}",
+            &parent_root.as_bytes()[..4]
         );
     }
 
     process_block_internal(store, signed_block, block_root)?;
-    process_pending_blocks(store, vec![block_root]);
+    process_pending_blocks(store, cache, vec![block_root]);
 
     Ok(())
 }
@@ -638,14 +637,18 @@ fn process_block_internal(
     Ok(())
 }
 
-fn process_pending_blocks(store: &mut Store, mut roots: Vec<H256>) {
+pub fn process_pending_blocks(store: &mut Store, cache: &mut BlockCache, mut roots: Vec<H256>) {
     while let Some(parent_root) = roots.pop() {
-        if let Some(purgatory) = store.blocks_queue.remove(&parent_root) {
-            for block in purgatory {
-                let block_origins = block.message.block.hash_tree_root();
-                if let Ok(()) = process_block_internal(store, block, block_origins) {
-                    roots.push(block_origins);
-                }
+        let children: Vec<(H256, SignedBlockWithAttestation)> = cache
+            .get_children(&parent_root)
+            .into_iter()
+            .map(|p| (p.root, p.block.clone()))
+            .collect();
+
+        for (child_root, child_block) in children {
+            cache.remove(&child_root);
+            if process_block_internal(store, child_block, child_root).is_ok() {
+                roots.push(child_root);
             }
         }
     }
