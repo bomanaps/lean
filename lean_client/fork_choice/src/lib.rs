@@ -1,3 +1,4 @@
+pub mod block_cache;
 pub mod handlers;
 pub mod store;
 

@@ -48,8 +48,6 @@ pub struct Store {
 
     pub latest_new_attestations: HashMap<u64, AttestationData>,
 
-    pub blocks_queue: HashMap<H256, Vec<SignedBlockWithAttestation>>,
-
     pub gossip_signatures: HashMap<SignatureKey, Signature>,
 
     /// Devnet-3: Aggregated signature proofs from block bodies (on-chain).
@@ -224,7 +222,6 @@ pub fn get_forkchoice_store(
         states: [(block_root, anchor_state)].into(),
         latest_known_attestations: HashMap::new(),
         latest_new_attestations: HashMap::new(),
-        blocks_queue: HashMap::new(),
         gossip_signatures: HashMap::new(),
         latest_known_aggregated_payloads: HashMap::new(),
         latest_new_aggregated_payloads: HashMap::new(),

@@ -8,6 +8,7 @@ use containers::{
 use ethereum_types::H256;
 use features::Feature;
 use fork_choice::{
+    block_cache::BlockCache,
     handlers::{on_aggregated_attestation, on_attestation, on_block, on_tick},
     store::{
         INTERVALS_PER_SLOT, MILLIS_PER_INTERVAL, Store, get_forkchoice_store,
@@ -777,6 +778,7 @@ async fn main() -> Result<()> {
         );
         let mut last_logged_slot = 0u64;
         let mut last_status_slot: Option<u64> = None;
+        let mut block_cache = BlockCache::new();
 
         let peer_count = peer_count_for_status;
 
@@ -833,7 +835,7 @@ async fn main() -> Result<()> {
                     if current_slot != last_logged_slot && current_slot % 10 == 0 {
                         debug!("(Okay)Store time updated : slot {}, pending blocks: {}",
                             current_slot,
-                            store.read().blocks_queue.values().map(|v| v.len()).sum::<usize>()
+                            block_cache.len()
                         );
                         last_logged_slot = current_slot;
                     }
@@ -892,23 +894,23 @@ async fn main() -> Result<()> {
                             }
 
                             if !parent_exists {
-                                {
-                                    let mut s = store.write();
-                                    s.blocks_queue
-                                        .entry(parent_root)
-                                        .or_insert_with(Vec::new)
-                                        .push(signed_block_with_attestation.clone());
-                                    // Add to batch queue so this root is sent together with any
-                                    // other concurrently pending roots (attestation-triggered or
-                                    // from other unknown-parent blocks) in one BlocksByRoot request.
-                                    s.pending_fetch_roots.insert(parent_root);
-                                }
+                                block_cache.add(
+                                    signed_block_with_attestation.clone(),
+                                    block_root,
+                                    parent_root,
+                                    block_slot,
+                                    None,
+                                    0,
+                                );
+                                block_cache.mark_orphan(block_root);
+
+                                store.write().pending_fetch_roots.insert(parent_root);
 
                                 warn!(
                                     child_slot = block_slot.0,
                                     child_block_root = %format!("0x{:x}", block_root),
                                     missing_parent_root = %format!("0x{:x}", parent_root),
-                                    "Block queued (proactive) - parent not found, requesting via BlocksByRoot"
+                                    "Block cached (proactive) - parent not found, requesting via BlocksByRoot"
                                 );
 
                                 let missing: Vec<H256> = store.write().pending_fetch_roots.drain().collect();
@@ -922,7 +924,7 @@ async fn main() -> Result<()> {
                                 continue;
                             }
 
-                            let result = {on_block(&mut *store.write(), signed_block_with_attestation.clone())};
+                            let result = {on_block(&mut *store.write(), &mut block_cache, signed_block_with_attestation.clone())};
                             match result {
                                 Ok(()) => {
                                     info!("Block processed successfully");
@@ -945,21 +947,6 @@ async fn main() -> Result<()> {
                                         } else {
                                             info!(slot = block_slot.0, "Broadcasted block");
                                         }
-                                    }
-                                }
-                                Err(e) if format!("{e:?}").starts_with("Err: (Fork-choice::Handlers::OnBlock) Block queued") => {
-                                    warn!(
-                                        child_slot = block_slot.0,
-                                        child_block_root = %format!("0x{:x}", block_root),
-                                        missing_parent_root = %format!("0x{:x}", parent_root),
-                                        "Block queued (fallback) - parent not found, requesting via BlocksByRoot"
-                                    );
-
-                                    // Add to batch queue; the drain below (pending_fetch_roots)
-                                    // will send this together with any attestation-triggered roots
-                                    // discovered during on_block processing.
-                                    if !parent_root.is_zero() {
-                                        store.write().pending_fetch_roots.insert(parent_root);
                                     }
                                 }
                                 Err(e) => warn!("Problem processing block: {}", e),
