@@ -30,6 +30,7 @@ use rand::seq::IndexedRandom;
 use serde::{Deserialize, Serialize};
 use ssz::{H256, SszHash, SszWrite as _};
 use tokio::select;
+use tokio::sync::Notify;
 use tokio::time::{Duration, MissedTickBehavior, interval};
 use tracing::{debug, info, trace, warn};
 
@@ -43,13 +44,13 @@ use crate::{
     req_resp::{self, LeanRequest, ReqRespMessage},
     types::{
         ChainMessage, ChainMessageSink, ConnectionState, MAX_BLOCK_CACHE_SIZE,
-        OutboundP2pRequest, P2pRequestSource, SignedBlockProvider, StatusProvider,
+        NetworkFinalizedSlot, OutboundP2pRequest, P2pRequestSource, SignedBlockProvider,
+        StatusProvider,
     },
 };
 
 const MAX_BLOCKS_BY_ROOT_RETRIES: u8 = 3;
 const MAX_BLOCK_FETCH_DEPTH: u32 = 65536;
-/// Maximum roots per BlocksByRoot request, aligned with leanSpec BackfillSync.
 const MAX_BLOCKS_PER_REQUEST: usize = 10;
 /// Stalled request timeout. If a peer accepts the stream but never sends a response,
 /// the request is cancelled and retried with a different peer after this duration.
@@ -195,6 +196,9 @@ where
     pending_block_depths: HashMap<H256, u32>,
     /// Roots currently in-flight to deduplicate network-layer pipelining vs chain-side requests
     in_flight_roots: HashSet<H256>,
+    network_finalized_slot: NetworkFinalizedSlot,
+    peer_finalized_slots: HashMap<PeerId, u64>,
+    status_notify: Arc<Notify>,
 }
 
 impl<R, S> NetworkService<R, S>
@@ -208,6 +212,8 @@ where
         chain_message_sink: S,
         signed_block_provider: SignedBlockProvider,
         status_provider: StatusProvider,
+        network_finalized_slot: NetworkFinalizedSlot,
+        status_notify: Arc<Notify>,
     ) -> Result<Self> {
         Self::new_with_peer_count(
             network_config,
@@ -216,6 +222,8 @@ where
             Arc::new(AtomicU64::new(0)),
             signed_block_provider,
             status_provider,
+            network_finalized_slot,
+            status_notify,
         )
         .await
     }
@@ -227,6 +235,8 @@ where
         peer_count: Arc<AtomicU64>,
         signed_block_provider: SignedBlockProvider,
         status_provider: StatusProvider,
+        network_finalized_slot: NetworkFinalizedSlot,
+        status_notify: Arc<Notify>,
     ) -> Result<Self> {
         let local_key = Keypair::generate_secp256k1();
         Self::new_with_keypair(
@@ -237,6 +247,8 @@ where
             local_key,
             signed_block_provider,
             status_provider,
+            network_finalized_slot,
+            status_notify,
         )
         .await
     }
@@ -249,6 +261,8 @@ where
         local_key: Keypair,
         signed_block_provider: SignedBlockProvider,
         status_provider: StatusProvider,
+        network_finalized_slot: NetworkFinalizedSlot,
+        status_notify: Arc<Notify>,
     ) -> Result<Self> {
         let behaviour = Self::build_behaviour(&local_key, &network_config)?;
 
@@ -304,6 +318,9 @@ where
             pending_blocks_by_root: HashMap::new(),
             pending_block_depths: HashMap::new(),
             in_flight_roots: HashSet::new(),
+            network_finalized_slot,
+            peer_finalized_slots: HashMap::new(),
+            status_notify,
         };
 
         service.listen(&multiaddr)?;
@@ -452,6 +469,9 @@ where
                     .filter(|s| **s == ConnectionState::Connected)
                     .count() as u64;
                 self.peer_count.store(connected, Ordering::Relaxed);
+
+                self.peer_finalized_slots.remove(&peer_id);
+                self.recompute_network_finalized_slot();
 
                 info!(peer = %peer_id, ?cause, "Disconnected from peer (total: {})", connected);
 
@@ -1093,6 +1113,29 @@ where
         }
     }
 
+    fn recompute_network_finalized_slot(&mut self) {
+        let mut counts: HashMap<u64, usize> = HashMap::new();
+        for &slot in self.peer_finalized_slots.values() {
+            *counts.entry(slot).or_insert(0) += 1;
+        }
+        let mode = if counts.is_empty() {
+            None
+        } else {
+            let max_count = *counts.values().max().unwrap();
+            counts
+                .iter()
+                .filter(|(_, c)| **c == max_count)
+                .map(|(s, _)| *s)
+                .min()
+        };
+        let mut slot_guard = self.network_finalized_slot.lock();
+        if *slot_guard != mode {
+            *slot_guard = mode;
+            drop(slot_guard);
+            self.status_notify.notify_one();
+        }
+    }
+
     fn maybe_trigger_backfill(
         &mut self,
         peer: PeerId,
@@ -1102,6 +1145,9 @@ where
         our_finalized_slot: u64,
         our_head_slot: u64,
     ) {
+        self.peer_finalized_slots.insert(peer, peer_finalized_slot);
+        self.recompute_network_finalized_slot();
+
         if (peer_finalized_slot > our_finalized_slot || peer_head_slot > our_head_slot)
             && !peer_head_root.is_zero()
         {

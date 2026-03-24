@@ -1,4 +1,8 @@
-use std::{collections::HashMap, fmt::Display, sync::Arc};
+use std::{
+    collections::HashMap,
+    fmt::Display,
+    sync::Arc,
+};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -7,7 +11,7 @@ use containers::{
     SignedAttestation, SignedBlockWithAttestation, Slot, Status,
 };
 use metrics::METRICS;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use ssz::H256;
 use tokio::sync::{mpsc, oneshot};
@@ -26,6 +30,8 @@ pub type SignedBlockProvider = Arc<RwLock<HashMap<H256, SignedBlockWithAttestati
 /// Shared status provider for Status req/resp protocol.
 /// Allows NetworkService to send accurate finalized/head checkpoints to peers.
 pub type StatusProvider = Arc<RwLock<Status>>;
+
+pub type NetworkFinalizedSlot = Arc<Mutex<Option<u64>>>;
 
 /// 1-byte domain for gossip message-id isolation of valid snappy messages.
 /// Per leanSpec, prepended to the message hash when decompression succeeds.

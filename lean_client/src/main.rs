@@ -14,6 +14,7 @@ use fork_choice::{
         INTERVALS_PER_SLOT, MILLIS_PER_INTERVAL, Store, get_forkchoice_store,
         produce_block_with_signatures,
     },
+    sync_state::SyncState,
 };
 use http_api::HttpServerConfig;
 use libp2p_identity::Keypair;
@@ -22,10 +23,10 @@ use networking::gossipsub::config::GossipsubConfig;
 use networking::gossipsub::topic::{compute_subnet_id, get_subscription_topics};
 use networking::network::{NetworkService, NetworkServiceConfig};
 use networking::types::{
-    ChainMessage, MAX_BLOCK_CACHE_SIZE, OutboundP2pRequest, SignedBlockProvider, StatusProvider,
-    ValidatorChainMessage,
+    ChainMessage, MAX_BLOCK_CACHE_SIZE, NetworkFinalizedSlot, OutboundP2pRequest,
+    SignedBlockProvider, StatusProvider, ValidatorChainMessage,
 };
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use ssz::{PersistentList, SszHash, SszReadDefault as _};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,9 +34,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{io::IsTerminal, net::IpAddr};
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{Notify, mpsc, oneshot},
     task,
-    time::{Duration, Instant, interval_at},
+    time::{Duration, Instant, interval, interval_at},
 };
 use tracing::level_filters::LevelFilter;
 use tracing::{debug, error, info, warn};
@@ -257,6 +258,67 @@ fn print_chain_status(store: &Store, connected_peers: u64) {
     println!("+===============================================================+\n");
 }
 
+fn check_sync_trigger(state: &mut SyncState, head_slot: u64, network_finalized: Option<u64>) {
+    if state.is_syncing() {
+        return;
+    }
+    let Some(nf) = network_finalized else {
+        return;
+    };
+    if nf > head_slot || state.is_idle() {
+        let prev = *state;
+        *state = SyncState::Syncing;
+        info!(head_slot, network_finalized = nf, prev = ?prev, "Sync state: → SYNCING");
+    }
+}
+
+fn check_sync_complete(
+    state: &mut SyncState,
+    head_slot: u64,
+    orphan_count: usize,
+    network_finalized: Option<u64>,
+) {
+    if !state.is_syncing() {
+        return;
+    }
+    if orphan_count > 0 {
+        return;
+    }
+    let Some(nf) = network_finalized else {
+        return;
+    };
+    if head_slot >= nf {
+        *state = SyncState::Synced;
+        info!(
+            head_slot,
+            network_finalized = nf,
+            "Sync state: SYNCING → SYNCED"
+        );
+    }
+}
+
+fn check_sync_idle(state: &mut SyncState) {
+    if state.is_idle() {
+        return;
+    }
+    let prev = *state;
+    *state = SyncState::Idle;
+    info!(prev = ?prev, "Sync state: → IDLE (no peers)");
+}
+
+fn evaluate_sync_state(
+    state: &mut SyncState,
+    peers: u64,
+    head_slot: u64,
+    network_finalized: Option<u64>,
+) {
+    if peers == 0 {
+        check_sync_idle(state);
+    } else {
+        check_sync_trigger(state, head_slot, network_finalized);
+    }
+}
+
 #[derive(Parser, Debug)]
 struct Args {
     #[arg(short, long, default_value = "127.0.0.1")]
@@ -443,21 +505,24 @@ async fn main() -> Result<()> {
 
     let config = Config { genesis_time };
 
-    let (anchor_state, anchor_block) = if let Some(ref url) = args.checkpoint_sync_url {
-        info!("Checkpoint sync enabled, downloading from: {}", url);
+    // ── Anchor state: download checkpoint or use genesis ─────────────────────────────────────
+    // For checkpoint sync: state is downloaded now; the anchor block is fetched from the
+    // network after the network service starts.  `checkpoint_block_root` holds the expected
+    // block root that MUST arrive before the store is initialised.
+    // For genesis: state and block are both ready immediately; no network wait is needed.
+    let anchor_state: State;
+    let checkpoint_block_root: Option<H256>;
+    let anchor_block_root: H256;
 
+    if let Some(ref url) = args.checkpoint_sync_url {
+        info!("Checkpoint sync enabled, downloading from: {}", url);
         match download_checkpoint_state(url).await {
             Ok(checkpoint_state) => {
                 if let Err(e) = verify_checkpoint_state(&checkpoint_state, &genesis_state) {
                     error!("Checkpoint verification failed: {}. Refusing to start.", e);
                     return Err(e);
                 }
-
-                // Compute state root for the checkpoint state
                 let checkpoint_state_root = checkpoint_state.hash_tree_root();
-
-                // Reconstruct block header from state's latest_block_header with correct state_root
-                // The state's latest_block_header already contains the correct body_root from the original block
                 let checkpoint_block_header = BlockHeader {
                     slot: checkpoint_state.latest_block_header.slot,
                     proposer_index: checkpoint_state.latest_block_header.proposer_index,
@@ -465,56 +530,18 @@ async fn main() -> Result<()> {
                     state_root: checkpoint_state_root,
                     body_root: checkpoint_state.latest_block_header.body_root,
                 };
-
-                // Compute block root from the BlockHeader (NOT from a synthetic Block with empty body)
-                let checkpoint_block_root = checkpoint_block_header.hash_tree_root();
-
-                // Create a Block structure for the SignedBlockWithAttestation
-                // Note: body is synthetic but block_root is computed correctly from header above
-                let checkpoint_block = Block {
-                    slot: checkpoint_block_header.slot,
-                    proposer_index: checkpoint_block_header.proposer_index,
-                    parent_root: checkpoint_block_header.parent_root,
-                    state_root: checkpoint_state_root,
-                    body: BlockBody {
-                        attestations: Default::default(),
-                    },
-                };
-
-                let checkpoint_proposer_attestation = Attestation {
-                    validator_id: checkpoint_state.latest_block_header.proposer_index,
-                    data: AttestationData {
-                        slot: checkpoint_state.slot,
-                        head: Checkpoint {
-                            root: checkpoint_block_root,
-                            slot: checkpoint_state.slot,
-                        },
-                        target: checkpoint_state.latest_finalized.clone(),
-                        source: checkpoint_state.latest_justified.clone(),
-                    },
-                };
-
-                let checkpoint_signed_block = SignedBlockWithAttestation {
-                    message: BlockWithAttestation {
-                        block: checkpoint_block,
-                        proposer_attestation: checkpoint_proposer_attestation,
-                    },
-                    signature: BlockSignatures {
-                        attestation_signatures: PersistentList::default(),
-                        proposer_signature: Signature::default(),
-                    },
-                };
-
+                let root = checkpoint_block_header.hash_tree_root();
                 info!(
                     slot = checkpoint_state.slot.0,
                     finalized = checkpoint_state.latest_finalized.slot.0,
                     justified = checkpoint_state.latest_justified.slot.0,
-                    block_root = %format!("0x{:x}", checkpoint_block_root),
+                    block_root = %format!("0x{:x}", root),
                     state_root = %format!("0x{:x}", checkpoint_state_root),
-                    "Checkpoint sync successful"
+                    "Checkpoint state downloaded and verified — will fetch anchor block from network"
                 );
-
-                (checkpoint_state, checkpoint_signed_block)
+                anchor_state = checkpoint_state;
+                checkpoint_block_root = Some(root);
+                anchor_block_root = root;
             }
             Err(e) => {
                 return Err(e.context(
@@ -524,27 +551,18 @@ async fn main() -> Result<()> {
             }
         }
     } else {
-        (genesis_state.clone(), genesis_signed_block)
-    };
-
-    // Clone anchor block for seeding the shared block provider later
-    let anchor_block_for_provider = anchor_block.clone();
-    // Compute block root from BlockHeader (NOT from Block with potentially empty body)
-    // Must match the computation in get_forkchoice_store
-    let anchor_block_header = BlockHeader {
-        slot: anchor_state.latest_block_header.slot,
-        proposer_index: anchor_state.latest_block_header.proposer_index,
-        parent_root: anchor_state.latest_block_header.parent_root,
-        state_root: anchor_state.hash_tree_root(),
-        body_root: anchor_state.latest_block_header.body_root,
-    };
-    let anchor_block_root = anchor_block_header.hash_tree_root();
-
-    let store = Arc::new(RwLock::new(get_forkchoice_store(
-        anchor_state.clone(),
-        anchor_block,
-        config,
-    )));
+        anchor_state = genesis_state.clone();
+        checkpoint_block_root = None;
+        // Genesis path: reconstruct root from state's latest block header.
+        anchor_block_root = BlockHeader {
+            slot: anchor_state.latest_block_header.slot,
+            proposer_index: anchor_state.latest_block_header.proposer_index,
+            parent_root: anchor_state.latest_block_header.parent_root,
+            state_root: anchor_state.hash_tree_root(),
+            body_root: anchor_state.latest_block_header.body_root,
+        }
+        .hash_tree_root();
+    }
 
     let num_validators = anchor_state.validators.len_u64();
     info!(num_validators = num_validators, "Anchor state loaded");
@@ -669,26 +687,28 @@ async fn main() -> Result<()> {
     let peer_count = Arc::new(AtomicU64::new(0));
     let peer_count_for_status = peer_count.clone();
 
-    // Create shared block provider for BlocksByRoot requests (checkpoint sync backfill)
-    // Seed with anchor block so we can serve it to peers doing checkpoint sync
-    let mut initial_blocks = HashMap::new();
-    initial_blocks.insert(anchor_block_root, anchor_block_for_provider.clone());
-
-    let signed_block_provider: SignedBlockProvider = Arc::new(RwLock::new(initial_blocks));
+    // Create shared block provider for BlocksByRoot requests.
+    // Start empty: the anchor block is inserted after it is received from the network
+    // (checkpoint path) or after get_forkchoice_store returns (genesis path).
+    let signed_block_provider: SignedBlockProvider = Arc::new(RwLock::new(HashMap::new()));
     let signed_block_provider_for_network = signed_block_provider.clone();
 
-    let initial_status = {
-        let s = store.read();
-        Status::new(
-            s.latest_finalized.clone(),
-            Checkpoint {
-                root: s.head,
-                slot: s.blocks.get(&s.head).map(|b| b.slot).unwrap_or(Slot(0)),
-            },
-        )
-    };
+    // Build initial status from anchor state so peers know our finalized checkpoint and head
+    // before the store is initialised.  Updated once the store is ready.
+    let initial_status = Status::new(
+        anchor_state.latest_finalized.clone(),
+        Checkpoint {
+            root: anchor_block_root,
+            slot: anchor_state.latest_block_header.slot,
+        },
+    );
     let status_provider: StatusProvider = Arc::new(RwLock::new(initial_status));
     let status_provider_for_network = status_provider.clone();
+
+    let network_finalized_slot: NetworkFinalizedSlot = Arc::new(Mutex::new(None));
+    let network_finalized_slot_for_network = network_finalized_slot.clone();
+
+    let status_notify = Arc::new(Notify::new());
 
     // LOAD NODE KEY
     let mut network_service = if let Some(key_path) = &args.node_key {
@@ -704,6 +724,8 @@ async fn main() -> Result<()> {
                     keypair,
                     signed_block_provider_for_network,
                     status_provider_for_network,
+                    network_finalized_slot_for_network,
+                    status_notify.clone(),
                 )
                 .await
                 .expect("Failed to create network service with custom key")
@@ -717,6 +739,8 @@ async fn main() -> Result<()> {
                     peer_count,
                     signed_block_provider_for_network,
                     status_provider_for_network,
+                    network_finalized_slot_for_network,
+                    status_notify.clone(),
                 )
                 .await
                 .expect("Failed to create network service")
@@ -730,6 +754,8 @@ async fn main() -> Result<()> {
             peer_count,
             signed_block_provider_for_network,
             status_provider_for_network,
+            network_finalized_slot_for_network,
+            status_notify.clone(),
         )
         .await
         .expect("Failed to create network service")
@@ -740,6 +766,135 @@ async fn main() -> Result<()> {
             panic!("Network service exited with error: {err}");
         }
     });
+
+    // ── Anchor block: fetch from network (checkpoint) or use genesis block directly ──────────
+    // Genesis path  : genesis_signed_block is ready immediately; no network wait needed.
+    // Checkpoint path: send periodic BlocksByRoot(checkpoint_block_root) requests until a peer
+    //   delivers the block.  Blocks that arrive with a non-matching root are discarded here;
+    //   they will be re-requested by the normal backfill mechanism once the chain task starts.
+    //   Abort with a clear error if no valid block arrives within the timeout.
+    const ANCHOR_BLOCK_TIMEOUT_SECS: u64 = 300;
+
+    let anchor_block: SignedBlockWithAttestation = if let Some(expected_root) =
+        checkpoint_block_root
+    {
+        info!(
+            block_root = %format!("0x{:x}", expected_root),
+            timeout_secs = ANCHOR_BLOCK_TIMEOUT_SECS,
+            "Waiting for anchor block from network"
+        );
+
+        let mut retry_interval = interval(Duration::from_secs(5));
+
+        // Wrap the loop in tokio::time::timeout so the deadline fires unconditionally at
+        // T+ANCHOR_BLOCK_TIMEOUT_SECS, regardless of how many non-anchor messages arrive.
+        // A deadline arm inside a biased select would be starved when peers continuously
+        // deliver other blocks and the channel is never empty.
+        let timeout_result = tokio::time::timeout(
+            Duration::from_secs(ANCHOR_BLOCK_TIMEOUT_SECS),
+            async {
+                loop {
+                    tokio::select! {
+                        msg = chain_message_receiver.recv() => {
+                            let Some(msg) = msg else {
+                                return Err(anyhow::anyhow!(
+                                    "Chain message channel closed during anchor block wait"
+                                ));
+                            };
+                            if let ChainMessage::ProcessBlock { signed_block_with_attestation, .. } = msg {
+                                let root = signed_block_with_attestation.message.block.hash_tree_root();
+                                if root == expected_root {
+                                    // Root match guarantees slot, proposer_index, parent_root,
+                                    // state_root, and body contents (via body_root).
+                                    // proposer_signature is NOT covered by the hash — verify it
+                                    // explicitly so a peer serving a validly-hashed but unsigned
+                                    // block cannot become our anchor.
+                                    match signed_block_with_attestation
+                                        .verify_signatures(anchor_state.clone())
+                                    {
+                                        Ok(()) => {
+                                            info!(
+                                                slot = signed_block_with_attestation.message.block.slot.0,
+                                                block_root = %format!("0x{:x}", root),
+                                                "Anchor block received and verified — initialising fork-choice store"
+                                            );
+                                            return Ok(signed_block_with_attestation);
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                slot = signed_block_with_attestation.message.block.slot.0,
+                                                block_root = %format!("0x{:x}", root),
+                                                error = %e,
+                                                "Anchor block signature verification failed — \
+                                                 discarding, waiting for valid block from another peer"
+                                            );
+                                            // Keep waiting; the retry interval will re-request from peers.
+                                        }
+                                    }
+                                } else {
+                                    debug!(
+                                        slot = signed_block_with_attestation.message.block.slot.0,
+                                        root = %format!("0x{:x}", root),
+                                        "Waiting for anchor block — discarding non-anchor block"
+                                    );
+                                }
+                            }
+                            // Attestations and aggregations before the store is ready: discard silently.
+                        }
+                        _ = retry_interval.tick() => {
+                            let _ = outbound_p2p_sender.send(
+                                OutboundP2pRequest::RequestBlocksByRoot(vec![expected_root])
+                            );
+                        }
+                    }
+                }
+            },
+        )
+        .await;
+
+        match timeout_result {
+            Err(_elapsed) => {
+                return Err(anyhow::anyhow!(
+                    "Anchor block 0x{:x} not received within {} seconds. \
+                     The checkpoint source may be on a minority fork. \
+                     Verify the checkpoint URL and retry.",
+                    expected_root,
+                    ANCHOR_BLOCK_TIMEOUT_SECS,
+                ));
+            }
+            Ok(Err(e)) => return Err(e),
+            Ok(Ok(block)) => block,
+        }
+    } else {
+        // Genesis path: block was prepared at startup, no network wait needed.
+        genesis_signed_block
+    };
+
+    // ── Initialise fork-choice store with the real anchor block ──────────────────────────────
+    let anchor_block_for_provider = anchor_block.clone();
+
+    let store = Arc::new(RwLock::new(get_forkchoice_store(
+        anchor_state.clone(),
+        anchor_block,
+        config,
+    )));
+
+    // Seed the block provider so we can serve the anchor block to peers via BlocksByRoot.
+    {
+        let mut provider = signed_block_provider.write();
+        provider.insert(anchor_block_root, anchor_block_for_provider);
+    }
+
+    // Sync status_provider to the now-initialised store (ensures head root/slot are accurate).
+    {
+        let s = store.read();
+        let mut status = status_provider.write();
+        status.finalized = s.latest_finalized.clone();
+        status.head = Checkpoint {
+            root: s.head,
+            slot: s.blocks.get(&s.head).map(|b| b.slot).unwrap_or(Slot(0)),
+        };
+    }
 
     let chain_outbound_sender = outbound_p2p_sender.clone();
 
@@ -779,6 +934,11 @@ async fn main() -> Result<()> {
         let mut last_logged_slot = 0u64;
         let mut last_status_slot: Option<u64> = None;
         let mut block_cache = BlockCache::new();
+        let mut sync_state = if vs_for_chain.is_some() {
+            SyncState::Syncing
+        } else {
+            SyncState::Idle
+        };
 
         let peer_count = peer_count_for_status;
 
@@ -803,6 +963,10 @@ async fn main() -> Result<()> {
                         let peers = peer_count.load(Ordering::Relaxed);
                         print_chain_status(&*store.read(), peers);
                         last_status_slot = Some(current_slot);
+
+                        let head_slot = { let s = store.read(); s.blocks.get(&s.head).map(|b| b.slot.0).unwrap_or(0) };
+                        let nf = *network_finalized_slot.lock();
+                        evaluate_sync_state(&mut sync_state, peers, head_slot, nf);
                     }
 
                     match current_interval {
@@ -840,14 +1004,29 @@ async fn main() -> Result<()> {
                         last_logged_slot = current_slot;
                     }
                 }
+                _ = status_notify.notified() => {
+                    let peers = peer_count.load(Ordering::Relaxed);
+                    let head_slot = { let s = store.read(); s.blocks.get(&s.head).map(|b| b.slot.0).unwrap_or(0) };
+                    let nf = *network_finalized_slot.lock();
+                    evaluate_sync_state(&mut sync_state, peers, head_slot, nf);
+                }
                 message = chain_message_receiver.recv() => {
                     let Some(message) = message else { break };
                     match message {
                         ChainMessage::ProcessBlock {
                             signed_block_with_attestation,
+                            is_trusted,
                             should_gossip,
-                            ..
                         } => {
+                            if should_gossip && !is_trusted && !sync_state.accepts_gossip() {
+                                debug!(
+                                    state = ?sync_state,
+                                    slot = signed_block_with_attestation.message.block.slot.0,
+                                    "Dropping gossip block: sync state does not accept gossip"
+                                );
+                                continue;
+                            }
+
                             let block_slot = signed_block_with_attestation.message.block.slot;
                             let proposer = signed_block_with_attestation.message.block.proposer_index;
                             let block_root = signed_block_with_attestation.message.block.hash_tree_root();
@@ -921,6 +1100,12 @@ async fn main() -> Result<()> {
                                         warn!("Failed to request missing parent block: {}", req_err);
                                     }
                                 }
+
+                                let head_slot = { let s = store.read(); s.blocks.get(&s.head).map(|b| b.slot.0).unwrap_or(0) };
+                                let nf = *network_finalized_slot.lock();
+                                check_sync_trigger(&mut sync_state, head_slot, nf);
+                                check_sync_complete(&mut sync_state, head_slot, block_cache.orphan_count(), nf);
+
                                 continue;
                             }
 
@@ -948,6 +1133,10 @@ async fn main() -> Result<()> {
                                             info!(slot = block_slot.0, "Broadcasted block");
                                         }
                                     }
+
+                                    let head_slot = { let s = store.read(); s.blocks.get(&s.head).map(|b| b.slot.0).unwrap_or(0) };
+                                    let nf = *network_finalized_slot.lock();
+                                    check_sync_complete(&mut sync_state, head_slot, block_cache.orphan_count(), nf);
                                 }
                                 Err(e) => warn!("Problem processing block: {}", e),
                             }
@@ -964,9 +1153,18 @@ async fn main() -> Result<()> {
                         }
                         ChainMessage::ProcessAttestation {
                             signed_attestation,
+                            is_trusted,
                             should_gossip,
-                            ..
                         } => {
+                            if should_gossip && !is_trusted && !sync_state.accepts_gossip() {
+                                debug!(
+                                    state = ?sync_state,
+                                    slot = signed_attestation.message.slot.0,
+                                    "Dropping gossip attestation: sync state does not accept gossip"
+                                );
+                                continue;
+                            }
+
                             let att_slot = signed_attestation.message.slot.0;
                             let source_slot = signed_attestation.message.source.slot.0;
                             let target_slot = signed_attestation.message.target.slot.0;
@@ -1007,9 +1205,18 @@ async fn main() -> Result<()> {
                         }
                         ChainMessage::ProcessAggregation {
                             signed_aggregated_attestation,
+                            is_trusted,
                             should_gossip,
-                            ..
                         } => {
+                            if should_gossip && !is_trusted && !sync_state.accepts_gossip() {
+                                debug!(
+                                    state = ?sync_state,
+                                    slot = signed_aggregated_attestation.data.slot.0,
+                                    "Dropping gossip aggregation: sync state does not accept gossip"
+                                );
+                                continue;
+                            }
+
                             let agg_slot = signed_aggregated_attestation.data.slot.0;
                             let validator_count = signed_aggregated_attestation
                                 .proof

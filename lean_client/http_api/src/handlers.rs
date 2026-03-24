@@ -23,6 +23,10 @@ pub async fn health() -> impl IntoResponse {
 pub async fn states_finalized(State(store): State<SharedStore>) -> Result<Response, StatusCode> {
     let store = store.read();
 
+    if !store.finalized_ever_updated {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
     let finalized_root = store.latest_finalized.root;
 
     let state = store

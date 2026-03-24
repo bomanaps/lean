@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use containers::{
     AttestationData, SignatureKey, SignedAggregatedAttestation, SignedAttestation,
     SignedBlockWithAttestation,
@@ -62,17 +62,25 @@ fn validate_attestation_data(store: &Store, data: &AttestationData) -> Result<()
         data.target.slot.0
     );
 
-    // Validate checkpoint slots match block slots
-    // Per devnet-2, store.blocks now contains Block (not SignedBlockWithAttestation)
+    // Validate checkpoint slots match block slots.
+    // Skip the source slot-match when the root is the store's known justified or
+    // finalized checkpoint: after checkpoint sync the anchor block sits at
+    // anchor_slot in store.blocks but the checkpoint carries the actual historical
+    // slot from the downloaded state (e.g. 100994 vs anchor 101002).
     let source_block = &store.blocks[&data.source.root];
     let target_block = &store.blocks[&data.target.root];
 
-    ensure!(
-        source_block.slot == data.source.slot,
-        "Source checkpoint slot mismatch: checkpoint {} vs block {}",
-        data.source.slot.0,
-        source_block.slot.0
-    );
+    let source_is_trusted_checkpoint = data.source.root == store.latest_justified.root
+        || data.source.root == store.latest_finalized.root;
+
+    if !source_is_trusted_checkpoint {
+        ensure!(
+            source_block.slot == data.source.slot,
+            "Source checkpoint slot mismatch: checkpoint {} vs block {}",
+            data.source.slot.0,
+            source_block.slot.0
+        );
+    }
 
     ensure!(
         target_block.slot == data.target.slot,
@@ -152,8 +160,35 @@ pub fn on_gossip_attestation(
         });
     })?;
 
-    // Store signature for later lookup during block building
+    // Verify individual XMSS signature against the validator's public key.
+    // State is available: the pending-block check above confirmed target.root is in the store,
+    // and states are stored 1:1 with blocks in process_block_internal.
+    let key_state = store
+        .states
+        .get(&attestation_data.target.root)
+        .ok_or_else(|| anyhow!("no state for target block {}", attestation_data.target.root))?;
+
+    ensure!(
+        validator_id < key_state.validators.len_u64(),
+        "validator {} out of range (max {})",
+        validator_id,
+        key_state.validators.len_u64()
+    );
+
+    let pubkey = key_state
+        .validators
+        .get(validator_id)
+        .map(|v| v.pubkey.clone())
+        .map_err(|e| anyhow!("{e}"))?;
+
     let data_root = attestation_data.hash_tree_root();
+
+    signed_attestation
+        .signature
+        .verify(&pubkey, attestation_data.slot.0 as u32, data_root)
+        .context("individual attestation signature verification failed")?;
+
+    // Store verified signature for later lookup during block building
     let sig_key = SignatureKey::new(signed_attestation.validator_id, data_root);
     store
         .gossip_signatures
@@ -281,14 +316,7 @@ pub fn on_attestation(
 /// `latest_new_aggregated_payloads`. At interval 3, these are merged with
 /// `latest_known_aggregated_payloads` (from blocks) to compute safe target.
 ///
-/// # Signature Verification Strategy (TODO for production)
-///
-/// Currently, this function validates attestation data but does NOT verify the
-/// aggregated XMSS signature. This is intentional for devnet-3 performance testing.
-///
-/// For production, signature verification should be added:
-/// 1. Verify the `AggregatedSignatureProof` against the aggregation bits
-/// 2. Consider async/batched verification for throughput
+/// Verifies the aggregated XMSS proof against participant public keys before storing.
 #[inline]
 pub fn on_aggregated_attestation(
     store: &mut Store,
@@ -310,7 +338,6 @@ pub fn on_aggregated_attestation(
     }
 
     // Validate attestation data (slot bounds, target validity, etc.)
-    // TODO(production): Add signature verification here or in caller
     validate_attestation_data(store, &attestation_data)?;
 
     // Store attestation data indexed by hash for later extraction
@@ -319,7 +346,38 @@ pub fn on_aggregated_attestation(
         .attestation_data_by_root
         .insert(data_root, attestation_data.clone());
 
-    // Per leanSpec: Store the proof in latest_new_aggregated_payloads
+    // Verify aggregated XMSS proof against participant public keys.
+    // State is available: the pending-block check above confirmed target.root is in the store,
+    // and states are stored 1:1 with blocks in process_block_internal.
+    let key_state = store
+        .states
+        .get(&attestation_data.target.root)
+        .ok_or_else(|| anyhow!("no state for target block {}", attestation_data.target.root))?;
+
+    // Guard before calling to_validator_indices() which panics on an empty bitfield.
+    ensure!(
+        proof.participants.0.iter().any(|b| *b),
+        "aggregated attestation has empty participants bitfield"
+    );
+
+    let validator_ids = proof.participants.to_validator_indices();
+
+    let public_keys = validator_ids
+        .iter()
+        .map(|&id| {
+            key_state
+                .validators
+                .get(id)
+                .map(|v| v.pubkey.clone())
+                .map_err(Into::into)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    proof
+        .verify(public_keys, data_root, attestation_data.slot.0 as u32)
+        .context("aggregated attestation proof verification failed")?;
+
+    // Per leanSpec: Store the verified proof in latest_new_aggregated_payloads
     // Each participating validator gets an entry via their SignatureKey
     for (bit_idx, bit) in proof.participants.0.iter().enumerate() {
         if *bit {
@@ -452,7 +510,12 @@ fn process_block_internal(
         "Processing block - parent state info"
     );
 
-    // Execute state transition to get post-state
+    // Verify block signatures against parent state before executing the state transition.
+    // If any signature is invalid the error propagates and the block is rejected;
+    // it never enters store.blocks or store.states.
+    signed_block.verify_signatures(state.clone())?;
+
+    // Execute state transition to get post-state (signatures verified above)
     let new_state = state.state_transition(signed_block.clone(), true)?;
 
     // Debug: Log new state checkpoints after transition
@@ -516,6 +579,7 @@ fn process_block_internal(
             "Store finalized checkpoint updated!"
         );
         store.latest_finalized = new_state.latest_finalized.clone();
+        store.finalized_ever_updated = true;
         METRICS.get().map(|metrics| {
             let Some(slot) = new_state.latest_finalized.slot.0.try_into().ok() else {
                 warn!("unable to set latest_finalized slot in metrics");
@@ -530,6 +594,7 @@ fn process_block_internal(
             .0
             .saturating_sub(STATE_PRUNE_BUFFER);
         store.states.retain(|_, state| state.slot.0 >= keep_from);
+        store.blocks.retain(|_, block| block.slot.0 >= keep_from);
     }
 
     if !justified_updated && !finalized_updated {
@@ -583,9 +648,9 @@ fn process_block_internal(
             .set(store.latest_known_aggregated_payloads.len() as i64);
     });
 
-    // Process each aggregated attestation's validators for fork choice
-    // Signature verification is done in verify_signatures() before on_block()
-    // Per Devnet-2, we process attestation data directly (not SignedAttestation)
+    // Process each aggregated attestation's validators for fork choice.
+    // Signatures have already been verified above via verify_signatures().
+    // Per Devnet-2, we process attestation data directly (not SignedAttestation).
     for aggregated_attestation in aggregated_attestations.into_iter() {
         let validator_ids: Vec<u64> = aggregated_attestation
             .aggregation_bits
