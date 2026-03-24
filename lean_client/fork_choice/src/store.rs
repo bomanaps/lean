@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, anyhow, ensure};
 use containers::{
-    AggregatedSignatureProof, Attestation, AttestationData, Block, BlockHeader, Checkpoint, Config,
-    SignatureKey, SignedAggregatedAttestation, SignedAttestation, SignedBlockWithAttestation, Slot,
-    State,
+    AggregatedSignatureProof, Attestation, AttestationData, Block, BlockHeader,
+    Checkpoint, Config, SignatureKey, SignedAggregatedAttestation, SignedAttestation,
+    SignedBlockWithAttestation, Slot, State,
 };
 use metrics::{METRICS, set_gauge_u64};
 use ssz::{H256, SszHash};
@@ -34,11 +34,21 @@ pub struct Store {
     pub latest_finalized: Checkpoint,
 
     /// Set to `true` the first time `on_block` drives a justified checkpoint
-    /// update beyond the initial anchor value. Validator duties (attestation,
-    /// block proposal) must not run while this is `false` — the store's
-    /// `latest_justified` is still the placeholder anchor checkpoint and using
-    /// it as an attestation source would produce wrong source checkpoints.
+    /// update beyond the initial checkpoint-sync value. Validator duties must
+    /// not run while this is `false` — the node has not yet observed real
+    /// justification progress and its attestations would reference a stale source.
     pub justified_ever_updated: bool,
+
+    /// Set to `true` the first time `on_block` drives a finalized checkpoint
+    /// update beyond the initial anchor value.
+    ///
+    /// The `/states/finalized` endpoint must return 503 while this is `false`.
+    /// A checkpoint-synced node that has not yet seen real finalization holds
+    /// the anchor block (head slot, not finalized slot) as `latest_finalized`.
+    /// Serving that state poisons downstream checkpoint syncs: the receiving
+    /// node anchors at the head slot, which exceeds the network's justified
+    /// slot, causing the justified-ever-updated gate to never fire.
+    pub finalized_ever_updated: bool,
 
     pub blocks: HashMap<H256, Block>,
 
@@ -170,9 +180,11 @@ pub fn get_forkchoice_store(
     let block_slot = block.slot;
 
     // Compute block root differently for genesis vs checkpoint sync:
-    // - Genesis (slot 0): Use block.hash_tree_root() directly
-    // - Checkpoint sync (slot > 0): Use BlockHeader from state.latest_block_header
-    //   because we have the correct body_root there but may have synthetic empty body in Block
+    // - Genesis (slot 0): Use block.hash_tree_root() directly — block and state are consistent.
+    // - Checkpoint sync (slot > 0): Reconstruct BlockHeader from state.latest_block_header,
+    //   using anchor_state.hash_tree_root() as state_root.  This guarantees the root stored
+    //   as the key in store.blocks / store.states is the canonical one committed to by the
+    //   downloaded state, independent of what the real block's state_root field contains.
     let block_root = if block_slot.0 == 0 {
         block.hash_tree_root()
     } else {
@@ -186,25 +198,18 @@ pub fn get_forkchoice_store(
         block_header.hash_tree_root()
     };
 
-    // Per checkpoint sync: always use anchor block's root and slot for checkpoints.
-    // The original checkpoint roots point to blocks that don't exist in our store.
-    // We only have the anchor block, so both root and slot must refer to it.
-    //
-    // Using the state's justified.slot with the anchor root creates an inconsistency:
-    // validate_attestation_data requires store.blocks[source.root].slot == source.slot,
-    // which fails when the chain has progressed beyond the last justified block
-    // (e.g., state downloaded at slot 2291, last justified at slot 2285).
-    //
-    // The first real justification event from on_block will replace these values
-    // with the correct ones, so the anchor slot is only used for the initial period.
+    // Per leanSpec: substitute anchor_root for the checkpoint roots (the
+    // historical justified/finalized blocks are not in our store), but keep
+    // the actual slots from the downloaded state.  validate_attestation_data
+    // skips the block-slot match when the source root is a known checkpoint.
     let latest_justified = Checkpoint {
         root: block_root,
-        slot: block_slot,
+        slot: anchor_state.latest_justified.slot,
     };
 
     let latest_finalized = Checkpoint {
         root: block_root,
-        slot: block_slot,
+        slot: anchor_state.latest_finalized.slot,
     };
 
     // Store the original anchor_state - do NOT modify it
@@ -218,8 +223,17 @@ pub fn get_forkchoice_store(
         latest_justified,
         latest_finalized,
         justified_ever_updated: false,
-        blocks: [(block_root, block)].into(),
-        states: [(block_root, anchor_state)].into(),
+        finalized_ever_updated: false,
+        blocks: {
+            let mut m = HashMap::new();
+            m.insert(block_root, block);
+            m
+        },
+        states: {
+            let mut m = HashMap::new();
+            m.insert(block_root, anchor_state);
+            m
+        },
         latest_known_attestations: HashMap::new(),
         latest_new_attestations: HashMap::new(),
         gossip_signatures: HashMap::new(),
