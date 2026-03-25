@@ -342,11 +342,6 @@ impl State {
 
         let state = self.process_block_header(block)?;
 
-        ensure!(
-            !AggregatedAttestation::has_duplicate_data(&block.body.attestations),
-            "block contains duplicate attestation data"
-        );
-
         state.process_attestations(&block.body.attestations)
     }
 
