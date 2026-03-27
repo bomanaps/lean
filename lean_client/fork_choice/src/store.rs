@@ -7,6 +7,7 @@ use containers::{
     SignedBlockWithAttestation, Slot, State,
 };
 use metrics::{METRICS, set_gauge_u64};
+use tracing::warn;
 use ssz::{H256, SszHash};
 use xmss::Signature;
 
@@ -261,7 +262,17 @@ pub fn get_fork_choice_head(
             .expect("Error: Empty block.");
     }
     let mut vote_weights: HashMap<H256, usize> = HashMap::new();
-    let root_slot = store.blocks[&root].slot;
+    let root_slot = match store.blocks.get(&root) {
+        Some(block) => block.slot,
+        None => {
+            warn!(
+                %root,
+                justified_slot = store.latest_justified.slot.0,
+                "justified root not in store blocks, returning justified root as head"
+            );
+            return root;
+        }
+    };
 
     // stage 1: accumulate weights by walking up from each attestation's head
     for attestation_data in latest_attestations.values() {
@@ -498,6 +509,12 @@ pub fn accept_new_attestations(store: &mut Store) {
         .latest_known_attestations
         .extend(store.latest_new_attestations.drain());
     update_head(store);
+    METRICS.get().map(|m| {
+        m.lean_fork_choice_known_attestations
+            .set(store.latest_known_attestations.len() as i64);
+        m.lean_fork_choice_new_attestations
+            .set(store.latest_new_attestations.len() as i64);
+    });
 }
 
 pub fn tick_interval(store: &mut Store, has_proposal: bool) {
