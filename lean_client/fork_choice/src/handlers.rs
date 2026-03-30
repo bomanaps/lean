@@ -143,7 +143,7 @@ pub fn on_gossip_attestation(
             .push(signed_attestation);
         store.pending_fetch_roots.insert(missing_root);
         METRICS.get().map(|m| {
-            m.lean_pending_fetch_roots
+            m.grandine_pending_fetch_roots
                 .set(store.pending_fetch_roots.len() as i64)
         });
         return Ok(());
@@ -204,14 +204,14 @@ pub fn on_gossip_attestation(
                 .set(store.gossip_signatures.len() as i64);
         });
     } else {
-        METRICS.get().map(|m| m.lean_xmss_verify_skipped_total.inc());
+        METRICS.get().map(|m| m.grandine_xmss_verify_skipped_total.inc());
     }
 
     store
         .attestation_data_by_root
         .insert(data_root, attestation_data.clone());
     METRICS.get().map(|m| {
-        m.lean_attestation_data_by_root
+        m.grandine_attestation_data_by_root
             .set(store.attestation_data_by_root.len() as i64)
     });
 
@@ -272,7 +272,7 @@ pub fn on_attestation(
             .push(signed_attestation);
         store.pending_fetch_roots.insert(missing_root);
         METRICS.get().map(|m| {
-            m.lean_pending_fetch_roots
+            m.grandine_pending_fetch_roots
                 .set(store.pending_fetch_roots.len() as i64)
         });
         return Ok(());
@@ -351,7 +351,7 @@ pub fn on_aggregated_attestation(
             .push(signed_aggregated_attestation);
         store.pending_fetch_roots.insert(missing_root);
         METRICS.get().map(|m| {
-            m.lean_pending_fetch_roots
+            m.grandine_pending_fetch_roots
                 .set(store.pending_fetch_roots.len() as i64)
         });
         return Ok(());
@@ -365,7 +365,7 @@ pub fn on_aggregated_attestation(
         .attestation_data_by_root
         .insert(data_root, attestation_data.clone());
     METRICS.get().map(|m| {
-        m.lean_attestation_data_by_root
+        m.grandine_attestation_data_by_root
             .set(store.attestation_data_by_root.len() as i64)
     });
 
@@ -468,9 +468,9 @@ fn on_attestation_internal(
         }
     }
     METRICS.get().map(|m| {
-        m.lean_fork_choice_known_attestations
+        m.grandine_fork_choice_known_attestations
             .set(store.latest_known_attestations.len() as i64);
-        m.lean_fork_choice_new_attestations
+        m.grandine_fork_choice_new_attestations
             .set(store.latest_new_attestations.len() as i64);
     });
     Ok(())
@@ -646,7 +646,7 @@ fn process_block_internal(
         });
         store.attestation_data_by_root.retain(|_, data| data.target.slot.0 > finalized_slot);
         METRICS.get().map(|m| {
-            m.lean_attestation_data_by_root
+            m.grandine_attestation_data_by_root
                 .set(store.attestation_data_by_root.len() as i64)
         });
     }
@@ -702,7 +702,7 @@ fn process_block_internal(
             .set(store.latest_known_aggregated_payloads.len() as i64);
     });
     METRICS.get().map(|m| {
-        m.lean_attestation_data_by_root
+        m.grandine_attestation_data_by_root
             .set(store.attestation_data_by_root.len() as i64)
     });
 
@@ -748,7 +748,7 @@ fn process_block_internal(
         .attestation_data_by_root
         .insert(proposer_data_root, proposer_attestation.data.clone());
     METRICS.get().map(|m| {
-        m.lean_attestation_data_by_root
+        m.grandine_attestation_data_by_root
             .set(store.attestation_data_by_root.len() as i64)
     });
 

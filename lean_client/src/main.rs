@@ -231,7 +231,9 @@ fn print_chain_status(store: &Store, connected_peers: u64) {
 
     let timely = behind == 0;
 
-    METRICS.get().map(|m| m.lean_slots_behind.set(behind as i64));
+    METRICS
+        .get()
+        .map(|m| m.grandine_slots_behind.set(behind as i64));
 
     println!("\n+===============================================================+");
     println!(
@@ -1084,7 +1086,7 @@ async fn main() -> Result<()> {
                                     0,
                                 );
                                 block_cache.mark_orphan(block_root);
-                                METRICS.get().map(|m| m.lean_block_cache_size.set(block_cache.len() as i64));
+                                METRICS.get().map(|m| m.grandine_block_cache_size.set(block_cache.len() as i64));
 
                                 store.write().pending_fetch_roots.insert(parent_root);
 
@@ -1096,7 +1098,7 @@ async fn main() -> Result<()> {
                                 );
 
                                 let missing: Vec<H256> = store.write().pending_fetch_roots.drain().collect();
-                                METRICS.get().map(|m| m.lean_pending_fetch_roots.set(0));
+                                METRICS.get().map(|m| m.grandine_pending_fetch_roots.set(0));
                                 if !missing.is_empty() {
                                     if let Err(req_err) = outbound_p2p_sender.send(
                                         OutboundP2pRequest::RequestBlocksByRoot(missing)
@@ -1145,11 +1147,11 @@ async fn main() -> Result<()> {
                                 Err(e) => warn!("Problem processing block: {}", e),
                             }
 
-                            METRICS.get().map(|m| m.lean_block_cache_size.set(block_cache.len() as i64));
+                            METRICS.get().map(|m| m.grandine_block_cache_size.set(block_cache.len() as i64));
 
                             // Drain block roots queued by retried attestations inside on_block.
                             let missing: Vec<H256> = store.write().pending_fetch_roots.drain().collect();
-                            METRICS.get().map(|m| m.lean_pending_fetch_roots.set(0));
+                            METRICS.get().map(|m| m.grandine_pending_fetch_roots.set(0));
                             if !missing.is_empty() {
                                 if let Err(e) = outbound_p2p_sender.send(
                                     OutboundP2pRequest::RequestBlocksByRoot(missing)
@@ -1202,7 +1204,7 @@ async fn main() -> Result<()> {
                             }
 
                             let missing: Vec<H256> = store.write().pending_fetch_roots.drain().collect();
-                            METRICS.get().map(|m| m.lean_pending_fetch_roots.set(0));
+                            METRICS.get().map(|m| m.grandine_pending_fetch_roots.set(0));
                             if !missing.is_empty() {
                                 if let Err(e) = outbound_p2p_sender.send(
                                     OutboundP2pRequest::RequestBlocksByRoot(missing)
@@ -1252,7 +1254,7 @@ async fn main() -> Result<()> {
                             }
 
                             let missing: Vec<H256> = store.write().pending_fetch_roots.drain().collect();
-                            METRICS.get().map(|m| m.lean_pending_fetch_roots.set(0));
+                            METRICS.get().map(|m| m.grandine_pending_fetch_roots.set(0));
                             if !missing.is_empty() {
                                 if let Err(e) = outbound_p2p_sender.send(
                                     OutboundP2pRequest::RequestBlocksByRoot(missing)

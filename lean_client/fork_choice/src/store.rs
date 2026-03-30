@@ -510,9 +510,9 @@ pub fn accept_new_attestations(store: &mut Store) {
         .extend(store.latest_new_attestations.drain());
     update_head(store);
     METRICS.get().map(|m| {
-        m.lean_fork_choice_known_attestations
+        m.grandine_fork_choice_known_attestations
             .set(store.latest_known_attestations.len() as i64);
-        m.lean_fork_choice_new_attestations
+        m.grandine_fork_choice_new_attestations
             .set(store.latest_new_attestations.len() as i64);
     });
 }
