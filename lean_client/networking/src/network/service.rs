@@ -267,8 +267,8 @@ where
         let behaviour = Self::build_behaviour(&local_key, &network_config)?;
 
         let config = Config::with_tokio_executor()
-            .with_notify_handler_buffer_size(NonZeroUsize::new(256).unwrap())
-            .with_per_connection_event_buffer_size(64)
+            .with_notify_handler_buffer_size(NonZeroUsize::new(7).unwrap())
+            .with_per_connection_event_buffer_size(4)
             .with_dial_concurrency_factor(NonZeroU8::new(1).unwrap());
 
         let multiaddr = Self::multiaddr(&network_config)?;

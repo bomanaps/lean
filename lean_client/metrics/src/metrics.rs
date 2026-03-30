@@ -144,25 +144,25 @@ pub struct Metrics {
     // OOM Detection Metrics
 
     /// Number of entries in the attestation_data_by_root secondary index
-    pub lean_attestation_data_by_root: IntGauge,
+    pub grandine_attestation_data_by_root: IntGauge,
 
     /// Number of block roots queued for BlocksByRoot fetch (missing-block backlog)
-    pub lean_pending_fetch_roots: IntGauge,
+    pub grandine_pending_fetch_roots: IntGauge,
 
     /// Number of orphan blocks held in the backfill BlockCache (hard-capped at 1024)
-    pub lean_block_cache_size: IntGauge,
+    pub grandine_block_cache_size: IntGauge,
 
     /// Gap between the network's current slot and the node's head slot (backfill depth)
-    pub lean_slots_behind: IntGauge,
+    pub grandine_slots_behind: IntGauge,
 
     /// Validators with finalized (known) attestations currently in the fork-choice store
-    pub lean_fork_choice_known_attestations: IntGauge,
+    pub grandine_fork_choice_known_attestations: IntGauge,
 
     /// Validators with pending (new/gossip) attestations in the fork-choice store
-    pub lean_fork_choice_new_attestations: IntGauge,
+    pub grandine_fork_choice_new_attestations: IntGauge,
 
     /// XMSS verifications skipped because the signature was already cached
-    pub lean_xmss_verify_skipped_total: IntCounter,
+    pub grandine_xmss_verify_skipped_total: IntCounter,
 }
 
 impl Metrics {
@@ -386,32 +386,32 @@ impl Metrics {
             )?,
 
             // OOM Detection Metrics
-            lean_attestation_data_by_root: IntGauge::new(
-                "lean_attestation_data_by_root",
+            grandine_attestation_data_by_root: IntGauge::new(
+                "grandine_attestation_data_by_root",
                 "Number of entries in attestation_data_by_root secondary index",
             )?,
-            lean_pending_fetch_roots: IntGauge::new(
-                "lean_pending_fetch_roots",
+            grandine_pending_fetch_roots: IntGauge::new(
+                "grandine_pending_fetch_roots",
                 "Block roots queued for BlocksByRoot fetch (missing-block backlog)",
             )?,
-            lean_block_cache_size: IntGauge::new(
-                "lean_block_cache_size",
+            grandine_block_cache_size: IntGauge::new(
+                "grandine_block_cache_size",
                 "Orphan blocks in backfill BlockCache (hard cap 1024)",
             )?,
-            lean_slots_behind: IntGauge::new(
-                "lean_slots_behind",
+            grandine_slots_behind: IntGauge::new(
+                "grandine_slots_behind",
                 "Current slot minus head slot — backfill depth and primary OOM risk indicator",
             )?,
-            lean_fork_choice_known_attestations: IntGauge::new(
-                "lean_fork_choice_known_attestations",
+            grandine_fork_choice_known_attestations: IntGauge::new(
+                "grandine_fork_choice_known_attestations",
                 "Validators with known attestations in the fork-choice store",
             )?,
-            lean_fork_choice_new_attestations: IntGauge::new(
-                "lean_fork_choice_new_attestations",
+            grandine_fork_choice_new_attestations: IntGauge::new(
+                "grandine_fork_choice_new_attestations",
                 "Validators with new gossip attestations in the fork-choice store",
             )?,
-            lean_xmss_verify_skipped_total: IntCounter::new(
-                "lean_xmss_verify_skipped_total",
+            grandine_xmss_verify_skipped_total: IntCounter::new(
+                "grandine_xmss_verify_skipped_total",
                 "XMSS verifications skipped (signature already cached) — root cause 4 indicator",
             )?,
         })
@@ -516,13 +516,13 @@ impl Metrics {
         default_registry.register(Box::new(self.lean_attestation_committee_count.clone()))?;
 
         // OOM Detection Metrics
-        default_registry.register(Box::new(self.lean_attestation_data_by_root.clone()))?;
-        default_registry.register(Box::new(self.lean_pending_fetch_roots.clone()))?;
-        default_registry.register(Box::new(self.lean_block_cache_size.clone()))?;
-        default_registry.register(Box::new(self.lean_slots_behind.clone()))?;
-        default_registry.register(Box::new(self.lean_fork_choice_known_attestations.clone()))?;
-        default_registry.register(Box::new(self.lean_fork_choice_new_attestations.clone()))?;
-        default_registry.register(Box::new(self.lean_xmss_verify_skipped_total.clone()))?;
+        default_registry.register(Box::new(self.grandine_attestation_data_by_root.clone()))?;
+        default_registry.register(Box::new(self.grandine_pending_fetch_roots.clone()))?;
+        default_registry.register(Box::new(self.grandine_block_cache_size.clone()))?;
+        default_registry.register(Box::new(self.grandine_slots_behind.clone()))?;
+        default_registry.register(Box::new(self.grandine_fork_choice_known_attestations.clone()))?;
+        default_registry.register(Box::new(self.grandine_fork_choice_new_attestations.clone()))?;
+        default_registry.register(Box::new(self.grandine_xmss_verify_skipped_total.clone()))?;
 
         Ok(())
     }
