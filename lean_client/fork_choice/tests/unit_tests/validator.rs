@@ -330,8 +330,19 @@ fn test_block_production_then_attestation() {
     assert_eq!(attestation.validator_id, attestor_idx);
     assert_eq!(attestation.data.slot, Slot(2));
 
-    // The attestation should be consistent with current forkchoice state
-    assert_eq!(attestation.data.source, store.latest_justified);
+    let head_state = store
+        .states
+        .get(&store.head)
+        .expect("head state must exist");
+    let expected_source = if head_state.latest_justified.root.is_zero() {
+        Checkpoint {
+            root: store.head,
+            slot: head_state.latest_justified.slot,
+        }
+    } else {
+        head_state.latest_justified.clone()
+    };
+    assert_eq!(attestation.data.source, expected_source);
 }
 
 #[test]
@@ -527,4 +538,36 @@ fn test_validator_operations_invalid_parameters() {
         data: attestation_data,
     };
     assert_eq!(attestation.validator_id, large_validator);
+}
+
+#[test]
+fn test_produce_attestation_data_uses_head_state_justified() {
+    let mut store = create_test_store();
+
+    // Simulate a minority-fork block advancing store.latest_justified
+    // past what the head chain has seen.
+    store.latest_justified = Checkpoint {
+        root: H256::from_slice(&[0xff; 32]),
+        slot: Slot(5),
+    };
+
+    let attestation_data = store
+        .produce_attestation_data(Slot(1))
+        .expect("produce_attestation_data failed");
+
+    let head_state = store
+        .states
+        .get(&store.head)
+        .expect("head state must exist");
+    let expected_source = if head_state.latest_justified.root.is_zero() {
+        Checkpoint {
+            root: store.head,
+            slot: head_state.latest_justified.slot,
+        }
+    } else {
+        head_state.latest_justified.clone()
+    };
+
+    assert_eq!(attestation_data.source, expected_source);
+    assert_ne!(attestation_data.source, store.latest_justified);
 }

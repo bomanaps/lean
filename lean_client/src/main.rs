@@ -11,8 +11,8 @@ use fork_choice::{
     block_cache::BlockCache,
     handlers::{on_aggregated_attestation, on_attestation, on_block, on_tick},
     store::{
-        INTERVALS_PER_SLOT, MILLIS_PER_INTERVAL, Store, get_forkchoice_store,
-        produce_block_with_signatures,
+        INTERVALS_PER_SLOT, MILLIS_PER_INTERVAL, Store, execute_block_production,
+        get_forkchoice_store, prepare_block_production,
     },
     sync_state::SyncState,
 };
@@ -1280,10 +1280,24 @@ async fn main() -> Result<()> {
                     let Some(v_message) = v_message else { break };
                     match v_message {
                         ValidatorChainMessage::ProduceBlock { slot, proposer_index, sender } => {
-                            let result = produce_block_with_signatures(
-                                &mut *store.write(), slot, proposer_index
-                            ).map(|(_, block, sigs)| (block, sigs));
-                            let _ = sender.send(result);
+                            let prepare_result = {
+                                let mut w = store.write();
+                                prepare_block_production(&mut *w, slot, proposer_index)
+                            };
+
+                            match prepare_result {
+                                Err(e) => { let _ = sender.send(Err(e)); }
+                                Ok(inputs) => {
+                                    let result = task::spawn_blocking(move || {
+                                        execute_block_production(inputs)
+                                            .map(|(_, block, sigs)| (block, sigs))
+                                    })
+                                    .await
+                                    .unwrap_or_else(|e| Err(anyhow::anyhow!("block production task panicked: {e}")));
+
+                                    let _ = sender.send(result);
+                                }
+                            }
                         }
                         ValidatorChainMessage::BuildAttestationData { slot, sender } => {
                             let store_read = store.read();

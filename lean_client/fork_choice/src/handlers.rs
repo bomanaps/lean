@@ -204,7 +204,9 @@ pub fn on_gossip_attestation(
                 .set(store.gossip_signatures.len() as i64);
         });
     } else {
-        METRICS.get().map(|m| m.grandine_xmss_verify_skipped_total.inc());
+        METRICS
+            .get()
+            .map(|m| m.grandine_xmss_verify_skipped_total.inc());
     }
 
     store
@@ -644,7 +646,9 @@ fn process_block_internal(
             adr.get(&key.data_root)
                 .map_or(true, |data| data.target.slot.0 > finalized_slot)
         });
-        store.attestation_data_by_root.retain(|_, data| data.target.slot.0 > finalized_slot);
+        store
+            .attestation_data_by_root
+            .retain(|_, data| data.target.slot.0 > finalized_slot);
         METRICS.get().map(|m| {
             m.grandine_attestation_data_by_root
                 .set(store.attestation_data_by_root.len() as i64)

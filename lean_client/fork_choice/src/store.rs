@@ -2,13 +2,13 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, anyhow, ensure};
 use containers::{
-    AggregatedSignatureProof, Attestation, AttestationData, Block, BlockHeader,
-    Checkpoint, Config, SignatureKey, SignedAggregatedAttestation, SignedAttestation,
-    SignedBlockWithAttestation, Slot, State,
+    AggregatedSignatureProof, Attestation, AttestationData, Block, BlockHeader, Checkpoint, Config,
+    SignatureKey, SignedAggregatedAttestation, SignedAttestation, SignedBlockWithAttestation, Slot,
+    State,
 };
 use metrics::{METRICS, set_gauge_u64};
-use tracing::warn;
 use ssz::{H256, SszHash};
+use tracing::warn;
 use xmss::Signature;
 
 pub type Interval = u64;
@@ -111,11 +111,25 @@ impl Store {
 
         let target_checkpoint = self.get_attestation_target();
 
+        let head_state = self
+            .states
+            .get(&self.head)
+            .ok_or_else(|| anyhow!("head state not found"))?;
+
+        let source = if head_state.latest_justified.root.is_zero() {
+            Checkpoint {
+                root: self.head,
+                slot: head_state.latest_justified.slot,
+            }
+        } else {
+            head_state.latest_justified.clone()
+        };
+
         Ok(AttestationData {
             slot,
             head: head_checkpoint,
             target: target_checkpoint,
-            source: self.latest_justified.clone(),
+            source,
         })
     }
 
@@ -543,32 +557,22 @@ pub fn get_proposal_head(store: &mut Store, slot: Slot) -> H256 {
     store.head
 }
 
-/// Produce a block and aggregated signature proofs for the target slot per devnet-2.
-///
-/// The proposer returns the block and `MultisigAggregatedSignature` proofs aligned
-/// with `block.body.attestations` so it can craft `SignedBlockWithAttestation`.
-///
-/// # Algorithm Overview
-/// 1. **Get Proposal Head**: Retrieve current chain head as parent
-/// 2. **Collect Attestations**: Convert known attestations to plain attestations
-/// 3. **Build Block**: Use State.build_block with signature caches
-///
-/// The block and state are NOT inserted here. The caller signs the block and sends
-/// it back via `ChainMessage::ProcessBlock`, which runs the full `on_block` path:
-/// state transition, `update_head`, checkpoint updates, and proposer attestation.
-///
-/// # Arguments
-/// * `store` - Mutable reference to the fork choice store
-/// * `slot` - Target slot number for block production
-/// * `validator_index` - Index of validator authorized to propose this block
-///
-/// # Returns
-/// Tuple of (block root, finalized Block, attestation signature proofs)
-pub fn produce_block_with_signatures(
+pub struct BlockProductionInputs {
+    pub slot: Slot,
+    pub validator_index: u64,
+    pub head_root: H256,
+    pub head_state: State,
+    pub available_attestations: Vec<Attestation>,
+    pub known_block_roots: HashSet<H256>,
+    pub gossip_signatures: HashMap<SignatureKey, Signature>,
+    pub aggregated_payloads: HashMap<SignatureKey, Vec<AggregatedSignatureProof>>,
+}
+
+pub fn prepare_block_production(
     store: &mut Store,
     slot: Slot,
     validator_index: u64,
-) -> Result<(H256, Block, Vec<AggregatedSignatureProof>)> {
+) -> Result<BlockProductionInputs> {
     let head_root = get_proposal_head(store, slot);
     let head_state = store
         .states
@@ -595,7 +599,35 @@ pub fn produce_block_with_signatures(
         })
         .collect();
 
-    let known_block_roots: std::collections::HashSet<H256> = store.blocks.keys().copied().collect();
+    let known_block_roots: HashSet<H256> = store.blocks.keys().copied().collect();
+    let gossip_signatures = store.gossip_signatures.clone();
+    let aggregated_payloads = store.latest_known_aggregated_payloads.clone();
+
+    Ok(BlockProductionInputs {
+        slot,
+        validator_index,
+        head_root,
+        head_state,
+        available_attestations,
+        known_block_roots,
+        gossip_signatures,
+        aggregated_payloads,
+    })
+}
+
+pub fn execute_block_production(
+    inputs: BlockProductionInputs,
+) -> Result<(H256, Block, Vec<AggregatedSignatureProof>)> {
+    let BlockProductionInputs {
+        slot,
+        validator_index,
+        head_root,
+        head_state,
+        available_attestations,
+        known_block_roots,
+        gossip_signatures,
+        aggregated_payloads,
+    } = inputs;
 
     let (final_block, _final_post_state, _aggregated_attestations, signatures) = head_state
         .build_block(
@@ -605,11 +637,20 @@ pub fn produce_block_with_signatures(
             None,
             Some(available_attestations),
             Some(&known_block_roots),
-            Some(&store.gossip_signatures),
-            Some(&store.latest_known_aggregated_payloads),
+            Some(&gossip_signatures),
+            Some(&aggregated_payloads),
         )?;
 
     let block_root = final_block.hash_tree_root();
 
     Ok((block_root, final_block, signatures))
+}
+
+pub fn produce_block_with_signatures(
+    store: &mut Store,
+    slot: Slot,
+    validator_index: u64,
+) -> Result<(H256, Block, Vec<AggregatedSignatureProof>)> {
+    let inputs = prepare_block_production(store, slot, validator_index)?;
+    execute_block_production(inputs)
 }
