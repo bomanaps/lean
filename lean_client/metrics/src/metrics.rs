@@ -142,7 +142,6 @@ pub struct Metrics {
     pub lean_attestation_committee_count: IntGauge,
 
     // OOM Detection Metrics
-
     /// Number of entries in the attestation_data_by_root secondary index
     pub grandine_attestation_data_by_root: IntGauge,
 
@@ -520,7 +519,9 @@ impl Metrics {
         default_registry.register(Box::new(self.grandine_pending_fetch_roots.clone()))?;
         default_registry.register(Box::new(self.grandine_block_cache_size.clone()))?;
         default_registry.register(Box::new(self.grandine_slots_behind.clone()))?;
-        default_registry.register(Box::new(self.grandine_fork_choice_known_attestations.clone()))?;
+        default_registry.register(Box::new(
+            self.grandine_fork_choice_known_attestations.clone(),
+        ))?;
         default_registry.register(Box::new(self.grandine_fork_choice_new_attestations.clone()))?;
         default_registry.register(Box::new(self.grandine_xmss_verify_skipped_total.clone()))?;
 

@@ -1076,10 +1076,7 @@ where
                 && peer_id != self.local_peer_id()
             {
                 let current_state = self.peer_table.lock().get(&peer_id).cloned();
-                if !matches!(
-                    current_state,
-                    Some(ConnectionState::Disconnected) | None
-                ) {
+                if !matches!(current_state, Some(ConnectionState::Disconnected) | None) {
                     trace!(?peer_id, "Already connected or connecting");
                     continue;
                 }
