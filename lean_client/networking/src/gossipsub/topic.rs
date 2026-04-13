@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use libp2p::gossipsub::{IdentTopic, TopicHash};
 
 pub const TOPIC_PREFIX: &str = "leanconsensus";
@@ -7,13 +9,10 @@ pub const BLOCK_TOPIC: &str = "block";
 pub const ATTESTATION_SUBNET_PREFIX: &str = "attestation_";
 pub const AGGREGATION_TOPIC: &str = "aggregation";
 
-/// Number of attestation subnets (devnet-3)
-pub const ATTESTATION_SUBNET_COUNT: u64 = 1;
-
 /// Compute the subnet ID for a validator (devnet-3)
-/// Subnet assignment: validator_id % ATTESTATION_SUBNET_COUNT
-pub fn compute_subnet_id(validator_id: u64) -> u64 {
-    validator_id % ATTESTATION_SUBNET_COUNT
+/// Subnet assignment: validator_id % subnet_count
+pub fn compute_subnet_id(validator_id: u64, subnet_count: u64) -> u64 {
+    validator_id % subnet_count.max(1)
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -46,17 +45,20 @@ impl GossipsubKind {
 
 /// Get gossipsub topics for subscription based on validator role.
 ///
-/// Topic subscription rules:
-/// - Block and Aggregation topics: Always subscribed
+/// Subscription rules (aligned with leanSpec PR #482):
+/// - Block and Aggregation topics: always subscribed.
 /// - Attestation subnet topics:
-///   - If `is_aggregator` is true: Subscribe to ALL attestation subnets (needed for aggregation)
-///   - If `is_aggregator` is false and `validator_id` is Some: Subscribe only to the validator's
-///     own subnet (validator_id % ATTESTATION_SUBNET_COUNT) for publishing attestations
-///   - If `validator_id` is None: Subscribe to all subnets (non-validator node for general sync)
+///   - All nodes with registered validators subscribe to each validator's derived subnet.
+///   - Aggregators additionally subscribe to any explicit `aggregate_subnet_ids`.
+///   - Aggregators with no registered validators fall back to subnet 0.
+///   - Non-aggregator nodes with no validators subscribe to no attestation topics
+///     (subnet filtering happens at the p2p subscription layer).
 pub fn get_subscription_topics(
     fork: String,
-    validator_id: Option<u64>,
+    validator_ids: &[u64],
     is_aggregator: bool,
+    aggregate_subnet_ids: &[u64],
+    subnet_count: u64,
 ) -> Vec<GossipsubTopic> {
     let mut topics = vec![
         GossipsubTopic {
@@ -69,29 +71,34 @@ pub fn get_subscription_topics(
         },
     ];
 
+    // Build the set of attestation subnets to subscribe to.
+    let mut subscription_subnets: HashSet<u64> = HashSet::new();
+
+    // All nodes with registered validators subscribe to each validator's derived subnet.
+    for &vid in validator_ids {
+        subscription_subnets.insert(compute_subnet_id(vid, subnet_count));
+    }
+
+    // Aggregators add explicit subnet IDs on top of validator-derived ones.
+    // If the aggregator has no registered validators, fall back to subnet 0.
     if is_aggregator {
-        // Aggregators subscribe to ALL attestation subnets to collect attestations for aggregation
-        for subnet_id in 0..ATTESTATION_SUBNET_COUNT {
-            topics.push(GossipsubTopic {
-                fork: fork.clone(),
-                kind: GossipsubKind::AttestationSubnet(subnet_id),
-            });
+        if subscription_subnets.is_empty() {
+            subscription_subnets.insert(0);
         }
-    } else if let Some(vid) = validator_id {
-        // Non-aggregator validators subscribe only to their own subnet for publishing attestations
-        let subnet_id = compute_subnet_id(vid);
+        for &sid in aggregate_subnet_ids {
+            subscription_subnets.insert(sid);
+        }
+    }
+
+    // Subscribe to each resolved attestation subnet.
+    // Non-validator/non-aggregator nodes end up with an empty set → no attestation topics.
+    let mut sorted_subnets: Vec<u64> = subscription_subnets.into_iter().collect();
+    sorted_subnets.sort_unstable();
+    for subnet_id in sorted_subnets {
         topics.push(GossipsubTopic {
             fork: fork.clone(),
             kind: GossipsubKind::AttestationSubnet(subnet_id),
         });
-    } else {
-        // Non-validator nodes subscribe to all subnets for general network participation
-        for subnet_id in 0..ATTESTATION_SUBNET_COUNT {
-            topics.push(GossipsubTopic {
-                fork: fork.clone(),
-                kind: GossipsubKind::AttestationSubnet(subnet_id),
-            });
-        }
     }
 
     topics

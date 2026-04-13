@@ -7,6 +7,7 @@ fn test_proposer_selection() {
     let config = ValidatorConfig {
         node_id: "test_0".to_string(),
         validator_indices: vec![2],
+        key_files: Default::default(),
     };
     let service = ValidatorService::new(config, 4);
 
@@ -28,6 +29,7 @@ fn test_is_assigned() {
     let config = ValidatorConfig {
         node_id: "test_0".to_string(),
         validator_indices: vec![2, 5, 8],
+        key_files: Default::default(),
     };
 
     assert!(config.is_assigned(2));

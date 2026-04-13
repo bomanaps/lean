@@ -16,7 +16,7 @@ use libp2p_identity::{Keypair, PeerId};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::enr_ext::EnrExt;
+use crate::enr_ext::{EnrExt, QUIC6_ENR_KEY, QUIC_ENR_KEY};
 
 pub use config::DiscoveryConfig;
 
@@ -130,13 +130,14 @@ impl DiscoveryService {
             .map(IpAddr::V4)
             .or_else(|| enr.ip6().map(IpAddr::V6))?;
 
-        // Try TCP ports first (lean_client stores QUIC port in TCP field),
-        // then fall back to QUIC ports (genesis tools may use quic field directly)
+        // Prefer the standard quic/quic6 ENR fields; fall back to tcp4/tcp6 for
+        // compatibility with peers running older lean_client builds that stored the
+        // QUIC port in the tcp field.
         let libp2p_port = enr
-            .tcp4()
-            .or_else(|| enr.tcp6())
-            .or_else(|| enr.quic4())
-            .or_else(|| enr.quic6())?;
+            .quic4()
+            .or_else(|| enr.quic6())
+            .or_else(|| enr.tcp4())
+            .or_else(|| enr.tcp6())?;
 
         let peer_id = enr_to_peer_id(enr)?;
 
@@ -196,17 +197,16 @@ fn build_enr(
 ) -> Result<Enr<CombinedKey>> {
     let mut builder = EnrBuilder::default();
 
-    // libp2p port is stored in tcp field, since Enr doesn't have a field for a quic port
     match ip {
         IpAddr::V4(ipv4) => {
             builder.ip4(ipv4);
             builder.udp4(udp_port);
-            builder.tcp4(libp2p_port);
+            builder.add_value(QUIC_ENR_KEY, &libp2p_port);
         }
         IpAddr::V6(ipv6) => {
             builder.ip6(ipv6);
             builder.udp6(udp_port);
-            builder.tcp6(libp2p_port);
+            builder.add_value(QUIC6_ENR_KEY, &libp2p_port);
         }
     }
 

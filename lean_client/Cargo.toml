@@ -246,8 +246,9 @@ features = { git = "https://github.com/grandinetech/grandine", rev = "64afdee3c6
 hex = "0.4.3"
 http_api_utils = { git = "https://github.com/grandinetech/grandine", rev = "64afdee3c6be79fceffb66933dcb69a943f3f1ae" }
 k256 = "0.13"
-lean-multisig = { git = "https://github.com/leanEthereum/leanMultisig", rev = "e4474138487eeb1ed7c2e1013674fe80ac9f3165" }
-leansig = { git = "https://github.com/leanEthereum/leanSig", rev = "73bedc26ed961b110df7ac2e234dc11361a4bf25" }
+rec_aggregation = { git = "https://github.com/leanEthereum/leanMultisig.git", rev = "fd8814045deb0ef8fcad4c9f4b1250ee33f7dd01" }
+leansig = { git = "https://github.com/leanEthereum/leanSig", branch = "devnet4" }
+leansig_wrapper = { git = "https://github.com/leanEthereum/leanMultisig.git", rev = "fd8814045deb0ef8fcad4c9f4b1250ee33f7dd01" }
 libp2p = { version = "0.56.0", default-features = false, features = [
     'dns',
     'gossipsub',
@@ -269,8 +270,9 @@ parking_lot = "0.12"
 paste = "1.0.15"
 pretty_assertions = "1.4"
 prometheus = "0.14"
-rand = "0.9"
-rand_chacha = "0.9"
+rand = "0.10"
+rand_chacha = "0.10"
+rayon = "1"
 rstest = "0.18"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

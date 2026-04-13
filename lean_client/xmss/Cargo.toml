@@ -11,8 +11,9 @@ derive_more = { workspace = true }
 eth_ssz = { workspace = true }
 ethereum-types = { workspace = true }
 hex = { workspace = true }
-lean-multisig = { workspace = true }
+rec_aggregation = { workspace = true }
 leansig = { workspace = true }
+leansig_wrapper = { workspace = true }
 metrics = { workspace = true }
 rand = { workspace = true }
 ssz = { workspace = true }

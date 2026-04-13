@@ -17,15 +17,14 @@ pub type AttestationSignatures = PersistentList<AggregatedSignatureProof, Valida
 
 /// Aggregated signature proof with participant tracking.
 ///
-/// This type combines the participant bitfield with the proof bytes,
-/// matches ream/zeam's `AggregatedSignatureProof` container structure.
+/// Combines the participant bitfield with the proof bytes.
 /// Used in `aggregated_payloads` to track which validators are covered by each proof.
 #[derive(Clone, Debug, Ssz, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AggregatedSignatureProof {
     /// Bitfield indicating which validators' signatures are included.
     pub participants: AggregationBits,
-    /// The raw aggregated proof bytes from lean-multisig.
+    /// The raw aggregated proof bytes (lz4+postcard serialized AggregatedXMSS).
     pub proof_data: AggregatedSignature,
 }
 
@@ -35,11 +34,48 @@ impl AggregatedSignatureProof {
         public_keys: impl IntoIterator<Item = PublicKey>,
         signatures: impl IntoIterator<Item = Signature>,
         message: H256,
-        epoch: u32,
+        slot: u32,
+        log_inv_rate: usize,
     ) -> Result<Self> {
         Ok(Self {
             participants,
-            proof_data: AggregatedSignature::aggregate(public_keys, signatures, message, epoch)?,
+            proof_data: AggregatedSignature::aggregate(
+                public_keys,
+                signatures,
+                message,
+                slot,
+                log_inv_rate,
+            )?,
+        })
+    }
+
+    /// Aggregate with optional recursive child proofs for proof compaction.
+    ///
+    /// `children` is a list of `(public_keys_covered, child_proof)` pairs where
+    /// each child proof previously aggregated the listed keys.
+    pub fn aggregate_with_children(
+        participants: AggregationBits,
+        children: &[(&[PublicKey], &AggregatedSignatureProof)],
+        public_keys: impl IntoIterator<Item = PublicKey>,
+        signatures: impl IntoIterator<Item = Signature>,
+        message: H256,
+        slot: u32,
+        log_inv_rate: usize,
+    ) -> Result<Self> {
+        let xmss_children: Vec<(&[PublicKey], &AggregatedSignature)> = children
+            .iter()
+            .map(|(pks, proof)| (*pks, &proof.proof_data))
+            .collect();
+        Ok(Self {
+            participants,
+            proof_data: AggregatedSignature::aggregate_with_children(
+                &xmss_children,
+                public_keys,
+                signatures,
+                message,
+                slot,
+                log_inv_rate,
+            )?,
         })
     }
 
@@ -52,9 +88,9 @@ impl AggregatedSignatureProof {
         &self,
         public_keys: impl IntoIterator<Item = PublicKey>,
         message: H256,
-        epoch: u32,
+        slot: u32,
     ) -> Result<()> {
-        self.proof_data.verify(public_keys, message, epoch)
+        self.proof_data.verify(public_keys, message, slot)
     }
 }
 
@@ -82,10 +118,6 @@ impl AggregationBits {
         );
 
         let mut bits = BitList::<U4096>::with_length((max_id + 1) as usize);
-
-        for i in 0..=max_id {
-            bits.set(i as usize, false);
-        }
 
         for &i in indices {
             bits.set(i as usize, true);
@@ -223,7 +255,6 @@ impl AggregatedAttestation {
 }
 
 /// Aggregated attestation bundled with aggregated signature proof.
-/// Structure matches ream/zeam for devnet-3 interoperability.
 #[derive(Clone, Debug, Ssz)]
 pub struct SignedAggregatedAttestation {
     /// The attestation data being attested to.

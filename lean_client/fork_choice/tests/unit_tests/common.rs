@@ -1,7 +1,4 @@
-use containers::{
-    Attestation, Block, BlockBody, BlockWithAttestation, Config, SignedBlockWithAttestation, Slot,
-    State, Validator,
-};
+use containers::{Block, BlockBody, Config, SignedBlock, Slot, State, Validator};
 use fork_choice::store::{Store, get_forkchoice_store};
 use ssz::{H256, SszHash};
 
@@ -20,13 +17,8 @@ pub fn create_test_store() -> Store {
         body: BlockBody::default(),
     };
 
-    let block_with_attestation = BlockWithAttestation {
-        block: block.clone(),
-        proposer_attestation: Attestation::default(),
-    };
-
-    let signed_block = SignedBlockWithAttestation {
-        message: block_with_attestation,
+    let signed_block = SignedBlock {
+        block,
         signature: Default::default(),
     };
 

@@ -8,7 +8,7 @@ pub mod genesis;
 pub mod runner;
 pub mod verify_signatures;
 
-use containers::{Block, SignedBlockWithAttestation, Slot, State};
+use containers::{Block, SignedBlock, Slot, State};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -97,7 +97,7 @@ pub struct VerifySignaturesTestVectorFile {
 pub struct VerifySignaturesTestCase {
     pub network: String,
     pub anchor_state: State,
-    pub signed_block_with_attestation: SignedBlockWithAttestation,
+    pub signed_block: SignedBlock,
     #[serde(default)]
     pub expect_exception: Option<String>,
     #[serde(rename = "_info")]

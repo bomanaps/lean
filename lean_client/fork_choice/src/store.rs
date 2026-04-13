@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Result, anyhow, ensure};
 use containers::{
     AggregatedSignatureProof, Attestation, AttestationData, Block, BlockHeader, Checkpoint, Config,
-    SignatureKey, SignedAggregatedAttestation, SignedAttestation, SignedBlockWithAttestation, Slot,
+    SignatureKey, SignedAggregatedAttestation, SignedAttestation, SignedBlock, Slot,
     State,
 };
 use metrics::{METRICS, set_gauge_u64};
@@ -25,6 +25,12 @@ pub struct Store {
     pub time: Interval,
 
     pub config: Config,
+
+    /// Whether this node performs aggregation duties.
+    /// Only aggregators import and store individual gossip attestation signatures.
+    /// Non-aggregators validate attestation data but drop signatures immediately.
+    /// Per leanSpec: subnet filtering is at the p2p layer; this flag is the store-layer gate.
+    pub is_aggregator: bool,
 
     pub head: H256,
 
@@ -61,15 +67,17 @@ pub struct Store {
 
     pub gossip_signatures: HashMap<SignatureKey, Signature>,
 
-    /// Devnet-3: Aggregated signature proofs from block bodies (on-chain).
+    /// Aggregated signature proofs from block bodies (on-chain).
     /// These are attestations that have been included in blocks and are part of
     /// the "known" pool for safe target computation.
-    pub latest_known_aggregated_payloads: HashMap<SignatureKey, Vec<AggregatedSignatureProof>>,
+    /// Keyed by attestation data root (H256).
+    pub latest_known_aggregated_payloads: HashMap<H256, Vec<AggregatedSignatureProof>>,
 
-    /// Devnet-3: Aggregated signature proofs from gossip aggregation topic.
+    /// Aggregated signature proofs from gossip aggregation topic.
     /// These are newly received aggregations that haven't been migrated to "known" yet.
     /// At interval 3, we merge this with latest_known_aggregated_payloads for safe target.
-    pub latest_new_aggregated_payloads: HashMap<SignatureKey, Vec<AggregatedSignatureProof>>,
+    /// Keyed by attestation data root (H256).
+    pub latest_new_aggregated_payloads: HashMap<H256, Vec<AggregatedSignatureProof>>,
 
     /// Attestation data indexed by hash (data_root).
     /// Used to look up the exact attestation data that was signed when
@@ -187,11 +195,12 @@ impl Store {
 /// Initialize forkchoice store from an anchor state and block
 pub fn get_forkchoice_store(
     anchor_state: State,
-    anchor_block: SignedBlockWithAttestation,
+    anchor_block: SignedBlock,
     config: Config,
+    is_aggregator: bool,
 ) -> Store {
     // Extract the plain Block from the signed block
-    let block = anchor_block.message.block.clone();
+    let block = anchor_block.block.clone();
     let block_slot = block.slot;
 
     // Compute block root differently for genesis vs checkpoint sync:
@@ -213,10 +222,10 @@ pub fn get_forkchoice_store(
         block_header.hash_tree_root()
     };
 
-    // Per leanSpec: substitute anchor_root for the checkpoint roots (the
-    // historical justified/finalized blocks are not in our store), but keep
-    // the actual slots from the downloaded state.  validate_attestation_data
-    // skips the block-slot match when the source root is a known checkpoint.
+    // Substitute anchor_root for the checkpoint roots (the historical
+    // justified/finalized blocks are not in our store), but keep the actual
+    // slots from the downloaded state.  validate_attestation_data skips
+    // the block-slot match when the source root is a known checkpoint.
     let latest_justified = Checkpoint {
         root: block_root,
         slot: anchor_state.latest_justified.slot,
@@ -233,11 +242,12 @@ pub fn get_forkchoice_store(
     Store {
         time: block_slot.0 * INTERVALS_PER_SLOT,
         config,
+        is_aggregator,
         head: block_root,
         safe_target: block_root,
         latest_justified,
         latest_finalized,
-        justified_ever_updated: false,
+        justified_ever_updated: block_slot.0 == 0,
         finalized_ever_updated: false,
         blocks: {
             let mut m = HashMap::new();
@@ -423,17 +433,17 @@ pub fn update_head(store: &mut Store) {
 
 /// Extract per-validator attestations from aggregated payloads.
 ///
-/// Per leanSpec: walks through all aggregated proofs and extracts the latest
-/// attestation data for each validator based on their participation bits.
+/// Walks through all aggregated proofs and extracts the latest attestation
+/// data for each validator based on their participation bits.
 fn extract_attestations_from_aggregated_payloads(
-    payloads: &HashMap<SignatureKey, Vec<AggregatedSignatureProof>>,
+    payloads: &HashMap<H256, Vec<AggregatedSignatureProof>>,
     attestation_data_by_root: &HashMap<H256, AttestationData>,
 ) -> HashMap<u64, AttestationData> {
     let mut attestations: HashMap<u64, AttestationData> = HashMap::new();
 
-    for (sig_key, proofs) in payloads {
-        // Look up the attestation data for this signature key's data_root
-        let Some(attestation_data) = attestation_data_by_root.get(&sig_key.data_root) else {
+    for (data_root, proofs) in payloads {
+        // Look up the attestation data for this data root
+        let Some(attestation_data) = attestation_data_by_root.get(data_root) else {
             continue;
         };
 
@@ -457,16 +467,14 @@ fn extract_attestations_from_aggregated_payloads(
     attestations
 }
 
-/// Devnet-3: Update safe target from aggregated attestations
+/// Update safe target from aggregated attestations.
 ///
-/// Per leanSpec: Safe target is computed by merging BOTH aggregated payload pools:
+/// Safe target is computed by merging both aggregated payload pools:
 /// - latest_known_aggregated_payloads: from block bodies (on-chain)
 /// - latest_new_aggregated_payloads: from gossip aggregation topic
 ///
-/// This merge is critical because at interval 3 (when this runs), the migration
-/// to "known" (interval 4) hasn't happened yet. Without merging:
-/// - Proposer's own attestation in block body (goes directly to known) would be invisible
-/// - Node's self-attestation (goes directly to known) would be invisible
+/// Both pools are merged because at interval 3 (when this runs), the migration
+/// to "known" (interval 4) hasn't happened yet.
 pub fn update_safe_target(store: &mut Store) {
     let n_validators = if let Some(state) = store.states.get(&store.head) {
         state.validators.len_usize()
@@ -479,14 +487,13 @@ pub fn update_safe_target(store: &mut Store) {
     let min_score = (n_validators * 2 + 2) / 3;
     let root = store.latest_justified.root;
 
-    // Per leanSpec: Merge both aggregated payload pools
-    // This ensures we see all attestations including proposer's own and self-attestations
-    let mut all_payloads: HashMap<SignatureKey, Vec<AggregatedSignatureProof>> =
+    // Merge both aggregated payload pools to see all attestations
+    let mut all_payloads: HashMap<H256, Vec<AggregatedSignatureProof>> =
         store.latest_known_aggregated_payloads.clone();
 
-    for (sig_key, proofs) in &store.latest_new_aggregated_payloads {
+    for (data_root, proofs) in &store.latest_new_aggregated_payloads {
         all_payloads
-            .entry(sig_key.clone())
+            .entry(*data_root)
             .or_default()
             .extend(proofs.clone());
     }
@@ -500,10 +507,6 @@ pub fn update_safe_target(store: &mut Store) {
     // Run LMD-GHOST with 2/3 threshold to find safe target
     let new_safe_target = get_fork_choice_head(store, root, &attestations, min_score);
     store.safe_target = new_safe_target;
-
-    // Clear the "new" pool after processing (will be repopulated by gossip)
-    // Note: We do NOT clear latest_known_aggregated_payloads as those persist
-    store.latest_new_aggregated_payloads.clear();
 
     set_gauge_u64(
         |metrics| &metrics.lean_safe_target_slot,
@@ -522,6 +525,15 @@ pub fn accept_new_attestations(store: &mut Store) {
     store
         .latest_known_attestations
         .extend(store.latest_new_attestations.drain());
+    // Promote gossip-received aggregated proofs to the known pool so they
+    // are available for block production at the next interval 0.
+    for (data_root, proofs) in store.latest_new_aggregated_payloads.drain() {
+        store
+            .latest_known_aggregated_payloads
+            .entry(data_root)
+            .or_default()
+            .extend(proofs);
+    }
     update_head(store);
     METRICS.get().map(|m| {
         m.grandine_fork_choice_known_attestations
@@ -534,7 +546,7 @@ pub fn accept_new_attestations(store: &mut Store) {
 pub fn tick_interval(store: &mut Store, has_proposal: bool) {
     store.time += 1;
     // Calculate current interval within slot: time % INTERVALS_PER_SLOT
-    // Devnet-3: 5 intervals per slot (800ms each)
+    // 5 intervals per slot (800ms each)
     let curr_interval = store.time % INTERVALS_PER_SLOT;
 
     match curr_interval {
@@ -565,13 +577,15 @@ pub struct BlockProductionInputs {
     pub available_attestations: Vec<Attestation>,
     pub known_block_roots: HashSet<H256>,
     pub gossip_signatures: HashMap<SignatureKey, Signature>,
-    pub aggregated_payloads: HashMap<SignatureKey, Vec<AggregatedSignatureProof>>,
+    pub aggregated_payloads: HashMap<H256, Vec<AggregatedSignatureProof>>,
+    pub log_inv_rate: usize,
 }
 
 pub fn prepare_block_production(
     store: &mut Store,
     slot: Slot,
     validator_index: u64,
+    log_inv_rate: usize,
 ) -> Result<BlockProductionInputs> {
     let head_root = get_proposal_head(store, slot);
     let head_state = store
@@ -590,7 +604,8 @@ pub fn prepare_block_production(
         expected_proposer
     );
 
-    let available_attestations: Vec<Attestation> = store
+    // Step 1: individual attestations already tracked per-validator.
+    let mut available_attestations: Vec<Attestation> = store
         .latest_known_attestations
         .iter()
         .map(|(validator_idx, attestation_data)| Attestation {
@@ -598,6 +613,33 @@ pub fn prepare_block_production(
             data: attestation_data.clone(),
         })
         .collect();
+
+    // Step 2: synthesize entries for validators that arrived *only* via
+    // on_aggregated_attestation.  Those validators have proofs in
+    // latest_known_aggregated_payloads but were never inserted into
+    // latest_known_attestations, so build_block's fixed-point loop would
+    // otherwise silently skip them.
+    {
+        let known_validators: HashSet<u64> =
+            store.latest_known_attestations.keys().copied().collect();
+        let mut seen_synthesized: HashSet<(u64, H256)> = HashSet::new();
+        for (data_root, proofs) in &store.latest_known_aggregated_payloads {
+            if let Some(att_data) = store.attestation_data_by_root.get(data_root) {
+                for proof in proofs {
+                    for vid in proof.participants.to_validator_indices() {
+                        if !known_validators.contains(&vid)
+                            && seen_synthesized.insert((vid, *data_root))
+                        {
+                            available_attestations.push(Attestation {
+                                validator_id: vid,
+                                data: att_data.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     let known_block_roots: HashSet<H256> = store.blocks.keys().copied().collect();
     let gossip_signatures = store.gossip_signatures.clone();
@@ -612,6 +654,7 @@ pub fn prepare_block_production(
         known_block_roots,
         gossip_signatures,
         aggregated_payloads,
+        log_inv_rate,
     })
 }
 
@@ -627,6 +670,7 @@ pub fn execute_block_production(
         known_block_roots,
         gossip_signatures,
         aggregated_payloads,
+        log_inv_rate,
     } = inputs;
 
     let (final_block, _final_post_state, _aggregated_attestations, signatures) = head_state
@@ -639,6 +683,7 @@ pub fn execute_block_production(
             Some(&known_block_roots),
             Some(&gossip_signatures),
             Some(&aggregated_payloads),
+            log_inv_rate,
         )?;
 
     let block_root = final_block.hash_tree_root();
@@ -650,7 +695,8 @@ pub fn produce_block_with_signatures(
     store: &mut Store,
     slot: Slot,
     validator_index: u64,
+    log_inv_rate: usize,
 ) -> Result<(H256, Block, Vec<AggregatedSignatureProof>)> {
-    let inputs = prepare_block_production(store, slot, validator_index)?;
+    let inputs = prepare_block_production(store, slot, validator_index, log_inv_rate)?;
     execute_block_production(inputs)
 }

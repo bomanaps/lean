@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use containers::{
-    AttestationData, SignatureKey, SignedAggregatedAttestation, SignedAttestation,
-    SignedBlockWithAttestation,
+    AttestationData, SignatureKey, SignedAggregatedAttestation, SignedAttestation, SignedBlock,
 };
 use metrics::METRICS;
 use ssz::{H256, SszHash};
@@ -14,7 +13,7 @@ use crate::store::{
 
 #[inline]
 pub fn on_tick(store: &mut Store, time_millis: u64, has_proposal: bool) {
-    // Calculate target time in intervals using milliseconds (devnet-3: 800ms intervals)
+    // Calculate target time in intervals using milliseconds (800ms intervals)
     // genesis_time is in seconds, convert to milliseconds for calculation
     let genesis_millis = store.config.genesis_time * 1000;
     let elapsed_millis = time_millis.saturating_sub(genesis_millis);
@@ -35,7 +34,7 @@ pub fn on_tick(store: &mut Store, time_millis: u64, has_proposal: bool) {
 /// 3. A vote cannot be for a future slot.
 /// 4. Checkpoint slots must match block slots.
 fn validate_attestation_data(store: &Store, data: &AttestationData) -> Result<()> {
-    // Topology: history is linear and monotonic — source <= target <= head (store.py:310-311).
+    // Topology: history is linear and monotonic — source <= target <= head.
     ensure!(
         data.source.slot <= data.target.slot,
         "Source checkpoint slot {} must not exceed target slot {}",
@@ -159,6 +158,13 @@ pub fn on_gossip_attestation(
         });
     })?;
 
+    // Non-aggregators validate attestation data but do not store or verify individual
+    // signatures. Per leanSpec: only aggregators import gossip attestations for aggregation.
+    // Subnet filtering is already enforced at the p2p subscription layer.
+    if !store.is_aggregator {
+        return Ok(());
+    }
+
     let data_root = attestation_data.hash_tree_root();
     let sig_key = SignatureKey::new(signed_attestation.validator_id, data_root);
 
@@ -185,7 +191,7 @@ pub fn on_gossip_attestation(
         let pubkey = key_state
             .validators
             .get(validator_id)
-            .map(|v| v.pubkey.clone())
+            .map(|v| v.attestation_pubkey.clone())
             .map_err(|e| anyhow!("{e}"))?;
 
         signed_attestation
@@ -240,7 +246,7 @@ pub fn on_gossip_attestation(
 /// Process an attestation and place it into the correct attestation stage
 ///
 /// Attestation processing logic that updates the attestation
-/// maps used for fork choice. Per devnet-2, we store AttestationData only (not signatures).
+/// maps used for fork choice. We store AttestationData only (not signatures).
 ///
 /// Attestations can come from:
 /// - a block body (on-chain, `is_from_block=True`), or
@@ -296,8 +302,10 @@ pub fn on_attestation(
         .attestation_data_by_root
         .insert(data_root, attestation_data.clone());
 
-    if !is_from_block {
-        // Store signature for later aggregation during block building
+    if !is_from_block && store.is_aggregator {
+        // Store signature for later aggregation during block building.
+        // Per leanSpec: only aggregators store gossip signatures, including own attestations.
+        // Non-aggregator validators produce and gossip attestations but do not store the sig.
         let sig_key = SignatureKey::new(signed_attestation.validator_id, data_root);
         store
             .gossip_signatures
@@ -328,13 +336,11 @@ pub fn on_attestation(
         })
 }
 
-/// Devnet-3: Process an aggregated attestation from the aggregation topic
+/// Process an aggregated attestation from the aggregation topic.
 ///
-/// Per leanSpec: Aggregated attestations are stored as proofs in
-/// `latest_new_aggregated_payloads`. At interval 3, these are merged with
+/// Verifies the aggregated XMSS proof against participant public keys and stores
+/// it in `latest_new_aggregated_payloads`. At interval 3, these are merged with
 /// `latest_known_aggregated_payloads` (from blocks) to compute safe target.
-///
-/// Verifies the aggregated XMSS proof against participant public keys before storing.
 #[inline]
 pub fn on_aggregated_attestation(
     store: &mut Store,
@@ -393,7 +399,7 @@ pub fn on_aggregated_attestation(
             key_state
                 .validators
                 .get(id)
-                .map(|v| v.pubkey.clone())
+                .map(|v| v.attestation_pubkey.clone())
                 .map_err(Into::into)
         })
         .collect::<Result<Vec<_>>>()?;
@@ -402,19 +408,12 @@ pub fn on_aggregated_attestation(
         .verify(public_keys, data_root, attestation_data.slot.0 as u32)
         .context("aggregated attestation proof verification failed")?;
 
-    // Per leanSpec: Store the verified proof in latest_new_aggregated_payloads
-    // Each participating validator gets an entry via their SignatureKey
-    for (bit_idx, bit) in proof.participants.0.iter().enumerate() {
-        if *bit {
-            let validator_id = bit_idx as u64;
-            let sig_key = SignatureKey::new(validator_id, data_root);
-            store
-                .latest_new_aggregated_payloads
-                .entry(sig_key)
-                .or_default()
-                .push(proof.clone());
-        }
-    }
+    // Store the verified proof in latest_new_aggregated_payloads, keyed by data_root
+    store
+        .latest_new_aggregated_payloads
+        .entry(data_root)
+        .or_default()
+        .push(proof);
 
     METRICS.get().map(|metrics| {
         metrics
@@ -488,15 +487,15 @@ fn on_attestation_internal(
 pub fn on_block(
     store: &mut Store,
     cache: &mut BlockCache,
-    signed_block: SignedBlockWithAttestation,
+    signed_block: SignedBlock,
 ) -> Result<()> {
-    let block_root = signed_block.message.block.hash_tree_root();
+    let block_root = signed_block.block.hash_tree_root();
 
     if store.blocks.contains_key(&block_root) {
         return Ok(());
     }
 
-    let parent_root = signed_block.message.block.parent_root;
+    let parent_root = signed_block.block.parent_root;
 
     if !store.states.contains_key(&parent_root) && !parent_root.is_zero() {
         bail!(
@@ -513,7 +512,7 @@ pub fn on_block(
 
 fn process_block_internal(
     store: &mut Store,
-    signed_block: SignedBlockWithAttestation,
+    signed_block: SignedBlock,
     block_root: H256,
 ) -> Result<()> {
     let _timer = METRICS.get().map(|metrics| {
@@ -522,7 +521,7 @@ fn process_block_internal(
             .start_timer()
     });
 
-    let block = signed_block.message.block.clone();
+    let block = signed_block.block.clone();
     let attestations_count = block.body.attestations.len_u64();
 
     // Get parent state for validation
@@ -569,7 +568,7 @@ fn process_block_internal(
         .remove(&block_root)
         .unwrap_or_default();
     for signed_att in pending {
-        if let Err(err) = on_attestation(store, signed_att, false) {
+        if let Err(err) = on_gossip_attestation(store, signed_att) {
             warn!(%err, "Pending attestation retry failed after block arrival");
         }
     }
@@ -627,23 +626,22 @@ fn process_block_internal(
         store.states.retain(|_, state| state.slot.0 >= keep_from);
         store.blocks.retain(|_, block| block.slot.0 >= keep_from);
 
-        // Prune stale attestation data — mirrors leanSpec store.prune_stale_attestation_data()
-        // (store.py:230-278), called at store.py:565-566 whenever finalization advances.
+        // Prune stale attestation data whenever finalization advances.
         // Criterion: target.slot <= finalized_slot → stale, no longer affects fork choice.
         // attestation_data_by_root is the secondary index used for target.slot lookup and
-        // must be pruned last so the three retain calls above can still resolve target.slot.
+        // must be pruned last so the retain calls above can still resolve target.slot.
         let finalized_slot = store.latest_finalized.slot.0;
         let adr = &store.attestation_data_by_root;
         store.gossip_signatures.retain(|key, _| {
             adr.get(&key.data_root)
                 .map_or(true, |data| data.target.slot.0 > finalized_slot)
         });
-        store.latest_known_aggregated_payloads.retain(|key, _| {
-            adr.get(&key.data_root)
+        store.latest_known_aggregated_payloads.retain(|data_root, _| {
+            adr.get(data_root)
                 .map_or(true, |data| data.target.slot.0 > finalized_slot)
         });
-        store.latest_new_aggregated_payloads.retain(|key, _| {
-            adr.get(&key.data_root)
+        store.latest_new_aggregated_payloads.retain(|data_root, _| {
+            adr.get(data_root)
                 .map_or(true, |data| data.target.slot.0 > finalized_slot)
         });
         store
@@ -669,10 +667,8 @@ fn process_block_internal(
     // Process block body attestations as on-chain (is_from_block=true)
     let signatures = &signed_block.signature;
     let aggregated_attestations = &block.body.attestations;
-    let proposer_attestation = &signed_block.message.proposer_attestation;
 
-    // Store aggregated proofs for future block building
-    // Each attestation_signature proof is indexed by (validator_id, data_root) for each participating validator
+    // Store aggregated proofs indexed by (validator_id, data_root) for future block building
     for (att_idx, aggregated_attestation) in aggregated_attestations.into_iter().enumerate() {
         let data_root = aggregated_attestation.data.hash_tree_root();
 
@@ -682,20 +678,13 @@ fn process_block_internal(
             .attestation_data_by_root
             .insert(data_root, aggregated_attestation.data.clone());
 
-        // Get the corresponding proof from attestation_signatures
+        // Get the corresponding proof from attestation_signatures and store it keyed by data_root
         if let Ok(proof_data) = signatures.attestation_signatures.get(att_idx as u64) {
-            // Store proof for each validator in the aggregation
-            for (bit_idx, bit) in aggregated_attestation.aggregation_bits.0.iter().enumerate() {
-                if *bit {
-                    let validator_id = bit_idx as u64;
-                    let sig_key = SignatureKey::new(validator_id, data_root);
-                    store
-                        .latest_known_aggregated_payloads
-                        .entry(sig_key)
-                        .or_default()
-                        .push(proof_data.clone());
-                }
-            }
+            store
+                .latest_known_aggregated_payloads
+                .entry(data_root)
+                .or_default()
+                .push(proof_data.clone());
         }
     }
 
@@ -734,43 +723,14 @@ fn process_block_internal(
         }
     }
 
-    // Update head BEFORE processing proposer attestation
     update_head(store);
-
-    // Store proposer's signature for later block building
-    let proposer_data_root = proposer_attestation.data.hash_tree_root();
-    let proposer_sig_key = SignatureKey::new(proposer_attestation.validator_id, proposer_data_root);
-    store
-        .gossip_signatures
-        .insert(proposer_sig_key, signed_block.signature.proposer_signature);
-    METRICS.get().map(|metrics| {
-        metrics
-            .lean_gossip_signatures
-            .set(store.gossip_signatures.len() as i64)
-    });
-    store
-        .attestation_data_by_root
-        .insert(proposer_data_root, proposer_attestation.data.clone());
-    METRICS.get().map(|m| {
-        m.grandine_attestation_data_by_root
-            .set(store.attestation_data_by_root.len() as i64)
-    });
-
-    // Process proposer attestation as if received via gossip (is_from_block=false)
-    // This ensures it goes to "new" attestations and doesn't immediately affect fork choice
-    on_attestation_internal(
-        store,
-        proposer_attestation.validator_id,
-        proposer_attestation.data.clone(),
-        false, // is_from_block
-    )?;
 
     Ok(())
 }
 
 pub fn process_pending_blocks(store: &mut Store, cache: &mut BlockCache, mut roots: Vec<H256>) {
     while let Some(parent_root) = roots.pop() {
-        let children: Vec<(H256, SignedBlockWithAttestation)> = cache
+        let children: Vec<(H256, SignedBlock)> = cache
             .get_children(&parent_root)
             .into_iter()
             .map(|p| (p.root, p.block.clone()))

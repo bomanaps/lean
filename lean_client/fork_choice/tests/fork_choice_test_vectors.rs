@@ -1,8 +1,7 @@
 use containers::{
     AggregatedAttestation, AggregationBits, Attestation, AttestationData, Block, BlockBody,
-    BlockHeader, BlockSignatures, BlockWithAttestation, Checkpoint, Config, HistoricalBlockHashes,
-    JustificationRoots, JustificationValidators, JustifiedSlots, SignedBlockWithAttestation, Slot,
-    State, Validator, Validators,
+    BlockHeader, BlockSignatures, Checkpoint, Config, HistoricalBlockHashes, JustificationRoots,
+    JustificationValidators, JustifiedSlots, SignedBlock, Slot, State, Validator, Validators,
 };
 use fork_choice::{
     block_cache::BlockCache,
@@ -86,12 +85,18 @@ impl Into<State> for TestAnchorState {
 
         let mut validators = Validators::default();
         for test_validator in &self.validators.data {
-            let pubkey: PublicKey = test_validator
-                .pubkey
+            let attestation_pubkey: PublicKey = test_validator
+                .attestation_pubkey
                 .parse()
-                .expect("Failed to parse validator pubkey");
+                .expect("Failed to parse validator attestation_pubkey");
+            let proposal_pubkey: PublicKey = test_validator
+                .proposal_pubkey
+                .as_deref()
+                .map(|s| s.parse().expect("Failed to parse validator proposal_pubkey"))
+                .unwrap_or_default();
             let validator = Validator {
-                pubkey,
+                attestation_pubkey,
+                proposal_pubkey,
                 index: test_validator.index,
             };
             validators.push(validator).expect("Failed to add validator");
@@ -171,7 +176,11 @@ struct TestDataWrapper<T> {
 #[derive(Debug, Deserialize)]
 struct TestValidator {
     #[allow(dead_code)]
-    pubkey: String,
+    #[serde(alias = "pubkey")]
+    attestation_pubkey: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    proposal_pubkey: Option<String>,
     #[allow(dead_code)]
     #[serde(default)]
     index: u64,
@@ -187,8 +196,8 @@ struct TestAnchorBlock {
     body: TestBlockBody,
 }
 
-impl Into<SignedBlockWithAttestation> for TestAnchorBlock {
-    fn into(self) -> SignedBlockWithAttestation {
+impl Into<SignedBlock> for TestAnchorBlock {
+    fn into(self) -> SignedBlock {
         let mut attestations = ssz::PersistentList::default();
 
         for (i, attestation) in self.body.attestations.data.into_iter().enumerate() {
@@ -205,31 +214,8 @@ impl Into<SignedBlockWithAttestation> for TestAnchorBlock {
             body: BlockBody { attestations },
         };
 
-        // Create proposer attestation
-        let proposer_attestation = Attestation {
-            validator_id: self.proposer_index,
-            data: AttestationData {
-                slot: Slot(self.slot),
-                head: Checkpoint {
-                    root: parse_root(&self.parent_root),
-                    slot: Slot(self.slot),
-                },
-                target: Checkpoint {
-                    root: parse_root(&self.parent_root),
-                    slot: Slot(self.slot),
-                },
-                source: Checkpoint {
-                    root: parse_root(&self.parent_root),
-                    slot: Slot(0),
-                },
-            },
-        };
-
-        SignedBlockWithAttestation {
-            message: BlockWithAttestation {
-                block,
-                proposer_attestation,
-            },
+        SignedBlock {
+            block,
             signature: BlockSignatures::default(),
         }
     }
@@ -261,17 +247,16 @@ impl Into<Block> for TestBlock {
 #[serde(rename_all = "camelCase")]
 struct TestBlockWithAttestation {
     block: TestBlock,
-    proposer_attestation: TestAttestation,
+    /// Ignored in devnet4 — proposer attestation removed from block format.
+    #[serde(default)]
+    proposer_attestation: Option<TestAttestation>,
     #[serde(default)]
     block_root_label: Option<String>,
 }
 
-impl Into<BlockWithAttestation> for TestBlockWithAttestation {
-    fn into(self) -> BlockWithAttestation {
-        BlockWithAttestation {
-            block: self.block.into(),
-            proposer_attestation: self.proposer_attestation.into(),
-        }
+impl Into<Block> for TestBlockWithAttestation {
+    fn into(self) -> Block {
+        self.block.into()
     }
 }
 
@@ -537,14 +522,14 @@ fn forkchoice(spec_file: &str) {
         };
 
         let mut anchor_state: State = case.anchor_state.into();
-        let anchor_block: SignedBlockWithAttestation = case.anchor_block.into();
+        let anchor_block: SignedBlock = case.anchor_block.into();
 
-        let body_root = anchor_block.message.block.body.hash_tree_root();
+        let body_root = anchor_block.block.body.hash_tree_root();
         anchor_state.latest_block_header = BlockHeader {
-            slot: anchor_block.message.block.slot,
-            proposer_index: anchor_block.message.block.proposer_index,
-            parent_root: anchor_block.message.block.parent_root,
-            state_root: anchor_block.message.block.state_root,
+            slot: anchor_block.block.slot,
+            proposer_index: anchor_block.block.proposer_index,
+            parent_root: anchor_block.block.parent_root,
+            state_root: anchor_block.block.state_root,
             body_root,
         };
 
@@ -562,17 +547,17 @@ fn forkchoice(spec_file: &str) {
                     let block_root_label = test_block.block_root_label.clone();
 
                     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                        let block: BlockWithAttestation = test_block.into();
-                        let signed_block: SignedBlockWithAttestation = SignedBlockWithAttestation {
-                            message: block,
+                        let block: Block = test_block.into();
+                        let signed_block = SignedBlock {
+                            block,
                             signature: BlockSignatures::default(),
                         };
-                        let block_root = signed_block.message.block.hash_tree_root();
+                        let block_root = signed_block.block.hash_tree_root();
 
                         // Advance time to the block's slot to ensure attestations are processable
                         // SECONDS_PER_SLOT is 4. Convert to milliseconds for devnet-3
                         let block_time_millis = (store.config.genesis_time
-                            + (signed_block.message.block.slot.0 * 4))
+                            + (signed_block.block.slot.0 * 4))
                             * 1000;
                         on_tick(&mut store, block_time_millis, false);
 
