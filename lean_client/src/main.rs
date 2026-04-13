@@ -2,14 +2,15 @@ use anyhow::{Context as _, Result};
 use clap::Parser;
 use containers::{
     Block, BlockBody, BlockHeader, BlockSignatures, Checkpoint, Config, SignedBlock, Slot, State,
-    Status,
-    Validator,
+    Status, Validator,
 };
 use ethereum_types::H256;
 use features::Feature;
 use fork_choice::{
     block_cache::BlockCache,
-    handlers::{on_aggregated_attestation, on_attestation, on_block, on_gossip_attestation, on_tick},
+    handlers::{
+        on_aggregated_attestation, on_attestation, on_block, on_gossip_attestation, on_tick,
+    },
     store::{
         INTERVALS_PER_SLOT, MILLIS_PER_INTERVAL, Store, execute_block_production,
         get_forkchoice_store, prepare_block_production,
@@ -799,9 +800,7 @@ async fn main() -> Result<()> {
     //   Abort with a clear error if no valid block arrives within the timeout.
     const ANCHOR_BLOCK_TIMEOUT_SECS: u64 = 300;
 
-    let anchor_block: SignedBlock = if let Some(expected_root) =
-        checkpoint_block_root
-    {
+    let anchor_block: SignedBlock = if let Some(expected_root) = checkpoint_block_root {
         info!(
             block_root = %format!("0x{:x}", expected_root),
             timeout_secs = ANCHOR_BLOCK_TIMEOUT_SECS,
@@ -1493,7 +1492,10 @@ async fn main() -> Result<()> {
                                         continue;
                                     }
                                     let validator_id = signed_att.validator_id;
-                                    let subnet_id = compute_subnet_id(validator_id, attestation_committee_count);
+                                    let subnet_id = compute_subnet_id(
+                                        validator_id,
+                                        attestation_committee_count,
+                                    );
                                     info!(
                                         slot = current_slot,
                                         validator = validator_id,
