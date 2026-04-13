@@ -6,20 +6,18 @@ use core::{
 
 use anyhow::{Error, anyhow, Result};
 use eth_ssz::DecodeError;
-use leansig::{serialization::Serializable, signature::SignatureScheme};
-use leansig::signature::generalized_xmss::instantiations_poseidon_top_level::lifetime_2_to_the_32::hashing_optimized::SIGTopLevelTargetSumLifetime32Dim64Base8;
+use leansig_wrapper::{XmssSignature, xmss_signature_from_ssz, xmss_signature_to_ssz, xmss_verify};
 use metrics::METRICS;
 use serde::de;
 use serde::{Deserialize, Serialize};
 use ssz::{ByteVector, H256, Ssz};
 use crate::public_key::PublicKey;
-use typenum::{Diff, U984, U4096};
+use typenum::{Sum, U2048, U256, U128, U64, U32, U8};
 
-type U3112 = Diff<U4096, U984>;
+// 2536 = 2048 + 256 + 128 + 64 + 32 + 8
+type SignatureSize = Sum<Sum<Sum<Sum<Sum<U2048, U256>, U128>, U64>, U32>, U8>;
 
-type SignatureSize = U3112;
-
-type LeanSigSignature = <SIGTopLevelTargetSumLifetime32Dim64Base8 as SignatureScheme>::Signature;
+type LeanSigSignature = XmssSignature;
 
 // todo(xmss): default implementation doesn't make sense here, and is needed only for tests
 #[derive(Clone, Default, Ssz)]
@@ -28,49 +26,46 @@ pub struct Signature(ByteVector<SignatureSize>);
 
 impl Signature {
     pub fn new(inner: &[u8]) -> Result<Self, DecodeError> {
-        LeanSigSignature::from_bytes(inner)?;
+        xmss_signature_from_ssz(inner)
+            .map_err(|_| DecodeError::BytesInvalid("invalid xmss signature".to_string()))?;
 
         Ok(Self(inner.try_into().expect(
-            "slice of length != 3112 shouldn't deserialize as valid leansig signature",
+            "slice of length != 2536 shouldn't deserialize as valid leansig signature",
         )))
     }
 
     pub fn verify(&self, public_key: &PublicKey, epoch: u32, message: H256) -> Result<()> {
-        let is_valid = <SIGTopLevelTargetSumLifetime32Dim64Base8 as SignatureScheme>::verify(
-            &public_key.as_lean(),
-            epoch,
-            message.as_fixed_bytes(),
-            &self.as_lean(),
-        );
-
-        if is_valid {
-            METRICS.get().map(|metrics| {
-                metrics.lean_pq_sig_attestation_signatures_valid_total.inc();
-            });
-            Ok(())
-        } else {
-            METRICS.get().map(|metrics| {
-                metrics
-                    .lean_pq_sig_attestation_signatures_invalid_total
-                    .inc();
-            });
-            Err(anyhow!("invalid signature"))
+        match xmss_verify(&public_key.as_lean(), epoch, message.as_fixed_bytes(), &self.as_lean()) {
+            Ok(()) => {
+                METRICS.get().map(|metrics| {
+                    metrics.lean_pq_sig_attestation_signatures_valid_total.inc();
+                });
+                Ok(())
+            }
+            Err(()) => {
+                METRICS.get().map(|metrics| {
+                    metrics
+                        .lean_pq_sig_attestation_signatures_invalid_total
+                        .inc();
+                });
+                Err(anyhow!("invalid signature"))
+            }
         }
     }
 
     pub(crate) fn from_lean(signature: LeanSigSignature) -> Self {
-        let bytes = signature.to_bytes();
+        let bytes = xmss_signature_to_ssz(&signature);
 
         Self(
             bytes
                 .as_slice()
                 .try_into()
-                .expect("slice of length != 3112 shouldn't deserialize as valid leansig signature"),
+                .expect("slice of length != 2536 shouldn't deserialize as valid leansig signature"),
         )
     }
 
     pub(crate) fn as_lean(&self) -> LeanSigSignature {
-        LeanSigSignature::from_bytes(self.0.as_bytes())
+        xmss_signature_from_ssz(self.0.as_bytes())
             .expect("signature internal representation must be valid leansig signature")
     }
 }
@@ -127,7 +122,7 @@ impl<'de> Deserialize<'de> for Signature {
         }
 
         #[derive(Deserialize)]
-        struct XmssSignature {
+        struct XmssSignatureJson {
             path: XmssPath,
             rho: DataWrapper<Vec<u32>>,
             hashes: DataWrapper<Vec<DataWrapper<Vec<u32>>>>,
@@ -138,7 +133,7 @@ impl<'de> Deserialize<'de> for Signature {
             siblings: DataWrapper<Vec<DataWrapper<Vec<u32>>>>,
         }
 
-        let xmss_sig = XmssSignature::deserialize(deserializer)?;
+        let xmss_sig = XmssSignatureJson::deserialize(deserializer)?;
         let mut rho_bytes = Vec::new();
         for val in &xmss_sig.rho.data {
             rho_bytes.extend_from_slice(&val.to_le_bytes());
@@ -197,8 +192,6 @@ impl<'de> Deserialize<'de> for Signature {
         // 5. Write Hashes Data (Variable)
         ssz_bytes.extend_from_slice(&hashes_bytes);
 
-        println!("Total SSZ Bytes Length: {}", ssz_bytes.len());
-
         Signature::try_from(ssz_bytes.as_slice())
             .map_err(|err| de::Error::custom(format!("invalid signature: {err:?}")))
     }
@@ -211,6 +204,6 @@ mod test {
 
     #[test]
     fn valid_signature_size() {
-        assert_eq!(SignatureSize::U64, 3112);
+        assert_eq!(SignatureSize::U64, 2536);
     }
 }

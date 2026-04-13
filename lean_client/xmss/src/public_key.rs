@@ -5,15 +5,15 @@ use core::{
 };
 
 use anyhow::{Error, anyhow};
-use leansig::{serialization::Serializable, signature::SignatureScheme, signature::generalized_xmss::instantiations_poseidon_top_level::lifetime_2_to_the_32::hashing_optimized::SIGTopLevelTargetSumLifetime32Dim64Base8};
+use eth_ssz::DecodeError;
+use leansig_wrapper::{XmssPublicKey, xmss_public_key_from_ssz, xmss_public_key_to_ssz};
 use serde::{Deserialize, Serialize, de::{self, Visitor}};
 use ssz::{BytesToDepth, MerkleTree, SszHash, SszRead, SszSize, SszWrite};
-use eth_ssz::DecodeError;
 use typenum::{U52, U1, Unsigned};
 
 type PublicKeySize = U52;
 
-type LeanSigPublicKey = <SIGTopLevelTargetSumLifetime32Dim64Base8 as SignatureScheme>::PublicKey;
+type LeanSigPublicKey = XmssPublicKey;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct PublicKey([u8; PublicKeySize::USIZE]);
@@ -58,7 +58,8 @@ impl SszHash for PublicKey {
 
 impl PublicKey {
     pub fn new(bytes: &[u8]) -> Result<Self, DecodeError> {
-        LeanSigPublicKey::from_bytes(bytes)?;
+        xmss_public_key_from_ssz(bytes)
+            .map_err(|_| DecodeError::BytesInvalid("invalid xmss public key".to_string()))?;
 
         Ok(Self(bytes.try_into().expect(
             "slice of length != 52 shouldn't deserialize as valid leansig public key",
@@ -66,8 +67,9 @@ impl PublicKey {
     }
 
     pub(crate) fn from_lean(key: LeanSigPublicKey) -> Self {
+        let bytes = xmss_public_key_to_ssz(&key);
         Self(
-            key.to_bytes()
+            bytes
                 .as_slice()
                 .try_into()
                 .expect("slice of length != 52 shouldn't deserialize as valid leansig public key"),
@@ -75,7 +77,7 @@ impl PublicKey {
     }
 
     pub(crate) fn as_lean(&self) -> LeanSigPublicKey {
-        LeanSigPublicKey::from_bytes(&self.0).expect("PublicKey was instantiated incorrectly")
+        xmss_public_key_from_ssz(&self.0).expect("PublicKey was instantiated incorrectly")
     }
 }
 

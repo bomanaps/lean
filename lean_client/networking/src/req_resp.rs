@@ -2,7 +2,7 @@ use std::io;
 use std::io::{Read, Write};
 
 use async_trait::async_trait;
-use containers::{SignedBlockWithAttestation, Status};
+use containers::{SignedBlock, Status};
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use libp2p::request_response::{
     Behaviour as RequestResponse, Codec, Config, Event, ProtocolSupport,
@@ -50,7 +50,7 @@ pub enum LeanRequest {
 #[derive(Debug, Clone)]
 pub enum LeanResponse {
     Status(Status),
-    BlocksByRoot(Vec<SignedBlockWithAttestation>),
+    BlocksByRoot(Vec<SignedBlock>),
     Empty,
 }
 
@@ -395,7 +395,7 @@ impl LeanCodec {
                 }
 
                 let block =
-                    SignedBlockWithAttestation::from_ssz_default(&ssz_bytes).map_err(|e| {
+                    SignedBlock::from_ssz_default(&ssz_bytes).map_err(|e| {
                         io::Error::new(
                             io::ErrorKind::Other,
                             format!("SSZ decode Block failed: {e:?}"),

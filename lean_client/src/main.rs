@@ -1,15 +1,15 @@
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use containers::{
-    Attestation, AttestationData, Block, BlockBody, BlockHeader, BlockSignatures,
-    BlockWithAttestation, Checkpoint, Config, SignedBlockWithAttestation, Slot, State, Status,
+    Block, BlockBody, BlockHeader, BlockSignatures, Checkpoint, Config, SignedBlock, Slot, State,
+    Status,
     Validator,
 };
 use ethereum_types::H256;
 use features::Feature;
 use fork_choice::{
     block_cache::BlockCache,
-    handlers::{on_aggregated_attestation, on_attestation, on_block, on_tick},
+    handlers::{on_aggregated_attestation, on_attestation, on_block, on_gossip_attestation, on_tick},
     store::{
         INTERVALS_PER_SLOT, MILLIS_PER_INTERVAL, Store, execute_block_production,
         get_forkchoice_store, prepare_block_production,
@@ -145,15 +145,12 @@ fn verify_checkpoint_state(state: &State, genesis_state: &State) -> Result<()> {
 
     // Verify each validator pubkey matches genesis
     for i in 0..state_validator_count {
-        let state_pubkey = &state.validators.get(i).expect("validator exists").pubkey;
-        let genesis_pubkey = &genesis_state
-            .validators
-            .get(i)
-            .expect("validator exists")
-            .pubkey;
+        let sv = state.validators.get(i).expect("validator exists");
+        let gv = genesis_state.validators.get(i).expect("validator exists");
 
         anyhow::ensure!(
-            state_pubkey == genesis_pubkey,
+            sv.attestation_pubkey == gv.attestation_pubkey
+                && sv.proposal_pubkey == gv.proposal_pubkey,
             "Validator pubkey mismatch at index {i}: checkpoint has different validator set. Wrong network?"
         );
     }
@@ -373,6 +370,11 @@ struct Args {
     #[arg(long = "is-aggregator", default_value_t = false)]
     is_aggregator: bool,
 
+    /// Comma-separated attestation subnet IDs to additionally subscribe and aggregate from
+    /// (e.g. "0,1,2"). Requires --is-aggregator. Additive to validator-derived subnets.
+    #[arg(long = "aggregate-subnet-ids", value_delimiter = ',')]
+    aggregate_subnet_ids: Vec<u64>,
+
     /// Override attestation committee count (devnet-3)
     /// When set, uses this value instead of the hardcoded default
     #[arg(long = "attestation-committee-count")]
@@ -418,13 +420,11 @@ async fn main() -> Result<()> {
         .transpose()
         .context("failed to set metrics on start")?;
 
-    // Record aggregator and network metrics on startup
+    // Record aggregator metric on startup (committee count set after genesis is loaded).
     METRICS.get().map(|metrics| {
         metrics
             .lean_is_aggregator
             .set(if args.is_aggregator { 1 } else { 0 });
-        // ATTESTATION_SUBNET_COUNT is 1 in current implementation
-        metrics.lean_attestation_committee_count.set(1);
     });
 
     let (outbound_p2p_sender, outbound_p2p_receiver) =
@@ -437,34 +437,60 @@ async fn main() -> Result<()> {
     let (validator_chain_sender, mut validator_chain_receiver) =
         mpsc::unbounded_channel::<ValidatorChainMessage>();
 
-    let (genesis_time, validators) = if let Some(genesis_path) = &args.genesis {
-        let genesis_config = containers::GenesisConfig::load_from_file(genesis_path)
-            .expect("Failed to load genesis config");
+    let (genesis_time, validators, genesis_log_inv_rate, genesis_attestation_committee_count) =
+        if let Some(genesis_path) = &args.genesis {
+            let genesis_config = containers::GenesisConfig::load_from_file(genesis_path)
+                .expect("Failed to load genesis config");
 
-        let validators: Vec<Validator> = genesis_config
-            .genesis_validators
-            .iter()
-            .enumerate()
-            .map(|(i, v_str)| {
-                let pubkey: PublicKey = v_str.parse().expect("Invalid genesis validator pubkey");
-                Validator {
-                    pubkey,
+            let validators: Vec<Validator> = genesis_config
+                .genesis_validators
+                .iter()
+                .enumerate()
+                .map(|(i, entry)| {
+                    let attestation_pubkey: PublicKey = entry
+                        .attestation_pubkey
+                        .parse()
+                        .expect("Invalid genesis validator attestation_pubkey");
+                    let proposal_pubkey: PublicKey = entry
+                        .proposal_pubkey
+                        .parse()
+                        .expect("Invalid genesis validator proposal_pubkey");
+                    Validator {
+                        attestation_pubkey,
+                        proposal_pubkey,
+                        index: i as u64,
+                    }
+                })
+                .collect();
+
+            (
+                genesis_config.genesis_time,
+                validators,
+                genesis_config.log_inv_rate,
+                genesis_config.attestation_committee_count,
+            )
+        } else {
+            let num_validators = 3;
+            let validators = (0..num_validators)
+                .map(|i| Validator {
+                    attestation_pubkey: PublicKey::default(),
+                    proposal_pubkey: PublicKey::default(),
                     index: i as u64,
-                }
-            })
-            .collect();
+                })
+                .collect();
+            (1763757427, validators, 2u8, 1u64)
+        };
 
-        (genesis_config.genesis_time, validators)
-    } else {
-        let num_validators = 3;
-        let validators = (0..num_validators)
-            .map(|i| Validator {
-                pubkey: PublicKey::default(),
-                index: i as u64,
-            })
-            .collect();
-        (1763757427, validators)
-    };
+    // CLI --attestation-committee-count overrides genesis config; both fall back to 1.
+    let attestation_committee_count = args
+        .attestation_committee_count
+        .unwrap_or(genesis_attestation_committee_count)
+        .max(1);
+    METRICS.get().map(|metrics| {
+        metrics
+            .lean_attestation_committee_count
+            .set(attestation_committee_count as i64);
+    });
 
     let genesis_state = State::generate_genesis_with_validators(genesis_time, validators);
 
@@ -478,29 +504,8 @@ async fn main() -> Result<()> {
         },
     };
 
-    let genesis_proposer_attestation = Attestation {
-        validator_id: 0,
-        data: AttestationData {
-            slot: Slot(0),
-            head: Checkpoint {
-                root: H256::zero(),
-                slot: Slot(0),
-            },
-            target: Checkpoint {
-                root: H256::zero(),
-                slot: Slot(0),
-            },
-            source: Checkpoint {
-                root: H256::zero(),
-                slot: Slot(0),
-            },
-        },
-    };
-    let genesis_signed_block = SignedBlockWithAttestation {
-        message: BlockWithAttestation {
-            block: genesis_block,
-            proposer_attestation: genesis_proposer_attestation,
-        },
+    let genesis_signed_block = SignedBlock {
+        block: genesis_block,
         signature: BlockSignatures {
             attestation_signatures: PersistentList::default(),
             proposer_signature: Signature::default(),
@@ -653,14 +658,22 @@ async fn main() -> Result<()> {
     // Validator task needs to send ProcessBlock / ProcessAttestation back to the chain task
     let chain_msg_sender_for_validator = chain_message_sender.clone();
 
-    // Extract first validator ID for subnet subscription and metrics
-    let first_validator_id: Option<u64> = validator_service
-        .as_ref()
-        .and_then(|service| service.config.validator_indices.first().copied());
+    // Validate: --aggregate-subnet-ids requires --is-aggregator
+    if !args.aggregate_subnet_ids.is_empty() && !args.is_aggregator {
+        eprintln!("error: --aggregate-subnet-ids requires --is-aggregator to be set");
+        std::process::exit(1);
+    }
 
-    // Record validator subnet metric if validator is configured
-    if let Some(validator_id) = first_validator_id {
-        let subnet_id = compute_subnet_id(validator_id);
+    // Collect all registered validator indices for subnet subscription.
+    // Per leanSpec PR #482: every validator's derived subnet is subscribed, not just the first.
+    let validator_ids: Vec<u64> = validator_service
+        .as_ref()
+        .map(|service| service.config.validator_indices.clone())
+        .unwrap_or_default();
+
+    // Record subnet metric for the first validator if available.
+    if let Some(&first_vid) = validator_ids.first() {
+        let subnet_id = compute_subnet_id(first_vid, attestation_committee_count);
         METRICS.get().map(|metrics| {
             metrics
                 .lean_attestation_committee_subnet
@@ -669,11 +682,18 @@ async fn main() -> Result<()> {
     }
 
     let fork = "devnet0".to_string();
-    // Subscribe to topics based on validator role:
-    // - Aggregators: all attestation subnets
-    // - Non-aggregator validators: only their own subnet
-    // - Non-validators: all subnets for general sync
-    let gossipsub_topics = get_subscription_topics(fork, first_validator_id, args.is_aggregator);
+    // Subscribe to topics based on validator role (leanSpec PR #482):
+    // - All validators: subscribe to each validator's derived subnet
+    // - Aggregators: additionally subscribe to explicit aggregate_subnet_ids
+    // - Aggregators with no validators: fall back to subnet 0
+    // - Non-validators/non-aggregators: skip attestation subscriptions entirely
+    let gossipsub_topics = get_subscription_topics(
+        fork,
+        &validator_ids,
+        args.is_aggregator,
+        &args.aggregate_subnet_ids,
+        attestation_committee_count,
+    );
     let mut gossipsub_config = GossipsubConfig::new();
     gossipsub_config.set_topics(gossipsub_topics);
 
@@ -779,7 +799,7 @@ async fn main() -> Result<()> {
     //   Abort with a clear error if no valid block arrives within the timeout.
     const ANCHOR_BLOCK_TIMEOUT_SECS: u64 = 300;
 
-    let anchor_block: SignedBlockWithAttestation = if let Some(expected_root) =
+    let anchor_block: SignedBlock = if let Some(expected_root) =
         checkpoint_block_root
     {
         info!(
@@ -805,28 +825,26 @@ async fn main() -> Result<()> {
                                     "Chain message channel closed during anchor block wait"
                                 ));
                             };
-                            if let ChainMessage::ProcessBlock { signed_block_with_attestation, .. } = msg {
-                                let root = signed_block_with_attestation.message.block.hash_tree_root();
+                            if let ChainMessage::ProcessBlock { signed_block, .. } = msg {
+                                let root = signed_block.block.hash_tree_root();
                                 if root == expected_root {
                                     // Root match guarantees slot, proposer_index, parent_root,
                                     // state_root, and body contents (via body_root).
                                     // proposer_signature is NOT covered by the hash — verify it
                                     // explicitly so a peer serving a validly-hashed but unsigned
                                     // block cannot become our anchor.
-                                    match signed_block_with_attestation
-                                        .verify_signatures(anchor_state.clone())
-                                    {
+                                    match signed_block.verify_signatures(anchor_state.clone()) {
                                         Ok(()) => {
                                             info!(
-                                                slot = signed_block_with_attestation.message.block.slot.0,
+                                                slot = signed_block.block.slot.0,
                                                 block_root = %format!("0x{:x}", root),
                                                 "Anchor block received and verified — initialising fork-choice store"
                                             );
-                                            return Ok(signed_block_with_attestation);
+                                            return Ok(signed_block);
                                         }
                                         Err(e) => {
                                             warn!(
-                                                slot = signed_block_with_attestation.message.block.slot.0,
+                                                slot = signed_block.block.slot.0,
                                                 block_root = %format!("0x{:x}", root),
                                                 error = %e,
                                                 "Anchor block signature verification failed — \
@@ -837,7 +855,7 @@ async fn main() -> Result<()> {
                                     }
                                 } else {
                                     debug!(
-                                        slot = signed_block_with_attestation.message.block.slot.0,
+                                        slot = signed_block.block.slot.0,
                                         root = %format!("0x{:x}", root),
                                         "Waiting for anchor block — discarding non-anchor block"
                                     );
@@ -880,7 +898,8 @@ async fn main() -> Result<()> {
     let store = Arc::new(RwLock::new(get_forkchoice_store(
         anchor_state.clone(),
         anchor_block,
-        config,
+        config.clone(),
+        args.is_aggregator,
     )));
 
     // Seed the block provider so we can serve the anchor block to peers via BlocksByRoot.
@@ -930,6 +949,7 @@ async fn main() -> Result<()> {
         Duration::from_millis((genesis_millis + next * MILLIS_PER_INTERVAL).saturating_sub(now))
     };
 
+    let chain_log_inv_rate = genesis_log_inv_rate as usize;
     let chain_handle = task::spawn(async move {
         let mut tick_interval = interval_at(
             Instant::now() + genesis_tick_delay,
@@ -976,8 +996,23 @@ async fn main() -> Result<()> {
                     match current_interval {
                         0 | 1 => {}
                         2 => {
-                            if let Some(ref vs) = vs_for_chain {
-                                if let Some(aggregations) = vs.maybe_aggregate(&*store.read(), Slot(current_slot)) {
+                            if let Some(vs) = vs_for_chain.clone() {
+                                // Snapshot the store before entering spawn_blocking so the
+                                // read lock is released immediately. XMSS aggregation is
+                                // CPU-intensive (1-3 s); offloading it to spawn_blocking
+                                // keeps the async executor free for QUIC keepalives and
+                                // network I/O, preventing peer timeouts.
+                                let store_snapshot = store.read().clone();
+                                let maybe_agg = task::spawn_blocking(move || {
+                                    vs.maybe_aggregate(
+                                        &store_snapshot,
+                                        Slot(current_slot),
+                                        chain_log_inv_rate,
+                                    )
+                                })
+                                .await
+                                .unwrap_or(None);
+                                if let Some((aggregations, consumed_data_roots)) = maybe_agg {
                                     for aggregation in aggregations {
                                         if let Err(e) = chain_outbound_sender.send(
                                             OutboundP2pRequest::GossipAggregation(aggregation)
@@ -985,6 +1020,11 @@ async fn main() -> Result<()> {
                                             warn!("Failed to gossip aggregation: {}", e);
                                         }
                                     }
+                                    // Remove consumed raw gossip signatures so
+                                    // they are not re-aggregated in future rounds.
+                                    store.write().gossip_signatures.retain(|key, _| {
+                                        !consumed_data_roots.contains(&key.data_root)
+                                    });
                                     info!(slot = current_slot, tick = store.read().time, "Aggregation phase - broadcast aggregated attestations");
                                 } else {
                                     info!(slot = current_slot, tick = store.read().time, "Aggregation phase - no aggregation duty or no attestations");
@@ -1018,23 +1058,23 @@ async fn main() -> Result<()> {
                     let Some(message) = message else { break };
                     match message {
                         ChainMessage::ProcessBlock {
-                            signed_block_with_attestation,
+                            signed_block,
                             is_trusted,
                             should_gossip,
                         } => {
                             if should_gossip && !is_trusted && !sync_state.accepts_gossip() {
                                 debug!(
                                     state = ?sync_state,
-                                    slot = signed_block_with_attestation.message.block.slot.0,
+                                    slot = signed_block.block.slot.0,
                                     "Dropping gossip block: sync state does not accept gossip"
                                 );
                                 continue;
                             }
 
-                            let block_slot = signed_block_with_attestation.message.block.slot;
-                            let proposer = signed_block_with_attestation.message.block.proposer_index;
-                            let block_root = signed_block_with_attestation.message.block.hash_tree_root();
-                            let parent_root = signed_block_with_attestation.message.block.parent_root;
+                            let block_slot = signed_block.block.slot;
+                            let proposer = signed_block.block.proposer_index;
+                            let block_root = signed_block.block.hash_tree_root();
+                            let parent_root = signed_block.block.parent_root;
 
                             info!(
                                 slot = block_slot.0,
@@ -1061,13 +1101,13 @@ async fn main() -> Result<()> {
                             // requests a block we received but haven't incorporated yet.
                             {
                                 let mut provider = signed_block_provider.write();
-                                provider.insert(block_root, signed_block_with_attestation.clone());
+                                provider.insert(block_root, signed_block.clone());
                                 // Hard cap: evict lowest-slot blocks if still over limit.
                                 if provider.len() > MAX_BLOCK_CACHE_SIZE {
                                     let to_remove = provider.len() - MAX_BLOCK_CACHE_SIZE;
                                     let mut slots: Vec<(H256, u64)> = provider
                                         .iter()
-                                        .map(|(root, b)| (*root, b.message.block.slot.0))
+                                        .map(|(root, b)| (*root, b.block.slot.0))
                                         .collect();
                                     slots.sort_by_key(|(_, slot)| *slot);
                                     for (root, _) in slots.into_iter().take(to_remove) {
@@ -1078,7 +1118,7 @@ async fn main() -> Result<()> {
 
                             if !parent_exists {
                                 block_cache.add(
-                                    signed_block_with_attestation.clone(),
+                                    signed_block.clone(),
                                     block_root,
                                     parent_root,
                                     block_slot,
@@ -1115,7 +1155,7 @@ async fn main() -> Result<()> {
                                 continue;
                             }
 
-                            let result = {on_block(&mut *store.write(), &mut block_cache, signed_block_with_attestation.clone())};
+                            let result = {on_block(&mut *store.write(), &mut block_cache, signed_block.clone())};
                             match result {
                                 Ok(()) => {
                                     info!("Block processed successfully");
@@ -1132,7 +1172,7 @@ async fn main() -> Result<()> {
 
                                     if should_gossip {
                                         if let Err(e) = outbound_p2p_sender.send(
-                                            OutboundP2pRequest::GossipBlockWithAttestation(signed_block_with_attestation)
+                                            OutboundP2pRequest::GossipBlock(signed_block)
                                         ) {
                                             warn!("Failed to gossip block: {}", e);
                                         } else {
@@ -1187,10 +1227,15 @@ async fn main() -> Result<()> {
                                 validator_id
                             );
 
-                            match on_attestation(&mut *store.write(), signed_attestation.clone(), false) {
+                            let result = if is_trusted {
+                                on_attestation(&mut *store.write(), signed_attestation.clone(), false)
+                            } else {
+                                on_gossip_attestation(&mut *store.write(), signed_attestation.clone())
+                            };
+                            match result {
                                 Ok(()) => {
                                     if should_gossip {
-                                        let subnet_id = compute_subnet_id(validator_id);
+                                        let subnet_id = compute_subnet_id(validator_id, attestation_committee_count);
                                         if let Err(e) = outbound_p2p_sender.send(
                                             OutboundP2pRequest::GossipAttestation(signed_attestation, subnet_id)
                                         ) {
@@ -1282,7 +1327,7 @@ async fn main() -> Result<()> {
                         ValidatorChainMessage::ProduceBlock { slot, proposer_index, sender } => {
                             let prepare_result = {
                                 let mut w = store.write();
-                                prepare_block_production(&mut *w, slot, proposer_index)
+                                prepare_block_production(&mut *w, slot, proposer_index, chain_log_inv_rate)
                             };
 
                             match prepare_result {
@@ -1387,44 +1432,9 @@ async fn main() -> Result<()> {
                                     }
                                 };
 
-                                let (atx, arx) = oneshot::channel();
-                                if validator_chain_sender
-                                    .send(ValidatorChainMessage::BuildAttestationData {
-                                        slot: Slot(current_slot),
-                                        sender: atx,
-                                    })
-                                    .is_err()
-                                {
-                                    warn!("Validator task: chain channel closed, stopping");
-                                    break;
-                                }
-
-                                let attestation_data = match arx.await {
-                                    Ok(Ok(data)) => data,
-                                    Ok(Err(e)) => {
-                                        warn!(slot = current_slot, error = %e, "Validator task: chain failed to build attestation data");
-                                        last_proposal_slot = Some(current_slot);
-                                        continue;
-                                    }
-                                    Err(_) => {
-                                        warn!(
-                                            slot = current_slot,
-                                            "Validator task: no response to BuildAttestationData"
-                                        );
-                                        last_proposal_slot = Some(current_slot);
-                                        continue;
-                                    }
-                                };
-
-                                match vs.sign_block_with_data(
-                                    block,
-                                    proposer_idx,
-                                    signatures,
-                                    attestation_data,
-                                ) {
+                                match vs.sign_block_with_data(block, proposer_idx, signatures) {
                                     Ok(signed_block) => {
-                                        let block_root =
-                                            signed_block.message.block.hash_tree_root();
+                                        let block_root = signed_block.block.hash_tree_root();
                                         info!(
                                             slot = current_slot,
                                             block_root = %format!("0x{:x}", block_root),
@@ -1432,7 +1442,7 @@ async fn main() -> Result<()> {
                                         );
                                         if chain_msg_sender_for_validator
                                             .send(ChainMessage::ProcessBlock {
-                                                signed_block_with_attestation: signed_block,
+                                                signed_block,
                                                 is_trusted: true,
                                                 should_gossip: true,
                                             })
@@ -1483,7 +1493,7 @@ async fn main() -> Result<()> {
                                         continue;
                                     }
                                     let validator_id = signed_att.validator_id;
-                                    let subnet_id = compute_subnet_id(validator_id);
+                                    let subnet_id = compute_subnet_id(validator_id, attestation_committee_count);
                                     info!(
                                         slot = current_slot,
                                         validator = validator_id,

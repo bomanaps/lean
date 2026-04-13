@@ -9,6 +9,7 @@ bls = { workspace = true }
 env-config = { workspace = true }
 hex = { workspace = true }
 metrics = { workspace = true }
+rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

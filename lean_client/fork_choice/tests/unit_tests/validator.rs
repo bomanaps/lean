@@ -6,8 +6,8 @@ use std::collections::HashMap;
 
 use crate::unit_tests::common::create_test_store;
 use containers::{
-    Attestation, AttestationData, Block, BlockBody, BlockWithAttestation, Checkpoint, Config,
-    SignatureKey, SignedBlockWithAttestation, Slot, State, Validator,
+    Attestation, AttestationData, Block, BlockBody, Checkpoint, Config, SignatureKey, SignedBlock,
+    Slot, State, Validator,
 };
 use fork_choice::store::{Store, get_forkchoice_store, produce_block_with_signatures, update_head};
 use rand::SeedableRng;
@@ -21,9 +21,17 @@ fn create_test_store_with_signers() -> (Store, HashMap<u64, SecretKey>) {
     let mut rng = ChaChaRng::seed_from_u64(1337);
     let (validators, keys) = (0..10)
         .map(|index| {
-            let (pubkey, secret_key) = SecretKey::generate_key_pair(&mut rng, 0, 10);
+            let (attestation_pubkey, attest_sk) = SecretKey::generate_key_pair(&mut rng, 0, 10);
+            let (proposal_pubkey, _proposal_sk) = SecretKey::generate_key_pair(&mut rng, 0, 10);
 
-            (Validator { index, pubkey }, (index, secret_key))
+            (
+                Validator {
+                    index,
+                    attestation_pubkey,
+                    proposal_pubkey,
+                },
+                (index, attest_sk),
+            )
         })
         .unzip();
 
@@ -37,13 +45,8 @@ fn create_test_store_with_signers() -> (Store, HashMap<u64, SecretKey>) {
         body: BlockBody::default(),
     };
 
-    let block_with_attestation = BlockWithAttestation {
-        block: block.clone(),
-        proposer_attestation: Attestation::default(),
-    };
-
-    let signed_block = SignedBlockWithAttestation {
-        message: block_with_attestation,
+    let signed_block = SignedBlock {
+        block,
         signature: Default::default(),
     };
 
@@ -62,7 +65,7 @@ fn test_produce_block_basic() {
     let validator_idx = 1;
 
     let (block_root, block, _signatures) =
-        produce_block_with_signatures(&mut store, slot, validator_idx)
+        produce_block_with_signatures(&mut store, slot, validator_idx, 1)
             .expect("block production should succeed");
 
     // Verify block structure
@@ -82,7 +85,7 @@ fn test_produce_block_unauthorized_proposer() {
     let slot = Slot(1);
     let wrong_validator = 2; // Not proposer for slot 1
 
-    let result = produce_block_with_signatures(&mut store, slot, wrong_validator);
+    let result = produce_block_with_signatures(&mut store, slot, wrong_validator, 1);
     assert!(result.is_err());
     let err = format!("{:?}", result.unwrap_err());
     assert!(
@@ -128,7 +131,7 @@ fn test_produce_block_with_attestations() {
     let slot = Slot(2);
     let validator_idx = 2;
 
-    let (_root, block, signatures) = produce_block_with_signatures(&mut store, slot, validator_idx)
+    let (_root, block, signatures) = produce_block_with_signatures(&mut store, slot, validator_idx, 1)
         .expect("block production should succeed");
 
     // Block should include the 2 attestations we added (validators 5 and 6).
@@ -159,7 +162,7 @@ fn test_produce_block_with_attestations() {
                     .validators
                     .get(vid)
                     .expect("validator index out of range")
-                    .pubkey
+                    .attestation_pubkey
                     .clone()
             })
             .collect();
@@ -176,7 +179,7 @@ fn test_produce_block_sequential_slots() {
 
     // Produce block for slot 1
     let (block1_root, block1, _sig1) =
-        produce_block_with_signatures(&mut store, Slot(1), 1).expect("block1 should succeed");
+        produce_block_with_signatures(&mut store, Slot(1), 1, 1).expect("block1 should succeed");
 
     // Verify first block is properly created
     assert_eq!(block1.slot, Slot(1));
@@ -190,7 +193,7 @@ fn test_produce_block_sequential_slots() {
 
     // Produce block for slot 2 (will build on genesis due to forkchoice)
     let (block2_root, block2, _sig2) =
-        produce_block_with_signatures(&mut store, Slot(2), 2).expect("block2 should succeed");
+        produce_block_with_signatures(&mut store, Slot(2), 2, 1).expect("block2 should succeed");
 
     // Verify block properties
     assert_eq!(block2.slot, Slot(2));
@@ -216,7 +219,7 @@ fn test_produce_block_empty_attestations() {
     let slot = Slot(3);
     let validator_idx = 3;
 
-    let (_root, block, _sig) = produce_block_with_signatures(&mut store, slot, validator_idx)
+    let (_root, block, _sig) = produce_block_with_signatures(&mut store, slot, validator_idx, 1)
         .expect("block production should succeed");
 
     // Should produce valid block with empty attestations
@@ -260,7 +263,7 @@ fn test_produce_block_state_consistency() {
     let validator_idx = 4;
 
     let (block_root, block, signatures) =
-        produce_block_with_signatures(&mut store, slot, validator_idx)
+        produce_block_with_signatures(&mut store, slot, validator_idx, 1)
             .expect("block production should succeed");
 
     // Verify the stored state matches the block's state root
@@ -289,7 +292,7 @@ fn test_produce_block_state_consistency() {
                     .validators
                     .get(vid)
                     .expect("validator index out of range")
-                    .pubkey
+                    .attestation_pubkey
                     .clone()
             })
             .collect();
@@ -311,7 +314,7 @@ fn test_block_production_then_attestation() {
 
     // Proposer produces block for slot 1
     let (_root, _block, _sig) =
-        produce_block_with_signatures(&mut store, Slot(1), 1).expect("block should succeed");
+        produce_block_with_signatures(&mut store, Slot(1), 1, 1).expect("block should succeed");
 
     // Update store state after block production
     update_head(&mut store);
@@ -351,7 +354,7 @@ fn test_multiple_validators_coordination() {
 
     // Validator 1 produces block for slot 1
     let (block1_root, block1, _sig1) =
-        produce_block_with_signatures(&mut store, Slot(1), 1).expect("block1 should succeed");
+        produce_block_with_signatures(&mut store, Slot(1), 1, 1).expect("block1 should succeed");
     let block1_hash = block1_root;
 
     // Validators 2-5 create attestations for slot 2
@@ -380,7 +383,7 @@ fn test_multiple_validators_coordination() {
     // After processing block1, head should be block1 (fork choice walks the tree)
     // So block2 will build on block1
     let (block2_root, block2, _sig2) =
-        produce_block_with_signatures(&mut store, Slot(2), 2).expect("block2 should succeed");
+        produce_block_with_signatures(&mut store, Slot(2), 2, 1).expect("block2 should succeed");
 
     // Verify block properties
     assert_eq!(block2.slot, Slot(2));
@@ -412,7 +415,7 @@ fn test_validator_edge_cases() {
     let slot = Slot(9); // This validator's slot
 
     // Should be able to produce block
-    let (_root, block, _sig) = produce_block_with_signatures(&mut store, slot, max_validator)
+    let (_root, block, _sig) = produce_block_with_signatures(&mut store, slot, max_validator, 1)
         .expect("max validator block should succeed");
     assert_eq!(block.proposer_index, max_validator);
 
@@ -444,13 +447,8 @@ fn test_validator_operations_empty_store() {
         body: genesis_body,
     };
 
-    let block_with_attestation = BlockWithAttestation {
-        block: genesis.clone(),
-        proposer_attestation: Attestation::default(),
-    };
-
-    let signed_block = SignedBlockWithAttestation {
-        message: block_with_attestation,
+    let signed_block = SignedBlock {
+        block: genesis,
         signature: Default::default(),
     };
 
@@ -458,7 +456,7 @@ fn test_validator_operations_empty_store() {
 
     // Should be able to produce block and attestation
     let (_root, block, _sig) =
-        produce_block_with_signatures(&mut store, Slot(1), 1).expect("block should succeed");
+        produce_block_with_signatures(&mut store, Slot(1), 1, 1).expect("block should succeed");
     let attestation_data = store
         .produce_attestation_data(Slot(1))
         .expect("failed to produce attestation data");
@@ -481,7 +479,7 @@ fn test_produce_block_wrong_proposer() {
     let slot = Slot(5);
     let wrong_proposer = 3; // Should be validator 5 for slot 5
 
-    let result = produce_block_with_signatures(&mut store, slot, wrong_proposer);
+    let result = produce_block_with_signatures(&mut store, slot, wrong_proposer, 1);
     assert!(result.is_err());
     assert!(format!("{:?}", result.unwrap_err()).contains("is not the proposer for slot"));
 }
@@ -509,7 +507,7 @@ fn test_produce_block_missing_parent_state() {
     // Missing head in get_proposal_head -> KeyError equivalent
     let result = std::panic::catch_unwind(|| {
         let mut s = store;
-        produce_block_with_signatures(&mut s, Slot(1), 1)
+        produce_block_with_signatures(&mut s, Slot(1), 1, 1)
     });
     assert!(result.is_err());
 }

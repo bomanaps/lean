@@ -566,15 +566,15 @@ where
 
             Event::Message { message, .. } => {
                 match GossipsubMessage::decode(&message.topic, &message.data) {
-                    Ok(GossipsubMessage::Block(signed_block_with_attestation)) => {
-                        info!(block_root = %signed_block_with_attestation.message.block.hash_tree_root(), "received block via gossip");
+                    Ok(GossipsubMessage::Block(signed_block)) => {
+                        info!(block_root = %signed_block.block.hash_tree_root(), "received block via gossip");
 
-                        let slot = signed_block_with_attestation.message.block.slot.0;
+                        let slot = signed_block.block.slot.0;
 
                         if let Err(err) = self
                             .chain_message_sink
                             .send(ChainMessage::ProcessBlock {
-                                signed_block_with_attestation,
+                                signed_block,
                                 is_trusted: false,
                                 should_gossip: true,
                             })
@@ -602,7 +602,7 @@ where
                             .send(ChainMessage::ProcessAttestation {
                                 signed_attestation: attestation,
                                 is_trusted: false,
-                                should_gossip: true,
+                                should_gossip: false,
                             })
                             .await
                         {
@@ -788,7 +788,7 @@ where
                             {
                                 let mut provider = self.signed_block_provider.write();
                                 for block in &blocks {
-                                    let root = block.message.block.hash_tree_root();
+                                    let root = block.block.hash_tree_root();
                                     provider.insert(root, block.clone());
                                 }
                                 // Hard cap: evict lowest-slot blocks if still over limit.
@@ -796,7 +796,7 @@ where
                                     let to_remove = provider.len() - MAX_BLOCK_CACHE_SIZE;
                                     let mut slots: Vec<(H256, u64)> = provider
                                         .iter()
-                                        .map(|(root, b)| (*root, b.message.block.slot.0))
+                                        .map(|(root, b)| (*root, b.block.slot.0))
                                         .collect();
                                     slots.sort_by_key(|(_, slot)| *slot);
                                     for (root, _) in slots.into_iter().take(to_remove) {
@@ -818,7 +818,7 @@ where
                                     blocks
                                         .iter()
                                         .filter_map(|block| {
-                                            let parent_root = block.message.block.parent_root;
+                                            let parent_root = block.block.parent_root;
                                             if parent_root.is_zero() {
                                                 return None;
                                             }
@@ -867,10 +867,10 @@ where
                             let chain_sink = self.chain_message_sink.clone();
                             tokio::spawn(async move {
                                 for block in blocks {
-                                    let slot = block.message.block.slot.0;
+                                    let slot = block.block.slot.0;
                                     if let Err(e) = chain_sink
                                         .send(ChainMessage::ProcessBlock {
-                                            signed_block_with_attestation: block,
+                                            signed_block: block,
                                             is_trusted: false,
                                             should_gossip: false,
                                         })
@@ -1185,18 +1185,18 @@ where
 
     async fn dispatch_outbound_request(&mut self, request: OutboundP2pRequest) {
         match request {
-            OutboundP2pRequest::GossipBlockWithAttestation(signed_block_with_attestation) => {
-                let slot = signed_block_with_attestation.message.block.slot.0;
-                match signed_block_with_attestation.to_ssz() {
+            OutboundP2pRequest::GossipBlock(signed_block) => {
+                let slot = signed_block.block.slot.0;
+                match signed_block.to_ssz() {
                     Ok(bytes) => {
                         if let Err(err) = self.publish_to_topic(GossipsubKind::Block, bytes) {
-                            warn!(slot = slot, ?err, "Publish block with attestation failed");
+                            warn!(slot = slot, ?err, "Publish block failed");
                         } else {
-                            info!(slot = slot, "Broadcasted block with attestation");
+                            info!(slot = slot, "Broadcasted block");
                         }
                     }
                     Err(err) => {
-                        warn!(slot = slot, ?err, "Serialize block with attestation failed");
+                        warn!(slot = slot, ?err, "Serialize block failed");
                     }
                 }
             }

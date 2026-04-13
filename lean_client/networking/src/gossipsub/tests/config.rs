@@ -1,5 +1,5 @@
 use crate::gossipsub::config::GossipsubConfig;
-use crate::gossipsub::topic::{ATTESTATION_SUBNET_COUNT, GossipsubKind, get_subscription_topics};
+use crate::gossipsub::topic::{GossipsubKind, get_subscription_topics};
 
 #[test]
 fn test_default_parameters() {
@@ -39,13 +39,14 @@ fn test_default_parameters() {
 #[test]
 fn test_set_topics() {
     let mut config = GossipsubConfig::new();
-    // Use aggregator mode to get all subnets for this test
-    let topics = get_subscription_topics("genesis".to_string(), Some(0), true);
+    // Use aggregator mode with validator 0, subnet_count=1 for this test
+    let subnet_count = 1u64;
+    let topics = get_subscription_topics("genesis".to_string(), &[0u64], true, &[], subnet_count);
 
     config.set_topics(topics.clone());
 
-    // Block + Aggregation + ATTESTATION_SUBNET_COUNT subnets (no legacy Attestation)
-    let expected_count = 2 + ATTESTATION_SUBNET_COUNT as usize;
+    // Block + Aggregation + subnet_count subnets (no legacy Attestation)
+    let expected_count = 2 + subnet_count as usize;
     assert_eq!(config.topics.len(), expected_count);
 
     // Verify topics
@@ -55,7 +56,7 @@ fn test_set_topics() {
     assert_eq!(config.topics[1].kind, GossipsubKind::Aggregation);
 
     // Verify subnet topics
-    for i in 0..ATTESTATION_SUBNET_COUNT as usize {
+    for i in 0..subnet_count as usize {
         assert_eq!(config.topics[2 + i].fork, "genesis");
         assert_eq!(
             config.topics[2 + i].kind,

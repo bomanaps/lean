@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use containers::{
     AggregatedSignatureProof, AttestationData, Block, SignedAggregatedAttestation,
-    SignedAttestation, SignedBlockWithAttestation, Slot, Status,
+    SignedAttestation, SignedBlock, Slot, Status,
 };
 use metrics::METRICS;
 use parking_lot::{Mutex, RwLock};
@@ -21,7 +21,7 @@ pub const MAX_BLOCK_CACHE_SIZE: usize = 1024;
 
 /// Shared block provider for serving BlocksByRoot requests.
 /// Allows NetworkService to look up signed blocks for checkpoint sync backfill.
-pub type SignedBlockProvider = Arc<RwLock<HashMap<H256, SignedBlockWithAttestation>>>;
+pub type SignedBlockProvider = Arc<RwLock<HashMap<H256, SignedBlock>>>;
 
 /// Shared status provider for Status req/resp protocol.
 /// Allows NetworkService to send accurate finalized/head checkpoints to peers.
@@ -145,7 +145,7 @@ impl PeerCount {
 #[derive(Debug, Clone)]
 pub enum ChainMessage {
     ProcessBlock {
-        signed_block_with_attestation: SignedBlockWithAttestation,
+        signed_block: SignedBlock,
         is_trusted: bool,
         should_gossip: bool,
     },
@@ -163,11 +163,9 @@ pub enum ChainMessage {
 }
 
 impl ChainMessage {
-    pub fn block_with_attestation(
-        signed_block_with_attestation: SignedBlockWithAttestation,
-    ) -> Self {
+    pub fn block(signed_block: SignedBlock) -> Self {
         ChainMessage::ProcessBlock {
-            signed_block_with_attestation,
+            signed_block,
             is_trusted: false,
             should_gossip: true,
         }
@@ -186,14 +184,10 @@ impl Display for ChainMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ChainMessage::ProcessBlock {
-                signed_block_with_attestation,
+                signed_block,
                 ..
             } => {
-                write!(
-                    f,
-                    "ProcessBlockWithAttestation(slot={})",
-                    signed_block_with_attestation.message.block.slot.0
-                )
+                write!(f, "ProcessBlock(slot={})", signed_block.block.slot.0)
             }
             ChainMessage::ProcessAttestation {
                 signed_attestation, ..
@@ -244,7 +238,7 @@ pub enum ValidatorChainMessage {
 
 #[derive(Debug, Clone)]
 pub enum OutboundP2pRequest {
-    GossipBlockWithAttestation(SignedBlockWithAttestation),
+    GossipBlock(SignedBlock),
     /// Devnet-3: Gossip attestation to subnet-specific topic
     /// Contains (attestation, subnet_id)
     GossipAttestation(SignedAttestation, u64),

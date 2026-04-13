@@ -9,6 +9,7 @@ env-config = { workspace = true }
 ethereum-types = { workspace = true }
 fork_choice = { workspace = true }
 metrics = { workspace = true }
+serde = { workspace = true }
 serde_yaml = { workspace = true }
 ssz = { workspace = true }
 tracing = { workspace = true }

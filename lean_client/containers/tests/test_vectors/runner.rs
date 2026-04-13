@@ -642,21 +642,14 @@ impl TestRunner {
         println!("\n{}: {}", test_name, test_case.info.description);
 
         let anchor_state = test_case.anchor_state;
-        let signed_block = test_case.signed_block_with_attestation;
+        let signed_block = test_case.signed_block;
 
         // Print some debug info about what we're verifying
-        println!("  Block slot: {}", signed_block.message.block.slot.0);
-        println!(
-            "  Proposer index: {}",
-            signed_block.message.block.proposer_index
-        );
+        println!("  Block slot: {}", signed_block.block.slot.0);
+        println!("  Proposer index: {}", signed_block.block.proposer_index);
 
-        let attestation_count = signed_block.message.block.body.attestations.len_u64();
+        let attestation_count = signed_block.block.body.attestations.len_u64();
         println!("  Attestations in block: {}", attestation_count);
-        println!(
-            "  Proposer attestation validator: {}",
-            signed_block.message.proposer_attestation.validator_id
-        );
 
         // Check if we expect this test to fail
         if let Some(ref exception) = test_case.expect_exception {

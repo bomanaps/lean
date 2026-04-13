@@ -5,8 +5,7 @@
 
 use containers::{
     AggregatedAttestation, Attestation, Attestations, Block, BlockBody, BlockHeader,
-    BlockSignatures, BlockWithAttestation, Checkpoint, Config, SignedBlockWithAttestation, Slot,
-    State, Validators,
+    BlockSignatures, Checkpoint, Config, SignedBlock, Slot, State, Validators,
 };
 use containers::{
     HistoricalBlockHashes, JustificationRoots, JustificationValidators, JustifiedSlots, Validator,
@@ -26,7 +25,7 @@ pub fn create_block(
     slot: u64,
     parent_header: &mut BlockHeader,
     attestations: Option<Attestations>,
-) -> SignedBlockWithAttestation {
+) -> SignedBlock {
     let body = BlockBody {
         attestations: {
             let attestations_vec = attestations.unwrap_or_default();
@@ -61,11 +60,8 @@ pub fn create_block(
         body: body,
     };
 
-    let return_value = SignedBlockWithAttestation {
-        message: BlockWithAttestation {
-            block: block_message,
-            proposer_attestation: Attestation::default(),
-        },
+    let return_value = SignedBlock {
+        block: block_message,
         signature: BlockSignatures {
             attestation_signatures: PersistentList::default(),
             proposer_signature: Signature::default(),
@@ -111,7 +107,8 @@ pub fn base_state_with_validators(config: Config, num_validators: usize) -> Stat
     let mut validators = Validators::default();
     for i in 0..num_validators {
         let validator = Validator {
-            pubkey: Default::default(),
+            attestation_pubkey: Default::default(),
+            proposal_pubkey: Default::default(),
             index: i as u64,
         };
         validators.push(validator).expect("within limit");
@@ -132,5 +129,5 @@ pub fn base_state_with_validators(config: Config, num_validators: usize) -> Stat
 }
 
 pub fn sample_config() -> Config {
-    Config { genesis_time: 0 }
+    Config::default()
 }

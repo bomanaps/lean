@@ -1,14 +1,14 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
-use containers::{SignedBlockWithAttestation, Slot};
+use containers::{SignedBlock, Slot};
 use ssz::H256;
 
 pub const MAX_CACHED_BLOCKS: usize = 1024;
 
 #[derive(Debug, Clone)]
 pub struct PendingBlock {
-    pub block: SignedBlockWithAttestation,
+    pub block: SignedBlock,
     pub root: H256,
     pub parent_root: H256,
     pub slot: Slot,
@@ -54,7 +54,7 @@ impl BlockCache {
 
     pub fn add(
         &mut self,
-        block: SignedBlockWithAttestation,
+        block: SignedBlock,
         root: H256,
         parent_root: H256,
         slot: Slot,

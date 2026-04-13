@@ -43,8 +43,8 @@ fn test_process_block_header_valid() {
     let mut state_at_slot_1 = genesis_state.process_slots(Slot(1)).unwrap();
     let genesis_header_root = state_at_slot_1.latest_block_header.hash_tree_root();
 
-    let block = create_block(1, &mut state_at_slot_1.latest_block_header, None).message;
-    let new_state = state_at_slot_1.process_block_header(&block.block).unwrap();
+    let signed_block = create_block(1, &mut state_at_slot_1.latest_block_header, None);
+    let new_state = state_at_slot_1.process_block_header(&signed_block.block).unwrap();
 
     assert_eq!(new_state.latest_finalized.root, genesis_header_root);
     assert_eq!(new_state.latest_justified.root, genesis_header_root);

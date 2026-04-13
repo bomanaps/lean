@@ -6,7 +6,8 @@ use xmss::PublicKey;
 // todo(containers): default implementation doesn't make sense here
 #[derive(Clone, Debug, Ssz, Serialize, Deserialize, Default)]
 pub struct Validator {
-    pub pubkey: PublicKey,
+    pub attestation_pubkey: PublicKey,
+    pub proposal_pubkey: PublicKey,
     #[serde(default)]
     pub index: u64,
 }

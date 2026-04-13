@@ -19,6 +19,7 @@ fn aggregate_two() {
         vec![sig1, sig2],
         message.clone(),
         0,
+        1,
     )
     .unwrap();
 
