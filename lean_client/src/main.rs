@@ -1,8 +1,8 @@
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use containers::{
-    Block, BlockBody, BlockHeader, BlockSignatures, Checkpoint, Config, SignedBlock, Slot, State,
-    Status, Validator,
+    Block, BlockBody, BlockHeader, BlockSignatures, Checkpoint, Config,
+    SignedAggregatedAttestation, SignedBlock, Slot, State, Status, Validator,
 };
 use ethereum_types::H256;
 use features::Feature;
@@ -29,15 +29,15 @@ use networking::types::{
 };
 use parking_lot::{Mutex, RwLock};
 use ssz::{PersistentList, SszHash, SszReadDefault as _};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{io::IsTerminal, net::IpAddr};
 use tokio::{
-    sync::{Notify, mpsc, oneshot},
+    sync::{Notify, mpsc, oneshot, watch},
     task,
-    time::{Duration, Instant, interval, interval_at},
+    time::{Duration, Instant, MissedTickBehavior, interval, interval_at},
 };
 use tracing::level_filters::LevelFilter;
 use tracing::{debug, error, info, warn};
@@ -949,15 +949,61 @@ async fn main() -> Result<()> {
     };
 
     let chain_log_inv_rate = genesis_log_inv_rate as usize;
+
+    // ── Aggregation background task ────────────────────────────────────────────
+    // XMSS aggregation takes 1-3 s. Running it inside the tick loop via .await
+    // blocks the executor, causing Tokio to burst-fire all missed ticks and keeps
+    // the node 15-19 slots behind. Instead we decouple it: the tick loop sends a
+    // (slot, store_snapshot) trigger and immediately continues; a dedicated task
+    // runs spawn_blocking and sends the result back via a result channel.
+    //
+    // watch channel = lossless latest-value semantics: send() always overwrites so
+    // the aggregation task always sees the most recent trigger even if XMSS was
+    // still running when a newer slot arrived. No trigger is ever silently dropped.
+    let has_aggregator = vs_for_chain.is_some();
+    let (agg_tx, mut agg_rx) = watch::channel::<Option<(u64, Store)>>(None);
+    let (res_tx, mut res_rx) = mpsc::channel::<(
+        u64,
+        Option<(Vec<SignedAggregatedAttestation>, HashSet<H256>)>,
+    )>(4);
+
+    task::spawn(async move {
+        let Some(vs) = vs_for_chain else { return };
+        loop {
+            if agg_rx.changed().await.is_err() {
+                break; // sender dropped — chain task shut down
+            }
+            let Some((slot, snapshot)) = agg_rx.borrow_and_update().clone() else {
+                continue;
+            };
+            let vs = vs.clone();
+            let log_rate = chain_log_inv_rate;
+            let result =
+                task::spawn_blocking(move || vs.maybe_aggregate(&snapshot, Slot(slot), log_rate))
+                    .await
+                    .unwrap_or(None);
+            if res_tx.send((slot, result)).await.is_err() {
+                break; // chain task dropped — shut down
+            }
+        }
+    });
+
     let chain_handle = task::spawn(async move {
         let mut tick_interval = interval_at(
             Instant::now() + genesis_tick_delay,
             Duration::from_millis(MILLIS_PER_INTERVAL),
         );
+        // Skip missed ticks instead of bursting: on_tick's while loop already
+        // catches up the store to wall-clock time, so replaying stale ticks is
+        // pure overhead that floods the executor with lock grabs and log writes.
+        tick_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut last_logged_slot = 0u64;
+        // Track the last slot for which aggregation was triggered so the catch-up
+        // guard never fires twice for the same slot.
+        let mut last_agg_slot: u64 = 0;
         let mut last_status_slot: Option<u64> = None;
         let mut block_cache = BlockCache::new();
-        let mut sync_state = if vs_for_chain.is_some() {
+        let mut sync_state = if has_aggregator {
             SyncState::Syncing
         } else {
             SyncState::Idle
@@ -992,44 +1038,50 @@ async fn main() -> Result<()> {
                         evaluate_sync_state(&mut sync_state, peers, head_slot, nf);
                     }
 
-                    match current_interval {
-                        0 | 1 => {}
-                        2 => {
-                            if let Some(vs) = vs_for_chain.clone() {
-                                // Snapshot the store before entering spawn_blocking so the
-                                // read lock is released immediately. XMSS aggregation is
-                                // CPU-intensive (1-3 s); offloading it to spawn_blocking
-                                // keeps the async executor free for QUIC keepalives and
-                                // network I/O, preventing peer timeouts.
-                                let store_snapshot = store.read().clone();
-                                let maybe_agg = task::spawn_blocking(move || {
-                                    vs.maybe_aggregate(
-                                        &store_snapshot,
-                                        Slot(current_slot),
-                                        chain_log_inv_rate,
-                                    )
-                                })
-                                .await
-                                .unwrap_or(None);
-                                if let Some((aggregations, consumed_data_roots)) = maybe_agg {
-                                    for aggregation in aggregations {
-                                        if let Err(e) = chain_outbound_sender.send(
-                                            OutboundP2pRequest::GossipAggregation(aggregation)
-                                        ) {
-                                            warn!("Failed to gossip aggregation: {}", e);
-                                        }
-                                    }
-                                    // Remove consumed raw gossip signatures so
-                                    // they are not re-aggregated in future rounds.
-                                    store.write().gossip_signatures.retain(|key, _| {
-                                        !consumed_data_roots.contains(&key.data_root)
-                                    });
-                                    info!(slot = current_slot, tick = store.read().time, "Aggregation phase - broadcast aggregated attestations");
-                                } else {
-                                    info!(slot = current_slot, tick = store.read().time, "Aggregation phase - no aggregation duty or no attestations");
+                    // ── Drain completed aggregation results (non-blocking) ────────────
+                    // Results arrive here from the dedicated aggregation task.
+                    // Draining every tick (800 ms) is fast enough to stay within
+                    // the gossip broadcast window.
+                    while let Ok((agg_slot, maybe_agg)) = res_rx.try_recv() {
+                        if let Some((aggregations, consumed_data_roots)) = maybe_agg {
+                            for aggregation in aggregations {
+                                if let Err(e) = chain_outbound_sender.send(
+                                    OutboundP2pRequest::GossipAggregation(aggregation)
+                                ) {
+                                    warn!("Failed to gossip aggregation: {}", e);
                                 }
                             }
+                            // Remove consumed raw gossip signatures so they are
+                            // not re-aggregated in future rounds.
+                            store.write().gossip_signatures.retain(|key, _| {
+                                !consumed_data_roots.contains(&key.data_root)
+                            });
+                            info!(slot = agg_slot, "Aggregation phase - broadcast aggregated attestations");
+                        } else {
+                            info!("Aggregation phase - no aggregation duty or no attestations");
                         }
+                    }
+
+                    // ── Aggregation catch-up / interval-2 guard ───────────────────────
+                    // Trigger aggregation whenever we reach OR pass interval 2 for a
+                    // new slot. This covers two cases:
+                    //   1. Normal: on_tick lands exactly at interval 2 → trigger fires.
+                    //   2. Catch-up: on_tick skips past interval 2 (e.g. lands at 3 or 4
+                    //      after a long block-processing burst) → trigger still fires for
+                    //      the current slot, mirroring zeam's explicit catch-up loop.
+                    // last_agg_slot prevents double-firing within the same slot.
+                    if has_aggregator && current_interval >= 2 && current_slot > last_agg_slot {
+                        last_agg_slot = current_slot;
+                        let snapshot = store.read().clone();
+                        // watch::send() always overwrites — never drops a trigger.
+                        // If XMSS is still running, it will use the latest snapshot
+                        // after finishing; no slot is silently skipped.
+                        let _ = agg_tx.send(Some((current_slot, snapshot)));
+                        info!(slot = current_slot, "Aggregation phase - triggered");
+                    }
+
+                    match current_interval {
+                        0 | 1 | 2 => {} // interval-2 aggregation handled by guard above
                         3 => {
                             info!(slot = current_slot, tick = store.read().time, "Computing safe target");
                         }

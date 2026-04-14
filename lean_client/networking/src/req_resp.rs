@@ -394,13 +394,12 @@ impl LeanCodec {
                     continue;
                 }
 
-                let block =
-                    SignedBlock::from_ssz_default(&ssz_bytes).map_err(|e| {
-                        io::Error::new(
-                            io::ErrorKind::Other,
-                            format!("SSZ decode Block failed: {e:?}"),
-                        )
-                    })?;
+                let block = SignedBlock::from_ssz_default(&ssz_bytes).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("SSZ decode Block failed: {e:?}"),
+                    )
+                })?;
                 blocks.push(block);
             }
             Ok(LeanResponse::BlocksByRoot(blocks))

@@ -6630,6 +6630,7 @@ dependencies = [
  "ethereum-types",
  "fork_choice",
  "metrics",
+ "rayon",
  "serde",
  "serde_yaml",
  "ssz",

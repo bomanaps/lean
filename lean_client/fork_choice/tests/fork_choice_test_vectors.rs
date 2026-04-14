@@ -92,7 +92,10 @@ impl Into<State> for TestAnchorState {
             let proposal_pubkey: PublicKey = test_validator
                 .proposal_pubkey
                 .as_deref()
-                .map(|s| s.parse().expect("Failed to parse validator proposal_pubkey"))
+                .map(|s| {
+                    s.parse()
+                        .expect("Failed to parse validator proposal_pubkey")
+                })
                 .unwrap_or_default();
             let validator = Validator {
                 attestation_pubkey,
@@ -556,9 +559,8 @@ fn forkchoice(spec_file: &str) {
 
                         // Advance time to the block's slot to ensure attestations are processable
                         // SECONDS_PER_SLOT is 4. Convert to milliseconds for devnet-3
-                        let block_time_millis = (store.config.genesis_time
-                            + (signed_block.block.slot.0 * 4))
-                            * 1000;
+                        let block_time_millis =
+                            (store.config.genesis_time + (signed_block.block.slot.0 * 4)) * 1000;
                         on_tick(&mut store, block_time_millis, false);
 
                         on_block(&mut store, &mut cache, signed_block).unwrap();

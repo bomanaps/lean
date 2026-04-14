@@ -47,12 +47,14 @@ impl KeyManager {
             .join(format!("validator_{validator_index}_proposal_sk.ssz"));
 
         // todo(security): this probably should be zeroized
-        let attest_bytes = std::fs::read(&attest_path)
-            .context(format!("Failed to read attestation key file: {attest_path:?}"))?;
+        let attest_bytes = std::fs::read(&attest_path).context(format!(
+            "Failed to read attestation key file: {attest_path:?}"
+        ))?;
         let attest_key = SecretKey::try_from(attest_bytes.as_slice())?;
 
-        let proposal_bytes = std::fs::read(&proposal_path)
-            .context(format!("Failed to read proposal key file: {proposal_path:?}"))?;
+        let proposal_bytes = std::fs::read(&proposal_path).context(format!(
+            "Failed to read proposal key file: {proposal_path:?}"
+        ))?;
         let proposal_key = SecretKey::try_from(proposal_bytes.as_slice())?;
 
         info!(
@@ -75,12 +77,14 @@ impl KeyManager {
         attest_path: &std::path::Path,
         proposal_path: &std::path::Path,
     ) -> Result<()> {
-        let attest_bytes = std::fs::read(attest_path)
-            .context(format!("Failed to read attestation key file: {attest_path:?}"))?;
+        let attest_bytes = std::fs::read(attest_path).context(format!(
+            "Failed to read attestation key file: {attest_path:?}"
+        ))?;
         let attest_key = SecretKey::try_from(attest_bytes.as_slice())?;
 
-        let proposal_bytes = std::fs::read(proposal_path)
-            .context(format!("Failed to read proposal key file: {proposal_path:?}"))?;
+        let proposal_bytes = std::fs::read(proposal_path).context(format!(
+            "Failed to read proposal key file: {proposal_path:?}"
+        ))?;
         let proposal_key = SecretKey::try_from(proposal_bytes.as_slice())?;
 
         info!(
@@ -102,10 +106,12 @@ impl KeyManager {
         epoch: u32,
         message: H256,
     ) -> Result<Signature> {
-        let key = self
-            .attestation_keys
-            .get(&validator_index)
-            .ok_or_else(|| anyhow!("No attestation key loaded for validator {}", validator_index))?;
+        let key = self.attestation_keys.get(&validator_index).ok_or_else(|| {
+            anyhow!(
+                "No attestation key loaded for validator {}",
+                validator_index
+            )
+        })?;
 
         key.sign(message, epoch)
     }

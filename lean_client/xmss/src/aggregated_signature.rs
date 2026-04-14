@@ -4,10 +4,12 @@ use std::{str::FromStr, sync::Once};
 use crate::{PublicKey, Signature};
 use anyhow::{Context, Error, Result, anyhow, bail};
 use ethereum_types::H256;
-use rec_aggregation::{AggregatedXMSS, init_aggregation_bytecode, xmss_aggregate, xmss_verify_aggregation};
 use metrics::{METRICS, stop_and_discard};
+use rec_aggregation::{
+    AggregatedXMSS, init_aggregation_bytecode, xmss_aggregate, xmss_verify_aggregation,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-use ssz::{ByteList, ReadError, Size, SszHash, SszRead, SszSize, SszWrite, WriteError, U1};
+use ssz::{ByteList, ReadError, Size, SszHash, SszRead, SszSize, SszWrite, U1, WriteError};
 use typenum::U1048576;
 
 /// Max size currently is 1MiB by spec.
@@ -32,8 +34,7 @@ impl SszSize for AggregatedSignature {
 
 impl<C> SszRead<C> for AggregatedSignature {
     fn from_ssz_unchecked(context: &C, bytes: &[u8]) -> Result<Self, ReadError> {
-        let inner =
-            ByteList::<AggregatedSignatureSizeLimit>::from_ssz_unchecked(context, bytes)?;
+        let inner = ByteList::<AggregatedSignatureSizeLimit>::from_ssz_unchecked(context, bytes)?;
         AggregatedXMSS::deserialize(inner.as_bytes()).ok_or(ReadError::Custom {
             message: "invalid aggregated XMSS signature",
         })?;
@@ -159,10 +160,9 @@ impl AggregatedSignature {
         });
 
         let bytes = agg.serialize();
-        Ok(Self(
-            ByteList::try_from(bytes)
-                .context("aggregated proof too large - exceeds 1MiB limit")?,
-        ))
+        Ok(Self(ByteList::try_from(bytes).context(
+            "aggregated proof too large - exceeds 1MiB limit",
+        )?))
     }
 
     pub fn verify(

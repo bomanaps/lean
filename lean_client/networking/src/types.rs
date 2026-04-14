@@ -183,10 +183,7 @@ impl ChainMessage {
 impl Display for ChainMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ChainMessage::ProcessBlock {
-                signed_block,
-                ..
-            } => {
+            ChainMessage::ProcessBlock { signed_block, .. } => {
                 write!(f, "ProcessBlock(slot={})", signed_block.block.slot.0)
             }
             ChainMessage::ProcessAttestation {
