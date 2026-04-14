@@ -988,6 +988,10 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Clone the store Arc so the validator task can poll for block arrival
+    // without going through the chain task message channel.
+    let store_for_validator = store.clone();
+
     let chain_handle = task::spawn(async move {
         let mut tick_interval = interval_at(
             Instant::now() + genesis_tick_delay,
@@ -1516,6 +1520,29 @@ async fn main() -> Result<()> {
                 }
                 1 => {
                     if last_attestation_slot != Some(current_slot) {
+                        // Wait up to 400ms for the current slot's block to arrive before
+                        // computing the attestation target. Without this, lean attests to a
+                        // stale head, producing a target that diverges from other clients and
+                        // preventing justification. Mirrors leanSpec validator/service.py:323-336.
+                        let attest_deadline =
+                            tokio::time::Instant::now() + Duration::from_millis(400);
+                        loop {
+                            let has_block = store_for_validator
+                                .read()
+                                .blocks
+                                .values()
+                                .any(|b| b.slot.0 == current_slot);
+                            if has_block {
+                                info!(slot = current_slot, "Block arrived, proceeding with attestation");
+                                break;
+                            }
+                            if tokio::time::Instant::now() >= attest_deadline {
+                                info!(slot = current_slot, "Block wait timed out, attesting with current head");
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+
                         let (tx, rx) = oneshot::channel();
                         if validator_chain_sender
                             .send(ValidatorChainMessage::BuildAttestationData {
