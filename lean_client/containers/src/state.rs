@@ -866,8 +866,10 @@ impl State {
                                     .map(|proof| {
                                         let proof_validators: HashSet<u64> =
                                             proof.get_participant_indices().into_iter().collect();
-                                        let intersection: HashSet<u64> =
-                                            remaining.intersection(&proof_validators).copied().collect();
+                                        let intersection: HashSet<u64> = remaining
+                                            .intersection(&proof_validators)
+                                            .copied()
+                                            .collect();
                                         (proof, intersection)
                                     })
                                     .max_by_key(|(_, intersection)| intersection.len())
@@ -966,8 +968,10 @@ impl State {
         // AND a Phase 2 (children) proof for the same AttestationData.
         // Per spec, each AttestationData must appear at most once in the block body —
         // merge any such pairs into a single recursive proof via aggregate_with_children.
-        let mut proof_groups: HashMap<H256, Vec<(AggregatedAttestation, AggregatedSignatureProof)>> =
-            HashMap::new();
+        let mut proof_groups: HashMap<
+            H256,
+            Vec<(AggregatedAttestation, AggregatedSignatureProof)>,
+        > = HashMap::new();
         for (att, proof) in results {
             proof_groups
                 .entry(att.data.hash_tree_root())
@@ -1014,8 +1018,7 @@ impl State {
                     .collect();
                 all_validator_ids.sort();
                 all_validator_ids.dedup();
-                let all_participants =
-                    AggregationBits::from_validator_indices(&all_validator_ids);
+                let all_participants = AggregationBits::from_validator_indices(&all_validator_ids);
 
                 match AggregatedSignatureProof::aggregate_with_children(
                     all_participants.clone(),

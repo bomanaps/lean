@@ -3,8 +3,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Result, anyhow, ensure};
 use containers::{
     AggregatedSignatureProof, Attestation, AttestationData, Block, BlockHeader, Checkpoint, Config,
-    SignatureKey, SignedAggregatedAttestation, SignedAttestation, SignedBlock, Slot,
-    State,
+    SignatureKey, SignedAggregatedAttestation, SignedAttestation, SignedBlock, Slot, State,
 };
 use metrics::{METRICS, set_gauge_u64};
 use ssz::{H256, SszHash};

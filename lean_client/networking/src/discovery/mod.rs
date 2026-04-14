@@ -16,7 +16,7 @@ use libp2p_identity::{Keypair, PeerId};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::enr_ext::{EnrExt, QUIC6_ENR_KEY, QUIC_ENR_KEY};
+use crate::enr_ext::{EnrExt, QUIC_ENR_KEY, QUIC6_ENR_KEY};
 
 pub use config::DiscoveryConfig;
 

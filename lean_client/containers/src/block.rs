@@ -115,18 +115,23 @@ impl SignedBlock {
                     })
                     .collect::<Result<Vec<_>>>()?;
 
-                Ok((public_keys, attestation_data_root, slot, aggregated_signature))
+                Ok((
+                    public_keys,
+                    attestation_data_root,
+                    slot,
+                    aggregated_signature,
+                ))
             })
             .collect::<Result<Vec<_>>>()?;
 
         // Phase 2: verify all proofs in parallel (CPU-intensive XMSS verification)
-        verification_tasks
-            .into_par_iter()
-            .try_for_each(|(public_keys, attestation_data_root, slot, aggregated_signature)| {
+        verification_tasks.into_par_iter().try_for_each(
+            |(public_keys, attestation_data_root, slot, aggregated_signature)| {
                 aggregated_signature
                     .verify(public_keys, attestation_data_root, slot)
                     .context("attestation aggregated signature verification failed")
-            })?;
+            },
+        )?;
 
         // Verify the proposer's XMSS signature over the block root
         let proposer_index = block.proposer_index;

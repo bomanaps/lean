@@ -241,10 +241,12 @@ fn test_get_subscription_topics_aggregator_with_validator() {
     let kinds: Vec<_> = topics.iter().map(|t| t.kind.clone()).collect();
     assert!(kinds.contains(&GossipsubKind::Block));
     assert!(kinds.contains(&GossipsubKind::Aggregation));
-    assert!(kinds.contains(&GossipsubKind::AttestationSubnet(compute_subnet_id(
-        0,
-        TEST_SUBNET_COUNT
-    ))));
+    assert!(
+        kinds.contains(&GossipsubKind::AttestationSubnet(compute_subnet_id(
+            0,
+            TEST_SUBNET_COUNT
+        )))
+    );
 
     for topic in &topics {
         assert_eq!(topic.fork, "myfork");
@@ -254,8 +256,7 @@ fn test_get_subscription_topics_aggregator_with_validator() {
 #[test]
 fn test_get_subscription_topics_aggregator_no_validator_fallback() {
     // Aggregator with no registered validators falls back to subnet 0.
-    let topics =
-        get_subscription_topics("myfork".to_string(), &[], true, &[], TEST_SUBNET_COUNT);
+    let topics = get_subscription_topics("myfork".to_string(), &[], true, &[], TEST_SUBNET_COUNT);
 
     let kinds: Vec<_> = topics.iter().map(|t| t.kind.clone()).collect();
     assert!(kinds.contains(&GossipsubKind::Block));
@@ -282,10 +283,12 @@ fn test_get_subscription_topics_aggregator_explicit_subnets() {
     let kinds: Vec<_> = topics.iter().map(|t| t.kind.clone()).collect();
     assert!(kinds.contains(&GossipsubKind::Block));
     assert!(kinds.contains(&GossipsubKind::Aggregation));
-    assert!(kinds.contains(&GossipsubKind::AttestationSubnet(compute_subnet_id(
-        0,
-        TEST_SUBNET_COUNT
-    ))));
+    assert!(
+        kinds.contains(&GossipsubKind::AttestationSubnet(compute_subnet_id(
+            0,
+            TEST_SUBNET_COUNT
+        )))
+    );
     assert!(kinds.contains(&GossipsubKind::AttestationSubnet(1)));
     assert!(kinds.contains(&GossipsubKind::AttestationSubnet(2)));
 
@@ -312,10 +315,12 @@ fn test_get_subscription_topics_non_aggregator_validator() {
     let kinds: Vec<_> = topics.iter().map(|t| t.kind.clone()).collect();
     assert!(kinds.contains(&GossipsubKind::Block));
     assert!(kinds.contains(&GossipsubKind::Aggregation));
-    assert!(kinds.contains(&GossipsubKind::AttestationSubnet(compute_subnet_id(
-        validator_id,
-        TEST_SUBNET_COUNT
-    ))));
+    assert!(
+        kinds.contains(&GossipsubKind::AttestationSubnet(compute_subnet_id(
+            validator_id,
+            TEST_SUBNET_COUNT
+        )))
+    );
 
     for topic in &topics {
         assert_eq!(topic.fork, "myfork");
@@ -348,8 +353,7 @@ fn test_get_subscription_topics_non_aggregator_multi_validator() {
 fn test_get_subscription_topics_non_validator_skips_attestation() {
     // Non-validator, non-aggregator node subscribes to NO attestation topics (saves bandwidth).
     // This aligns with leanSpec PR #482: subnet filtering at the p2p subscription layer.
-    let topics =
-        get_subscription_topics("myfork".to_string(), &[], false, &[], TEST_SUBNET_COUNT);
+    let topics = get_subscription_topics("myfork".to_string(), &[], false, &[], TEST_SUBNET_COUNT);
 
     // Block + Aggregation only — no attestation subnets
     assert_eq!(topics.len(), 2);

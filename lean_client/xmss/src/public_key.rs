@@ -7,9 +7,12 @@ use core::{
 use anyhow::{Error, anyhow};
 use eth_ssz::DecodeError;
 use leansig_wrapper::{XmssPublicKey, xmss_public_key_from_ssz, xmss_public_key_to_ssz};
-use serde::{Deserialize, Serialize, de::{self, Visitor}};
+use serde::{
+    Deserialize, Serialize,
+    de::{self, Visitor},
+};
 use ssz::{BytesToDepth, MerkleTree, SszHash, SszRead, SszSize, SszWrite};
-use typenum::{U52, U1, Unsigned};
+use typenum::{U1, U52, Unsigned};
 
 type PublicKeySize = U52;
 

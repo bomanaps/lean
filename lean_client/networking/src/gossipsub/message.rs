@@ -20,8 +20,7 @@ impl GossipsubMessage {
     pub fn decode(topic: &TopicHash, data: &[u8]) -> Result<Self, String> {
         match GossipsubTopic::decode(topic)?.kind {
             GossipsubKind::Block => Ok(Self::Block(
-                SignedBlock::from_ssz_default(data)
-                    .map_err(|e| format!("{:?}", e))?,
+                SignedBlock::from_ssz_default(data).map_err(|e| format!("{:?}", e))?,
             )),
             GossipsubKind::AttestationSubnet(subnet_id) => Ok(Self::AttestationSubnet {
                 subnet_id,

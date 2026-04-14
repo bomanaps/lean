@@ -17,3 +17,4 @@ try_from_iterator = { workspace = true }
 typenum = { workspace = true }
 xmss = { workspace = true }
 zeroize = { workspace = true }
+rayon = { workspace = true }

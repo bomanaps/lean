@@ -4,15 +4,15 @@ use core::{
     str::FromStr,
 };
 
-use anyhow::{Error, anyhow, Result};
+use crate::public_key::PublicKey;
+use anyhow::{Error, Result, anyhow};
 use eth_ssz::DecodeError;
 use leansig_wrapper::{XmssSignature, xmss_signature_from_ssz, xmss_signature_to_ssz, xmss_verify};
 use metrics::METRICS;
 use serde::de;
 use serde::{Deserialize, Serialize};
 use ssz::{ByteVector, H256, Ssz};
-use crate::public_key::PublicKey;
-use typenum::{Sum, U2048, U256, U128, U64, U32, U8};
+use typenum::{Sum, U8, U32, U64, U128, U256, U2048};
 
 // 2536 = 2048 + 256 + 128 + 64 + 32 + 8
 type SignatureSize = Sum<Sum<Sum<Sum<Sum<U2048, U256>, U128>, U64>, U32>, U8>;
@@ -35,7 +35,12 @@ impl Signature {
     }
 
     pub fn verify(&self, public_key: &PublicKey, epoch: u32, message: H256) -> Result<()> {
-        match xmss_verify(&public_key.as_lean(), epoch, message.as_fixed_bytes(), &self.as_lean()) {
+        match xmss_verify(
+            &public_key.as_lean(),
+            epoch,
+            message.as_fixed_bytes(),
+            &self.as_lean(),
+        ) {
             Ok(()) => {
                 METRICS.get().map(|metrics| {
                     metrics.lean_pq_sig_attestation_signatures_valid_total.inc();

@@ -636,10 +636,12 @@ fn process_block_internal(
             adr.get(&key.data_root)
                 .map_or(true, |data| data.target.slot.0 > finalized_slot)
         });
-        store.latest_known_aggregated_payloads.retain(|data_root, _| {
-            adr.get(data_root)
-                .map_or(true, |data| data.target.slot.0 > finalized_slot)
-        });
+        store
+            .latest_known_aggregated_payloads
+            .retain(|data_root, _| {
+                adr.get(data_root)
+                    .map_or(true, |data| data.target.slot.0 > finalized_slot)
+            });
         store.latest_new_aggregated_payloads.retain(|data_root, _| {
             adr.get(data_root)
                 .map_or(true, |data| data.target.slot.0 > finalized_slot)

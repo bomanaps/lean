@@ -40,8 +40,7 @@ impl TryFrom<&[u8]> for SecretKey {
     type Error = Error;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        XmssSecretKey::from_bytes(value)
-            .map_err(|_| anyhow!("value is not valid secret key"))?;
+        XmssSecretKey::from_bytes(value).map_err(|_| anyhow!("value is not valid secret key"))?;
         Ok(Self(value.to_vec()))
     }
 }

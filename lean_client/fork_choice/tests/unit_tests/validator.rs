@@ -131,8 +131,9 @@ fn test_produce_block_with_attestations() {
     let slot = Slot(2);
     let validator_idx = 2;
 
-    let (_root, block, signatures) = produce_block_with_signatures(&mut store, slot, validator_idx, 1)
-        .expect("block production should succeed");
+    let (_root, block, signatures) =
+        produce_block_with_signatures(&mut store, slot, validator_idx, 1)
+            .expect("block production should succeed");
 
     // Block should include the 2 attestations we added (validators 5 and 6).
     // Attestations may be aggregated, so check the count matches signatures.
