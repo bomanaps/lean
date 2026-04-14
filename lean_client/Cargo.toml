@@ -246,9 +246,9 @@ features = { git = "https://github.com/grandinetech/grandine", rev = "64afdee3c6
 hex = "0.4.3"
 http_api_utils = { git = "https://github.com/grandinetech/grandine", rev = "64afdee3c6be79fceffb66933dcb69a943f3f1ae" }
 k256 = "0.13"
-rec_aggregation = { git = "https://github.com/leanEthereum/leanMultisig.git", rev = "fd8814045deb0ef8fcad4c9f4b1250ee33f7dd01" }
+rec_aggregation = { git = "https://github.com/leanEthereum/leanMultisig.git", rev = "2dc786778965742117927d0492e4771dec9c5d5d" }
 leansig = { git = "https://github.com/leanEthereum/leanSig", branch = "devnet4" }
-leansig_wrapper = { git = "https://github.com/leanEthereum/leanMultisig.git", rev = "fd8814045deb0ef8fcad4c9f4b1250ee33f7dd01" }
+leansig_wrapper = { git = "https://github.com/leanEthereum/leanMultisig.git", rev = "2dc786778965742117927d0492e4771dec9c5d5d" }
 libp2p = { version = "0.56.0", default-features = false, features = [
     'dns',
     'gossipsub',
