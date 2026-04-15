@@ -1,8 +1,8 @@
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use containers::{
-    Block, BlockBody, BlockHeader, BlockSignatures, Checkpoint, Config,
-    SignedBlock, Slot, State, Status, Validator,
+    Block, BlockBody, BlockHeader, BlockSignatures, Checkpoint, Config, SignedBlock, Slot, State,
+    Status, Validator,
 };
 use ethereum_types::H256;
 use features::Feature;
@@ -963,9 +963,8 @@ async fn main() -> Result<()> {
     // the aggregation task always sees the most recent trigger even if XMSS was
     // still running when a newer slot arrived. No trigger is ever silently dropped.
     let has_aggregator = vs_for_chain.is_some();
-    let mut aggregator = vs_for_chain.map(|vs| {
-        aggregation::AggregationService::new(vs, chain_log_inv_rate)
-    });
+    let mut aggregator =
+        vs_for_chain.map(|vs| aggregation::AggregationService::new(vs, chain_log_inv_rate));
 
     // Channel for the chain task to signal block arrival to the validator task.
     let (block_slot_tx, block_slot_rx) = watch::channel::<u64>(0);
@@ -1500,10 +1499,19 @@ async fn main() -> Result<()> {
                         if tokio::time::timeout(
                             Duration::from_millis(400),
                             block_slot_rx.wait_for(|s| *s >= current_slot),
-                        ).await.is_ok() {
-                            info!(slot = current_slot, "Block arrived, proceeding with attestation");
+                        )
+                        .await
+                        .is_ok()
+                        {
+                            info!(
+                                slot = current_slot,
+                                "Block arrived, proceeding with attestation"
+                            );
                         } else {
-                            info!(slot = current_slot, "Block wait timed out, attesting with current head");
+                            info!(
+                                slot = current_slot,
+                                "Block wait timed out, attesting with current head"
+                            );
                         }
 
                         let (tx, rx) = oneshot::channel();
