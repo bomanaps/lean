@@ -2,7 +2,7 @@ use anyhow::{Context as _, Result};
 use clap::Parser;
 use containers::{
     Block, BlockBody, BlockHeader, BlockSignatures, Checkpoint, Config,
-    SignedAggregatedAttestation, SignedBlock, Slot, State, Status, Validator,
+    SignedBlock, Slot, State, Status, Validator,
 };
 use ethereum_types::H256;
 use features::Feature;
@@ -29,7 +29,7 @@ use networking::types::{
 };
 use parking_lot::{Mutex, RwLock};
 use ssz::{PersistentList, SszHash, SszReadDefault as _};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -963,15 +963,9 @@ async fn main() -> Result<()> {
     // the aggregation task always sees the most recent trigger even if XMSS was
     // still running when a newer slot arrived. No trigger is ever silently dropped.
     let has_aggregator = vs_for_chain.is_some();
-    let (agg_tx, agg_rx) = watch::channel::<Option<(u64, Store)>>(None);
-    let (res_tx, mut res_rx) = mpsc::channel::<(
-        u64,
-        Option<(Vec<SignedAggregatedAttestation>, HashSet<H256>)>,
-    )>(4);
-
-    if let Some(vs) = vs_for_chain {
-        aggregation::spawn(vs, agg_rx, res_tx, chain_log_inv_rate);
-    }
+    let mut aggregator = vs_for_chain.map(|vs| {
+        aggregation::AggregationService::new(vs, chain_log_inv_rate)
+    });
 
     // Channel for the chain task to signal block arrival to the validator task.
     let (block_slot_tx, block_slot_rx) = watch::channel::<u64>(0);
@@ -1026,7 +1020,7 @@ async fn main() -> Result<()> {
                     // Results arrive here from the dedicated aggregation task.
                     // Draining every tick (800 ms) is fast enough to stay within
                     // the gossip broadcast window.
-                    while let Ok((agg_slot, maybe_agg)) = res_rx.try_recv() {
+                    while let Some((agg_slot, maybe_agg)) = aggregator.as_mut().and_then(|a| a.poll()) {
                         if let Some((aggregations, consumed_data_roots)) = maybe_agg {
                             for aggregation in aggregations {
                                 if let Err(e) = chain_outbound_sender.send(
@@ -1057,10 +1051,9 @@ async fn main() -> Result<()> {
                     if has_aggregator && current_interval >= 2 && current_slot > last_agg_slot {
                         last_agg_slot = current_slot;
                         let snapshot = store.read().clone();
-                        // watch::send() always overwrites — never drops a trigger.
-                        // If XMSS is still running, it will use the latest snapshot
-                        // after finishing; no slot is silently skipped.
-                        let _ = agg_tx.send(Some((current_slot, snapshot)));
+                        if let Some(ref agg) = aggregator {
+                            agg.trigger(current_slot, snapshot);
+                        }
                         info!(slot = current_slot, "Aggregation phase - triggered");
                     }
 
