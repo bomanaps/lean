@@ -15,7 +15,10 @@ use validator::ValidatorService;
 /// through [`trigger`] and [`poll`] instead of managing raw channel ends.
 pub struct AggregationService {
     agg_tx: watch::Sender<Option<(u64, Store)>>,
-    res_rx: mpsc::Receiver<(u64, Option<(Vec<SignedAggregatedAttestation>, HashSet<H256>)>)>,
+    res_rx: mpsc::Receiver<(
+        u64,
+        Option<(Vec<SignedAggregatedAttestation>, HashSet<H256>)>,
+    )>,
 }
 
 impl AggregationService {
@@ -36,10 +39,11 @@ impl AggregationService {
                     continue;
                 };
                 let vs = vs.clone();
-                let result =
-                    task::spawn_blocking(move || vs.maybe_aggregate(&snapshot, Slot(slot), log_rate))
-                        .await
-                        .unwrap_or(None);
+                let result = task::spawn_blocking(move || {
+                    vs.maybe_aggregate(&snapshot, Slot(slot), log_rate)
+                })
+                .await
+                .unwrap_or(None);
                 if res_tx.send((slot, result)).await.is_err() {
                     break; // chain task dropped — shut down
                 }
@@ -61,7 +65,10 @@ impl AggregationService {
     /// Returns the next completed aggregation result, or `None` if none is ready.
     pub fn poll(
         &mut self,
-    ) -> Option<(u64, Option<(Vec<SignedAggregatedAttestation>, HashSet<H256>)>)> {
+    ) -> Option<(
+        u64,
+        Option<(Vec<SignedAggregatedAttestation>, HashSet<H256>)>,
+    )> {
         self.res_rx.try_recv().ok()
     }
 }
