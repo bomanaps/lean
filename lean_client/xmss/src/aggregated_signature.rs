@@ -115,9 +115,12 @@ impl AggregatedSignature {
             );
         }
 
-        if public_keys.is_empty() && children.is_empty() {
+        if public_keys.is_empty() && children.len() < 2 {
             stop_and_discard(timer);
-            bail!("cannot aggregate: no raw signatures and no children");
+            bail!(
+                "cannot aggregate: no raw signatures provided, at least 2 children required (got {})",
+                children.len()
+            );
         }
 
         let sig_count = public_keys.len();
