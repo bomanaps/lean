@@ -118,25 +118,11 @@ impl Store {
 
         let target_checkpoint = self.get_attestation_target();
 
-        let head_state = self
-            .states
-            .get(&self.head)
-            .ok_or_else(|| anyhow!("head state not found"))?;
-
-        let source = if head_state.latest_justified.root.is_zero() {
-            Checkpoint {
-                root: self.head,
-                slot: head_state.latest_justified.slot,
-            }
-        } else {
-            head_state.latest_justified.clone()
-        };
-
         Ok(AttestationData {
             slot,
             head: head_checkpoint,
             target: target_checkpoint,
-            source,
+            source: self.latest_justified.clone(),
         })
     }
 
@@ -578,6 +564,7 @@ pub struct BlockProductionInputs {
     pub gossip_signatures: HashMap<SignatureKey, Signature>,
     pub aggregated_payloads: HashMap<H256, Vec<AggregatedSignatureProof>>,
     pub log_inv_rate: usize,
+    pub store_latest_justified: Checkpoint,
 }
 
 pub fn prepare_block_production(
@@ -654,6 +641,7 @@ pub fn prepare_block_production(
         gossip_signatures,
         aggregated_payloads,
         log_inv_rate,
+        store_latest_justified: store.latest_justified.clone(),
     })
 }
 
@@ -670,9 +658,10 @@ pub fn execute_block_production(
         gossip_signatures,
         aggregated_payloads,
         log_inv_rate,
+        store_latest_justified,
     } = inputs;
 
-    let (final_block, _final_post_state, _aggregated_attestations, signatures) = head_state
+    let (final_block, final_post_state, _aggregated_attestations, signatures) = head_state
         .build_block(
             slot,
             validator_index,
@@ -684,6 +673,13 @@ pub fn execute_block_production(
             Some(&aggregated_payloads),
             log_inv_rate,
         )?;
+
+    ensure!(
+        final_post_state.latest_justified.slot >= store_latest_justified.slot,
+        "Produced block justified={} < store justified={}. Fixed-point attestation loop did not converge.",
+        final_post_state.latest_justified.slot.0,
+        store_latest_justified.slot.0,
+    );
 
     let block_root = final_block.hash_tree_root();
 

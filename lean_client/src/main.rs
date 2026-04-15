@@ -37,12 +37,14 @@ use std::{io::IsTerminal, net::IpAddr};
 use tokio::{
     sync::{Notify, mpsc, oneshot, watch},
     task,
-    time::{Duration, Instant, MissedTickBehavior, interval, interval_at},
+    time::{Duration, Instant, interval, interval_at},
 };
 use tracing::level_filters::LevelFilter;
 use tracing::{debug, error, info, warn};
 use validator::{ValidatorConfig, ValidatorService};
 use xmss::{PublicKey, Signature};
+
+mod aggregation;
 
 fn load_node_key(path: &str) -> Result<Keypair, Box<dyn std::error::Error>> {
     let hex_str = std::fs::read_to_string(path)?.trim().to_string();
@@ -961,46 +963,24 @@ async fn main() -> Result<()> {
     // the aggregation task always sees the most recent trigger even if XMSS was
     // still running when a newer slot arrived. No trigger is ever silently dropped.
     let has_aggregator = vs_for_chain.is_some();
-    let (agg_tx, mut agg_rx) = watch::channel::<Option<(u64, Store)>>(None);
+    let (agg_tx, agg_rx) = watch::channel::<Option<(u64, Store)>>(None);
     let (res_tx, mut res_rx) = mpsc::channel::<(
         u64,
         Option<(Vec<SignedAggregatedAttestation>, HashSet<H256>)>,
     )>(4);
 
-    task::spawn(async move {
-        let Some(vs) = vs_for_chain else { return };
-        loop {
-            if agg_rx.changed().await.is_err() {
-                break; // sender dropped — chain task shut down
-            }
-            let Some((slot, snapshot)) = agg_rx.borrow_and_update().clone() else {
-                continue;
-            };
-            let vs = vs.clone();
-            let log_rate = chain_log_inv_rate;
-            let result =
-                task::spawn_blocking(move || vs.maybe_aggregate(&snapshot, Slot(slot), log_rate))
-                    .await
-                    .unwrap_or(None);
-            if res_tx.send((slot, result)).await.is_err() {
-                break; // chain task dropped — shut down
-            }
-        }
-    });
+    if let Some(vs) = vs_for_chain {
+        aggregation::spawn(vs, agg_rx, res_tx, chain_log_inv_rate);
+    }
 
-    // Clone the store Arc so the validator task can poll for block arrival
-    // without going through the chain task message channel.
-    let store_for_validator = store.clone();
+    // Channel for the chain task to signal block arrival to the validator task.
+    let (block_slot_tx, block_slot_rx) = watch::channel::<u64>(0);
 
     let chain_handle = task::spawn(async move {
         let mut tick_interval = interval_at(
             Instant::now() + genesis_tick_delay,
             Duration::from_millis(MILLIS_PER_INTERVAL),
         );
-        // Skip missed ticks instead of bursting: on_tick's while loop already
-        // catches up the store to wall-clock time, so replaying stale ticks is
-        // pure overhead that floods the executor with lock grabs and log writes.
-        tick_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut last_logged_slot = 0u64;
         // Track the last slot for which aggregation was triggered so the catch-up
         // guard never fires twice for the same slot.
@@ -1214,6 +1194,7 @@ async fn main() -> Result<()> {
                             match result {
                                 Ok(()) => {
                                     info!("Block processed successfully");
+                                    let _ = block_slot_tx.send(block_slot.0);
 
                                     {
                                         let s = store.read();
@@ -1425,6 +1406,7 @@ async fn main() -> Result<()> {
         let Some(vs) = vs_for_validator else {
             return;
         };
+        let mut block_slot_rx = block_slot_rx;
 
         let mut v_tick_interval = interval_at(
             Instant::now() + genesis_tick_delay,
@@ -1521,26 +1503,14 @@ async fn main() -> Result<()> {
                 1 => {
                     if last_attestation_slot != Some(current_slot) {
                         // Wait up to 400ms for the current slot's block to arrive before
-                        // computing the attestation target. Without this, lean attests to a
-                        // stale head, producing a target that diverges from other clients and
-                        // preventing justification. Mirrors leanSpec validator/service.py:323-336.
-                        let attest_deadline =
-                            tokio::time::Instant::now() + Duration::from_millis(400);
-                        loop {
-                            let has_block = store_for_validator
-                                .read()
-                                .blocks
-                                .values()
-                                .any(|b| b.slot.0 == current_slot);
-                            if has_block {
-                                info!(slot = current_slot, "Block arrived, proceeding with attestation");
-                                break;
-                            }
-                            if tokio::time::Instant::now() >= attest_deadline {
-                                info!(slot = current_slot, "Block wait timed out, attesting with current head");
-                                break;
-                            }
-                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        // computing the attestation target. Mirrors leanSpec validator/service.py:323-336.
+                        if tokio::time::timeout(
+                            Duration::from_millis(400),
+                            block_slot_rx.wait_for(|s| *s >= current_slot),
+                        ).await.is_ok() {
+                            info!(slot = current_slot, "Block arrived, proceeding with attestation");
+                        } else {
+                            info!(slot = current_slot, "Block wait timed out, attesting with current head");
                         }
 
                         let (tx, rx) = oneshot::channel();
