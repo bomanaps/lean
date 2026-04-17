@@ -162,6 +162,16 @@ pub struct Metrics {
 
     /// XMSS verifications skipped because the signature was already cached
     pub grandine_xmss_verify_skipped_total: IntCounter,
+
+    pub lean_block_building_time_seconds: Histogram,
+    pub lean_block_building_payload_aggregation_time_seconds: Histogram,
+    pub lean_block_aggregated_payloads: Histogram,
+    pub lean_block_building_success_total: IntCounter,
+    pub lean_block_building_failures_total: IntCounter,
+    pub lean_node_sync_status: GaugeVec,
+    pub lean_gossip_block_size_bytes: Histogram,
+    pub lean_gossip_attestation_size_bytes: Histogram,
+    pub lean_gossip_aggregation_size_bytes: Histogram,
 }
 
 impl Metrics {
@@ -366,7 +376,7 @@ impl Metrics {
                 histogram_opts!(
                     "lean_committee_signatures_aggregation_time_seconds",
                     "Time taken to aggregate committee signatures",
-                    vec![0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0]
+                    vec![0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 3.0, 4.0]
                 ),
             )?,
 
@@ -413,6 +423,62 @@ impl Metrics {
                 "grandine_xmss_verify_skipped_total",
                 "XMSS verifications skipped (signature already cached) — root cause 4 indicator",
             )?,
+
+            // Block Production Metrics
+            lean_block_building_time_seconds: Histogram::with_opts(histogram_opts!(
+                "lean_block_building_time_seconds",
+                "Time taken to build a block",
+                vec![0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0]
+            ))?,
+            lean_block_building_payload_aggregation_time_seconds: Histogram::with_opts(
+                histogram_opts!(
+                    "lean_block_building_payload_aggregation_time_seconds",
+                    "Time taken to build aggregated_payloads during block building",
+                    vec![0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 3.0, 4.0]
+                ),
+            )?,
+            lean_block_aggregated_payloads: Histogram::with_opts(histogram_opts!(
+                "lean_block_aggregated_payloads",
+                "Number of aggregated_payloads in a produced block",
+                vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]
+            ))?,
+            lean_block_building_success_total: IntCounter::new(
+                "lean_block_building_success_total",
+                "Total successful block builds",
+            )?,
+            lean_block_building_failures_total: IntCounter::new(
+                "lean_block_building_failures_total",
+                "Total failed block builds",
+            )?,
+
+            // Node Status
+            lean_node_sync_status: GaugeVec::new(
+                opts!("lean_node_sync_status", "Node sync status (idle/syncing/synced)"),
+                &["status"],
+            )?,
+
+            // Gossip Size Metrics
+            lean_gossip_block_size_bytes: Histogram::with_opts(histogram_opts!(
+                "lean_gossip_block_size_bytes",
+                "Bytes size of a gossip block message",
+                vec![
+                    10_000.0, 50_000.0, 100_000.0, 250_000.0, 500_000.0,
+                    1_000_000.0, 2_000_000.0, 5_000_000.0,
+                ]
+            ))?,
+            lean_gossip_attestation_size_bytes: Histogram::with_opts(histogram_opts!(
+                "lean_gossip_attestation_size_bytes",
+                "Bytes size of a gossip attestation message",
+                vec![512.0, 1_024.0, 2_048.0, 4_096.0, 8_192.0, 16_384.0]
+            ))?,
+            lean_gossip_aggregation_size_bytes: Histogram::with_opts(histogram_opts!(
+                "lean_gossip_aggregation_size_bytes",
+                "Bytes size of a gossip aggregated attestation message",
+                vec![
+                    1_024.0, 4_096.0, 16_384.0, 65_536.0, 131_072.0,
+                    262_144.0, 524_288.0, 1_048_576.0,
+                ]
+            ))?,
         })
     }
 
@@ -525,6 +591,27 @@ impl Metrics {
         default_registry.register(Box::new(self.grandine_fork_choice_new_attestations.clone()))?;
         default_registry.register(Box::new(self.grandine_xmss_verify_skipped_total.clone()))?;
 
+        // Block Production Metrics
+        default_registry.register(Box::new(self.lean_block_building_time_seconds.clone()))?;
+        default_registry.register(Box::new(
+            self.lean_block_building_payload_aggregation_time_seconds.clone(),
+        ))?;
+        default_registry.register(Box::new(self.lean_block_aggregated_payloads.clone()))?;
+        default_registry
+            .register(Box::new(self.lean_block_building_success_total.clone()))?;
+        default_registry
+            .register(Box::new(self.lean_block_building_failures_total.clone()))?;
+
+        // Node Status
+        default_registry.register(Box::new(self.lean_node_sync_status.clone()))?;
+
+        // Gossip Size Metrics
+        default_registry.register(Box::new(self.lean_gossip_block_size_bytes.clone()))?;
+        default_registry
+            .register(Box::new(self.lean_gossip_attestation_size_bytes.clone()))?;
+        default_registry
+            .register(Box::new(self.lean_gossip_aggregation_size_bytes.clone()))?;
+
         Ok(())
     }
 
@@ -544,6 +631,15 @@ impl Metrics {
         self.lean_node_start_time_seconds.set(timestamp);
 
         Ok(())
+    }
+
+    /// Sets the node sync status gauge. Exactly one of idle/syncing/synced is set to 1.
+    pub fn set_sync_status(&self, status: &str) {
+        for s in &["idle", "syncing", "synced"] {
+            self.lean_node_sync_status
+                .with_label_values(&[s])
+                .set(if *s == status { 1.0 } else { 0.0 });
+        }
     }
 
     /// Increments successfull peer connection event count metric.
