@@ -273,6 +273,7 @@ fn check_sync_trigger(state: &mut SyncState, head_slot: u64, network_finalized: 
         let prev = *state;
         *state = SyncState::Syncing;
         info!(head_slot, network_finalized = nf, prev = ?prev, "Sync state: → SYNCING");
+        METRICS.get().map(|m| m.set_sync_status("syncing"));
     }
 }
 
@@ -298,6 +299,7 @@ fn check_sync_complete(
             network_finalized = nf,
             "Sync state: SYNCING → SYNCED"
         );
+        METRICS.get().map(|m| m.set_sync_status("synced"));
     }
 }
 
@@ -308,6 +310,7 @@ fn check_sync_idle(state: &mut SyncState) {
     let prev = *state;
     *state = SyncState::Idle;
     info!(prev = ?prev, "Sync state: → IDLE (no peers)");
+    METRICS.get().map(|m| m.set_sync_status("idle"));
 }
 
 fn evaluate_sync_state(
@@ -684,7 +687,7 @@ async fn main() -> Result<()> {
         });
     }
 
-    let fork = "devnet0".to_string();
+    let fork = "12345678".to_string();
     // Subscribe to topics based on validator role (leanSpec PR #482):
     // - All validators: subscribe to each validator's derived subnet
     // - Aggregators: additionally subscribe to explicit aggregate_subnet_ids
@@ -985,6 +988,9 @@ async fn main() -> Result<()> {
         } else {
             SyncState::Idle
         };
+        METRICS
+            .get()
+            .map(|m| m.set_sync_status(if has_aggregator { "syncing" } else { "idle" }));
 
         let peer_count = peer_count_for_status;
 
@@ -1353,14 +1359,20 @@ async fn main() -> Result<()> {
                     let Some(v_message) = v_message else { break };
                     match v_message {
                         ValidatorChainMessage::ProduceBlock { slot, proposer_index, sender } => {
+                            let block_build_start = Instant::now();
                             let prepare_result = {
                                 let mut w = store.write();
                                 prepare_block_production(&mut *w, slot, proposer_index, chain_log_inv_rate)
                             };
 
                             match prepare_result {
-                                Err(e) => { let _ = sender.send(Err(e)); }
+                                Err(e) => {
+                                    METRICS.get().map(|m| m.lean_block_building_failures_total.inc());
+                                    let _ = sender.send(Err(e));
+                                }
                                 Ok(inputs) => {
+                                    let agg_payload_count = inputs.aggregated_payloads.len();
+                                    let exec_start = Instant::now();
                                     let result = task::spawn_blocking(move || {
                                         execute_block_production(inputs)
                                             .map(|(_, block, sigs)| (block, sigs))
@@ -1368,6 +1380,24 @@ async fn main() -> Result<()> {
                                     .await
                                     .unwrap_or_else(|e| Err(anyhow::anyhow!("block production task panicked: {e}")));
 
+                                    let exec_elapsed = exec_start.elapsed();
+                                    let total_elapsed = block_build_start.elapsed();
+                                    match &result {
+                                        Ok(_) => {
+                                            METRICS.get().map(|m| {
+                                                m.lean_block_building_success_total.inc();
+                                                m.lean_block_building_time_seconds
+                                                    .observe(total_elapsed.as_secs_f64());
+                                                m.lean_block_building_payload_aggregation_time_seconds
+                                                    .observe(exec_elapsed.as_secs_f64());
+                                                m.lean_block_aggregated_payloads
+                                                    .observe(agg_payload_count as f64);
+                                            });
+                                        }
+                                        Err(_) => {
+                                            METRICS.get().map(|m| m.lean_block_building_failures_total.inc());
+                                        }
+                                    }
                                     let _ = sender.send(result);
                                 }
                             }
