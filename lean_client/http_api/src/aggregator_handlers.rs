@@ -1,18 +1,19 @@
 /// Admin endpoint handlers for toggling the aggregator role at runtime.
 use axum::{
-    Extension,
-    body::Bytes,
+    Json,
+    extract::{State, rejection::JsonRejection},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde_json::json;
 
-use metrics::METRICS;
+use crate::aggregator_controller::SharedController;
 
-use crate::aggregator_controller::AggregatorControllerHandle;
-
-/// Convenience alias used by the routing layer.
-pub type SharedController = Option<AggregatorControllerHandle>;
+#[derive(Deserialize)]
+pub(crate) struct ToggleRequest {
+    enabled: bool,
+}
 
 /// Handle `GET /lean/v0/admin/aggregator`.
 ///
@@ -21,18 +22,20 @@ pub type SharedController = Option<AggregatorControllerHandle>;
 /// **Responses**
 /// - `200 OK` — `{"is_aggregator": bool}`
 /// - `503 Service Unavailable` — controller not wired (typical in test nodes)
-pub async fn handle_status(
-    Extension(ctrl): Extension<SharedController>,
-) -> Response {
+pub async fn handle_status(State(ctrl): State<SharedController>) -> Response {
     let Some(ctrl) = ctrl else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(json!({"error": "Aggregator controller not available"})),
+            Json(json!({"error": "Aggregator controller not available"})),
         )
             .into_response();
     };
 
-    (StatusCode::OK, axum::Json(json!({"is_aggregator": ctrl.is_enabled()}))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({"is_aggregator": ctrl.is_enabled()})),
+    )
+        .into_response()
 }
 
 /// Handle `POST /lean/v0/admin/aggregator`.
@@ -48,54 +51,34 @@ pub async fn handle_status(
 /// - `400 Bad Request` — body missing, malformed, or wrong field types
 /// - `503 Service Unavailable` — controller not wired
 pub async fn handle_toggle(
-    Extension(ctrl): Extension<SharedController>,
-    body: Bytes,
+    State(ctrl): State<SharedController>,
+    body: Result<Json<ToggleRequest>, JsonRejection>,
 ) -> Response {
     let Some(ctrl) = ctrl else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(json!({"error": "Aggregator controller not available"})),
+            Json(json!({"error": "Aggregator controller not available"})),
         )
             .into_response();
     };
 
-    let payload: Value = match serde_json::from_slice(&body) {
-        Ok(v) => v,
+    let Json(req) = match body {
+        Ok(j) => j,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                axum::Json(json!({"error": "Invalid JSON body"})),
+                Json(json!({"error": "Invalid or malformed request body"})),
             )
                 .into_response();
         }
     };
 
-    let Some(enabled_val) = payload.get("enabled") else {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": "Missing 'enabled' field in body"})),
-        )
-            .into_response();
-    };
-
-    // `as_bool()` returns None for JSON numbers like 0/1, rejecting them
-    // explicitly as the spec requires (aggregator.py line 70).
-    let Some(enabled) = enabled_val.as_bool() else {
-        return (
-            StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": "'enabled' must be a boolean"})),
-        )
-            .into_response();
-    };
-
-    let previous = ctrl.set_enabled(enabled).await;
-
-    METRICS.get().map(|m| m.lean_is_aggregator.set(if enabled { 1 } else { 0 }));
+    let previous = ctrl.set_enabled(req.enabled).await;
 
     let response_body = json!({
-        "is_aggregator": enabled,
+        "is_aggregator": req.enabled,
         "previous": previous,
     });
 
-    (StatusCode::OK, axum::Json(response_body)).into_response()
+    (StatusCode::OK, Json(response_body)).into_response()
 }

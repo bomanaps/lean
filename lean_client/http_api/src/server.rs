@@ -5,9 +5,7 @@ use futures::{TryFutureExt as _, future::FutureExt as _};
 use tracing::info;
 
 use crate::{
-    aggregator_handlers::SharedController,
-    config::HttpServerConfig,
-    handlers::SharedStore,
+    aggregator_controller::SharedController, config::HttpServerConfig, handlers::SharedStore,
     routing::normal_routes,
 };
 

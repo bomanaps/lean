@@ -2,7 +2,7 @@ pub mod aggregator_controller;
 mod aggregator_handlers;
 mod config;
 pub mod handlers;
-mod routing;
+pub mod routing;
 mod server;
 
 pub use aggregator_controller::AggregatorController;

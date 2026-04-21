@@ -12,10 +12,15 @@ use tokio::sync::Mutex;
 use tracing::info;
 use validator::ValidatorService;
 
+use metrics::METRICS;
+
 use crate::handlers::SharedStore;
 
-/// Shared handle passed into axum handlers via `Extension`.
+/// Shared handle wrapped by [`SharedController`] and passed into axum handlers via `State`.
 pub type AggregatorControllerHandle = Arc<AggregatorController>;
+
+/// Shared controller passed into axum handlers via `State`.
+pub type SharedController = Option<AggregatorControllerHandle>;
 
 /// Runtime control over the node's aggregator role.
 ///
@@ -43,10 +48,7 @@ impl AggregatorController {
     /// # Arguments
     /// * `store` — shared forkchoice store
     /// * `validator_service` — optional validator service
-    pub fn new(
-        store: SharedStore,
-        validator_service: Option<Arc<ValidatorService>>,
-    ) -> Self {
+    pub fn new(store: SharedStore, validator_service: Option<Arc<ValidatorService>>) -> Self {
         Self {
             store,
             validator_service,
@@ -81,6 +83,10 @@ impl AggregatorController {
             vs.set_is_aggregator(enabled);
         }
 
+        METRICS
+            .get()
+            .map(|m| m.lean_is_aggregator.set(if enabled { 1 } else { 0 }));
+
         if previous != enabled {
             info!(
                 is_aggregator = enabled,
@@ -91,5 +97,4 @@ impl AggregatorController {
 
         previous
     }
-
 }

@@ -15,6 +15,15 @@ pub struct HttpServerConfig {
     http_port: u16,
 }
 
+impl Default for HttpServerConfig {
+    fn default() -> Self {
+        Self {
+            http_address: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            http_port: DEFAULT_HTTP_PORT,
+        }
+    }
+}
+
 impl HttpServerConfig {
     pub(crate) async fn listener(&self) -> Result<TcpListener> {
         TcpListener::bind(self.address()).await.map_err(Into::into)
