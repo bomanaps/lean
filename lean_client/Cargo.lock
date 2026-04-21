@@ -2390,6 +2390,7 @@ dependencies = [
  "tokio",
  "tower-http",
  "tracing",
+ "validator",
 ]
 
 [[package]]

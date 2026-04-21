@@ -1,6 +1,7 @@
 // Lean validator client with XMSS signing support
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Deserialize;
 
@@ -98,8 +99,10 @@ pub struct ValidatorService {
     pub config: ValidatorConfig,
     pub num_validators: u64,
     key_manager: Option<KeyManager>,
-    /// Whether this node performs aggregation duties (devnet-3)
-    is_aggregator: bool,
+    /// Whether this node performs aggregation duties (devnet-3).
+    /// Uses `AtomicBool` for interior mutability so the admin API can toggle
+    /// the flag at runtime without requiring `&mut self` or a write lock.
+    is_aggregator: AtomicBool,
 }
 
 /// Greedily extend `children` with proofs from `candidates` that maximally cover
@@ -175,7 +178,7 @@ impl ValidatorService {
             config,
             num_validators,
             key_manager: None,
-            is_aggregator,
+            is_aggregator: AtomicBool::new(is_aggregator),
         }
     }
 
@@ -227,7 +230,7 @@ impl ValidatorService {
             config,
             num_validators,
             key_manager: Some(key_manager),
-            is_aggregator,
+            is_aggregator: AtomicBool::new(is_aggregator),
         })
     }
 
@@ -248,7 +251,21 @@ impl ValidatorService {
     /// For devnet-3, aggregator selection is simplified: a node is an aggregator
     /// if it has validator duties and is_aggregator is enabled via config
     pub fn is_aggregator_for_slot(&self, _slot: Slot) -> bool {
-        self.is_aggregator && !self.config.validator_indices.is_empty()
+        self.is_aggregator.load(Ordering::Relaxed) && !self.config.validator_indices.is_empty()
+    }
+
+    /// Return the current aggregator flag value.
+    pub fn get_is_aggregator(&self) -> bool {
+        self.is_aggregator.load(Ordering::Relaxed)
+    }
+
+    /// Set the aggregator flag at runtime.
+    ///
+    /// Called by `AggregatorController` when an admin API request toggles
+    /// the role.  Uses `Relaxed` ordering because the flag is coordinated
+    /// under the controller's `tokio::sync::Mutex` before this is called.
+    pub fn set_is_aggregator(&self, enabled: bool) {
+        self.is_aggregator.store(enabled, Ordering::Relaxed);
     }
 
     /// Perform aggregation duty if this node is an aggregator.
@@ -563,6 +580,12 @@ impl ValidatorService {
             );
             return vec![];
         }
+
+        let _production_timer = METRICS.get().map(|metrics| {
+            metrics
+                .lean_attestations_production_time_seconds
+                .start_timer()
+        });
 
         self.config
             .validator_indices

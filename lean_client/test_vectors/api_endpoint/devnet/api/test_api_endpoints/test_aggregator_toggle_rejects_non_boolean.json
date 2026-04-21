@@ -1,0 +1,25 @@
+{
+    "tests/consensus/devnet/api/test_api_endpoints.py::test_aggregator_toggle_rejects_non_boolean[fork_Devnet][fork_devnet-api_endpoint]": {
+        "network": "Devnet",
+        "leanEnv": "prod",
+        "endpoint": "/lean/v0/admin/aggregator",
+        "method": "POST",
+        "initialIsAggregator": false,
+        "requestBody": {
+            "enabled": "yes"
+        },
+        "genesisParams": {
+            "numValidators": 4,
+            "genesisTime": 0
+        },
+        "expectedStatusCode": 400,
+        "expectedContentType": "application/json",
+        "expectedBody": null,
+        "_info": {
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/devnet/api/test_api_endpoints.py::test_aggregator_toggle_rejects_non_boolean[fork_Devnet]",
+            "description": "POST with non-boolean enabled returns 400.",
+            "fixtureFormat": "api_endpoint"
+        }
+    }
+}

@@ -72,6 +72,9 @@ pub struct Metrics {
     /// Time taken to validate attestation
     pub lean_attestation_validation_time_seconds: Histogram,
 
+    /// Time taken to produce attestations
+    pub lean_attestations_production_time_seconds: Histogram,
+
     /// Total number of fork choice reorgs
     pub lean_fork_choice_reorgs_total: IntCounter,
 
@@ -272,6 +275,11 @@ impl Metrics {
                 "lean_attestation_validation_time_seconds",
                 "Time taken to validate attestation",
                 vec![0.005, 0.01, 0.025, 0.05, 0.1, 1.0]
+            ))?,
+            lean_attestations_production_time_seconds: Histogram::with_opts(histogram_opts!(
+                "lean_attestations_production_time_seconds",
+                "Time taken to produce attestations",
+                vec![0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0]
             ))?,
             lean_fork_choice_reorgs_total: IntCounter::new(
                 "lean_fork_choice_reorgs_total",
@@ -550,6 +558,9 @@ impl Metrics {
         default_registry.register(Box::new(self.lean_attestations_invalid_total.clone()))?;
         default_registry.register(Box::new(
             self.lean_attestation_validation_time_seconds.clone(),
+        ))?;
+        default_registry.register(Box::new(
+            self.lean_attestations_production_time_seconds.clone(),
         ))?;
         default_registry.register(Box::new(self.lean_fork_choice_reorgs_total.clone()))?;
         default_registry.register(Box::new(self.lean_fork_choice_reorg_depth.clone()))?;

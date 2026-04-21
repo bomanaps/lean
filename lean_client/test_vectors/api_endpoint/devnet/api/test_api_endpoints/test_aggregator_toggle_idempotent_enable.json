@@ -1,0 +1,28 @@
+{
+    "tests/consensus/devnet/api/test_api_endpoints.py::test_aggregator_toggle_idempotent_enable[fork_Devnet][fork_devnet-api_endpoint]": {
+        "network": "Devnet",
+        "leanEnv": "prod",
+        "endpoint": "/lean/v0/admin/aggregator",
+        "method": "POST",
+        "initialIsAggregator": true,
+        "requestBody": {
+            "enabled": true
+        },
+        "genesisParams": {
+            "numValidators": 4,
+            "genesisTime": 0
+        },
+        "expectedStatusCode": 200,
+        "expectedContentType": "application/json",
+        "expectedBody": {
+            "is_aggregator": true,
+            "previous": true
+        },
+        "_info": {
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/devnet/api/test_api_endpoints.py::test_aggregator_toggle_idempotent_enable[fork_Devnet]",
+            "description": "POST enable=true on an already-enabled node returns previous=true and is a no-op.",
+            "fixtureFormat": "api_endpoint"
+        }
+    }
+}
