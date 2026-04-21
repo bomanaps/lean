@@ -888,68 +888,88 @@ impl State {
                             }
 
                             if !phase2_children.is_empty() {
-                                let child_pk_vecs: Vec<Vec<PublicKey>> = phase2_children
-                                    .iter()
-                                    .map(|child| {
-                                        child
-                                            .get_participant_indices()
-                                            .into_iter()
-                                            .filter_map(|vid| {
-                                                self.validators
-                                                    .get(vid)
-                                                    .ok()
-                                                    .map(|v| v.attestation_pubkey.clone())
-                                            })
-                                            .collect()
-                                    })
-                                    .collect();
+                                if phase2_children.len() == 1 {
+                                    // leanSpec state.py: `if len(proofs) == 1: sig = proofs[0]`
+                                    // Single proof: pass through directly without re-aggregating.
+                                    let single_proof = (*phase2_children[0]).clone();
+                                    let phase2_participants = single_proof.participants.clone();
 
-                                let children_arg: Vec<(&[PublicKey], &AggregatedSignatureProof)> =
-                                    child_pk_vecs
+                                    info!(
+                                        slot = data.slot.0,
+                                        validators = phase2_children[0].get_participant_indices().len(),
+                                        "Phase 2: single proof passed through directly"
+                                    );
+                                    results.push((
+                                        AggregatedAttestation {
+                                            aggregation_bits: phase2_participants,
+                                            data: data.clone(),
+                                        },
+                                        single_proof,
+                                    ));
+                                } else {
+                                    let child_pk_vecs: Vec<Vec<PublicKey>> = phase2_children
                                         .iter()
-                                        .zip(phase2_children.iter())
-                                        .map(|(pks, proof)| (pks.as_slice(), *proof))
+                                        .map(|child| {
+                                            child
+                                                .get_participant_indices()
+                                                .into_iter()
+                                                .filter_map(|vid| {
+                                                    self.validators
+                                                        .get(vid)
+                                                        .ok()
+                                                        .map(|v| v.attestation_pubkey.clone())
+                                                })
+                                                .collect()
+                                        })
                                         .collect();
 
-                                let mut phase2_validator_ids: Vec<u64> = phase2_children
-                                    .iter()
-                                    .flat_map(|child| child.get_participant_indices())
-                                    .collect();
-                                phase2_validator_ids.sort();
-                                phase2_validator_ids.dedup();
+                                    let children_arg: Vec<(&[PublicKey], &AggregatedSignatureProof)> =
+                                        child_pk_vecs
+                                            .iter()
+                                            .zip(phase2_children.iter())
+                                            .map(|(pks, proof)| (pks.as_slice(), *proof))
+                                            .collect();
 
-                                let phase2_participants =
-                                    AggregationBits::from_validator_indices(&phase2_validator_ids);
+                                    let mut phase2_validator_ids: Vec<u64> = phase2_children
+                                        .iter()
+                                        .flat_map(|child| child.get_participant_indices())
+                                        .collect();
+                                    phase2_validator_ids.sort();
+                                    phase2_validator_ids.dedup();
 
-                                match AggregatedSignatureProof::aggregate_with_children(
-                                    phase2_participants.clone(),
-                                    &children_arg,
-                                    Vec::<PublicKey>::new(),
-                                    Vec::<Signature>::new(),
-                                    data_root,
-                                    data.slot.0 as u32,
-                                    log_inv_rate,
-                                ) {
-                                    Ok(proof) => {
-                                        info!(
-                                            slot = data.slot.0,
-                                            children = phase2_children.len(),
-                                            validators = phase2_validator_ids.len(),
-                                            "Phase 2: recursive block proof via aggregate_with_children"
-                                        );
-                                        results.push((
-                                            AggregatedAttestation {
-                                                aggregation_bits: phase2_participants,
-                                                data: data.clone(),
-                                            },
-                                            proof,
-                                        ));
-                                    }
-                                    Err(e) => {
-                                        warn!(
-                                            error = %e,
-                                            "Phase 2 recursive aggregation failed, skipping"
-                                        );
+                                    let phase2_participants =
+                                        AggregationBits::from_validator_indices(&phase2_validator_ids);
+
+                                    match AggregatedSignatureProof::aggregate_with_children(
+                                        phase2_participants.clone(),
+                                        &children_arg,
+                                        Vec::<PublicKey>::new(),
+                                        Vec::<Signature>::new(),
+                                        data_root,
+                                        data.slot.0 as u32,
+                                        log_inv_rate,
+                                    ) {
+                                        Ok(proof) => {
+                                            info!(
+                                                slot = data.slot.0,
+                                                children = phase2_children.len(),
+                                                validators = phase2_validator_ids.len(),
+                                                "Phase 2: recursive block proof via aggregate_with_children"
+                                            );
+                                            results.push((
+                                                AggregatedAttestation {
+                                                    aggregation_bits: phase2_participants,
+                                                    data: data.clone(),
+                                                },
+                                                proof,
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                error = %e,
+                                                "Phase 2 recursive aggregation failed, skipping"
+                                            );
+                                        }
                                     }
                                 }
                             }

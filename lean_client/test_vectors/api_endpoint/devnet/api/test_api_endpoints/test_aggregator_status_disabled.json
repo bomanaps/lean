@@ -1,0 +1,24 @@
+{
+    "tests/consensus/devnet/api/test_api_endpoints.py::test_aggregator_status_disabled[fork_Devnet][fork_devnet-api_endpoint]": {
+        "network": "Devnet",
+        "leanEnv": "prod",
+        "endpoint": "/lean/v0/admin/aggregator",
+        "method": "GET",
+        "initialIsAggregator": false,
+        "genesisParams": {
+            "numValidators": 4,
+            "genesisTime": 0
+        },
+        "expectedStatusCode": 200,
+        "expectedContentType": "application/json",
+        "expectedBody": {
+            "is_aggregator": false
+        },
+        "_info": {
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/devnet/api/test_api_endpoints.py::test_aggregator_status_disabled[fork_Devnet]",
+            "description": "GET aggregator status on a node started with aggregator disabled.",
+            "fixtureFormat": "api_endpoint"
+        }
+    }
+}

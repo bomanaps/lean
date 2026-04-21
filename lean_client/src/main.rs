@@ -17,7 +17,7 @@ use fork_choice::{
     },
     sync_state::SyncState,
 };
-use http_api::HttpServerConfig;
+use http_api::{AggregatorController, HttpServerConfig};
 use libp2p_identity::Keypair;
 use metrics::{METRICS, Metrics, MetricsServerConfig};
 use networking::gossipsub::config::GossipsubConfig;
@@ -661,6 +661,8 @@ async fn main() -> Result<()> {
     let vs_for_chain = validator_service.clone();
     // Validator task: takes ownership for proposal and attestation duties
     let vs_for_validator = validator_service.clone();
+    // Admin API controller: toggles is_aggregator at runtime on both store and validator service
+    let vs_for_controller = validator_service.clone();
     // Validator task needs to send ProcessBlock / ProcessAttestation back to the chain task
     let chain_msg_sender_for_validator = chain_message_sender.clone();
 
@@ -926,8 +928,12 @@ async fn main() -> Result<()> {
     let chain_outbound_sender = outbound_p2p_sender.clone();
 
     let http_store = store.clone();
+    let aggregator_controller =
+        Arc::new(AggregatorController::new(store.clone(), vs_for_controller));
     task::spawn(async move {
-        if let Err(err) = http_api::run_server(args.http_config, http_store).await {
+        if let Err(err) =
+            http_api::run_server(args.http_config, http_store, Some(aggregator_controller)).await
+        {
             error!("HTTP Server failed with error: {err:?}");
         }
     });

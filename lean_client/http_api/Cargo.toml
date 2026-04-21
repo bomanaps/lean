@@ -8,6 +8,7 @@ anyhow = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
 fork_choice = { workspace = true }
+validator = { workspace = true }
 futures = { workspace = true }
 hex = { workspace = true }
 metrics = { workspace = true }

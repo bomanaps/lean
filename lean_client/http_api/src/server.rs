@@ -4,10 +4,19 @@ use anyhow::{Context, Error as AnyhowError, Result};
 use futures::{TryFutureExt as _, future::FutureExt as _};
 use tracing::info;
 
-use crate::{config::HttpServerConfig, handlers::SharedStore, routing::normal_routes};
+use crate::{
+    aggregator_handlers::SharedController,
+    config::HttpServerConfig,
+    handlers::SharedStore,
+    routing::normal_routes,
+};
 
-pub async fn run_server(config: HttpServerConfig, store: SharedStore) -> Result<()> {
-    let router = normal_routes(&config, store);
+pub async fn run_server(
+    config: HttpServerConfig,
+    store: SharedStore,
+    aggregator_controller: SharedController,
+) -> Result<()> {
+    let router = normal_routes(&config, store, aggregator_controller);
 
     let listener = config
         .listener()

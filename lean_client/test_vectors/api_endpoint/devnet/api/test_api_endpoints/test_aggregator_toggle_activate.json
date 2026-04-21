@@ -1,0 +1,28 @@
+{
+    "tests/consensus/devnet/api/test_api_endpoints.py::test_aggregator_toggle_activate[fork_Devnet][fork_devnet-api_endpoint]": {
+        "network": "Devnet",
+        "leanEnv": "prod",
+        "endpoint": "/lean/v0/admin/aggregator",
+        "method": "POST",
+        "initialIsAggregator": false,
+        "requestBody": {
+            "enabled": true
+        },
+        "genesisParams": {
+            "numValidators": 4,
+            "genesisTime": 0
+        },
+        "expectedStatusCode": 200,
+        "expectedContentType": "application/json",
+        "expectedBody": {
+            "is_aggregator": true,
+            "previous": false
+        },
+        "_info": {
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/devnet/api/test_api_endpoints.py::test_aggregator_toggle_activate[fork_Devnet]",
+            "description": "POST enable=true flips the role from off to on.",
+            "fixtureFormat": "api_endpoint"
+        }
+    }
+}
