@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::State,
+    extract::{FromRef, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -11,7 +11,27 @@ use parking_lot::RwLock;
 use serde_json::{Value, json};
 use ssz::SszWrite;
 
+use crate::aggregator_controller::SharedController;
+
 pub type SharedStore = Arc<RwLock<Store>>;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub store: SharedStore,
+    pub controller: SharedController,
+}
+
+impl FromRef<AppState> for SharedStore {
+    fn from_ref(app_state: &AppState) -> Self {
+        app_state.store.clone()
+    }
+}
+
+impl FromRef<AppState> for SharedController {
+    fn from_ref(app_state: &AppState) -> Self {
+        app_state.controller.clone()
+    }
+}
 
 pub async fn health() -> impl IntoResponse {
     Json(json!({

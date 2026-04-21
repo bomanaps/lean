@@ -896,7 +896,8 @@ impl State {
 
                                     info!(
                                         slot = data.slot.0,
-                                        validators = phase2_children[0].get_participant_indices().len(),
+                                        validators =
+                                            phase2_children[0].get_participant_indices().len(),
                                         "Phase 2: single proof passed through directly"
                                     );
                                     results.push((
@@ -923,12 +924,14 @@ impl State {
                                         })
                                         .collect();
 
-                                    let children_arg: Vec<(&[PublicKey], &AggregatedSignatureProof)> =
-                                        child_pk_vecs
-                                            .iter()
-                                            .zip(phase2_children.iter())
-                                            .map(|(pks, proof)| (pks.as_slice(), *proof))
-                                            .collect();
+                                    let children_arg: Vec<(
+                                        &[PublicKey],
+                                        &AggregatedSignatureProof,
+                                    )> = child_pk_vecs
+                                        .iter()
+                                        .zip(phase2_children.iter())
+                                        .map(|(pks, proof)| (pks.as_slice(), *proof))
+                                        .collect();
 
                                     let mut phase2_validator_ids: Vec<u64> = phase2_children
                                         .iter()
@@ -938,7 +941,9 @@ impl State {
                                     phase2_validator_ids.dedup();
 
                                     let phase2_participants =
-                                        AggregationBits::from_validator_indices(&phase2_validator_ids);
+                                        AggregationBits::from_validator_indices(
+                                            &phase2_validator_ids,
+                                        );
 
                                     match AggregatedSignatureProof::aggregate_with_children(
                                         phase2_participants.clone(),
