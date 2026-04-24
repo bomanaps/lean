@@ -244,6 +244,7 @@ ethereum-types = "0.14"
 futures = "0.3"
 features = { git = "https://github.com/grandinetech/grandine", rev = "64afdee3c6be79fceffb66933dcb69a943f3f1ae" }
 hex = "0.4.3"
+http-body-util = "0.1"
 http_api_utils = { git = "https://github.com/grandinetech/grandine", rev = "64afdee3c6be79fceffb66933dcb69a943f3f1ae" }
 k256 = "0.13"
 rec_aggregation = { git = "https://github.com/leanEthereum/leanMultisig.git", rev = "2eb4b9d983171139af36749f127dd9890c9109e6" }
@@ -287,6 +288,7 @@ test-generator = "0.3.1"
 thiserror = "2"
 tiny-keccak = "2.0.2"
 tokio = { version = "1.0", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = '0.6', features = ['cors', 'trace'] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
