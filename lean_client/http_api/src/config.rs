@@ -8,10 +8,10 @@ const DEFAULT_HTTP_PORT: u16 = 8080;
 
 #[derive(Debug, Clone, Args)]
 pub struct HttpServerConfig {
-    #[clap(long = "http-address", default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
+    #[clap(long = "http-address", default_value_t = HttpServerConfig::default().http_address)]
     http_address: IpAddr,
 
-    #[clap(long = "http-port", default_value_t = DEFAULT_HTTP_PORT)]
+    #[clap(long = "http-port", default_value_t = HttpServerConfig::default().http_port)]
     http_port: u16,
 }
 

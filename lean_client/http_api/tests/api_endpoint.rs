@@ -2,24 +2,24 @@
 ///
 /// Discovers all JSON files under `test_vectors/api_endpoint/` and for each:
 ///   1. Deserialises the test-vector fields.
-///   2. Spins up an axum HTTP server on a random port with the aggregator
-///      controller seeded from `initialIsAggregator`.
-///   3. Issues the specified HTTP request (GET or POST).
-///   4. Asserts status code, Content-Type, and response body match the
-///      expected values recorded in the test vector.
+///   2. Builds the axum router with the aggregator controller seeded from
+///      `initialIsAggregator`.
+///   3. Drives the router directly via `tower::ServiceExt::oneshot` (no TCP).
+///   4. Asserts status code, Content-Type, and response body match.
 use std::{collections::HashMap, fs, path::Path, sync::Arc};
 
+use axum::{
+    body::Body,
+    http::{Request, header::CONTENT_TYPE},
+};
 use fork_choice::store::Store;
-use http_api::{AggregatorController, HttpServerConfig, SharedStore, routing::normal_routes};
+use http_api::{AggregatorController, HttpServerConfig, SharedStore, normal_routes};
+use http_body_util::BodyExt;
 use parking_lot::RwLock;
 use serde::Deserialize;
 use serde_json::Value;
 use test_generator::test_resources;
-use tokio::net::TcpListener;
-
-// ---------------------------------------------------------------------------
-// Deserialization types
-// ---------------------------------------------------------------------------
+use tower::ServiceExt;
 
 #[derive(Debug, Deserialize)]
 struct ApiEndpointTestVectorFile {
@@ -30,10 +30,6 @@ struct ApiEndpointTestVectorFile {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ApiEndpointTestCase {
-    #[allow(dead_code)]
-    network: String,
-    #[allow(dead_code)]
-    lean_env: String,
     endpoint: String,
     #[serde(default = "default_get")]
     method: String,
@@ -41,60 +37,31 @@ struct ApiEndpointTestCase {
     initial_is_aggregator: Option<bool>,
     #[serde(default)]
     request_body: Option<Value>,
-    #[allow(dead_code)]
-    genesis_params: GenesisParams,
     expected_status_code: u16,
     expected_content_type: String,
     #[serde(default)]
     expected_body: Option<Value>,
-    #[serde(rename = "_info")]
-    info: Info,
 }
 
 fn default_get() -> String {
     "GET".to_string()
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GenesisParams {
-    #[allow(dead_code)]
-    num_validators: u64,
-    #[allow(dead_code)]
-    genesis_time: u64,
-}
+#[test_resources("test_vectors/api_endpoint/**/*.json")]
+fn api_endpoint(spec_file: &str) {
+    let test_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join(spec_file);
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Info {
-    #[allow(dead_code)]
-    comment: String,
-    #[allow(dead_code)]
-    test_id: String,
-    description: String,
-    #[allow(dead_code)]
-    fixture_format: String,
-}
-
-// ---------------------------------------------------------------------------
-// Runner
-// ---------------------------------------------------------------------------
-
-fn run_api_endpoint_test(path: impl AsRef<Path>) {
-    let json_content = fs::read_to_string(path.as_ref())
-        .unwrap_or_else(|e| panic!("read test vector {}: {}", path.as_ref().display(), e));
-
-    let file: ApiEndpointTestVectorFile = serde_json::from_str(&json_content)
-        .unwrap_or_else(|e| panic!("parse test vector {}: {}", path.as_ref().display(), e));
+    let json_content = fs::read_to_string(&test_path).expect("read test vector");
+    let file: ApiEndpointTestVectorFile =
+        serde_json::from_str(&json_content).expect("parse test vector");
 
     let (test_name, case) = file
         .tests
         .into_iter()
         .next()
         .expect("at least one test case per file");
-
-    println!("\n{}", test_name);
-    println!("  {}", case.info.description);
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     rt.block_on(async move {
@@ -106,56 +73,49 @@ fn run_api_endpoint_test(path: impl AsRef<Path>) {
             ..Default::default()
         }));
 
-        let controller = Arc::new(AggregatorController::new(store.clone(), None));
-        let shared_controller = Some(controller);
+        let controller = Some(Arc::new(AggregatorController::new(store.clone(), None)));
 
         let config = HttpServerConfig::default();
-        let router = normal_routes(&config, store, shared_controller);
+        let router = normal_routes(&config, store, controller);
 
-        // Bind to a random OS-assigned port so tests never collide.
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("local addr");
-
-        let server = axum::serve(listener, router.into_make_service());
-        let server_handle = tokio::spawn(async move {
-            let _ = server.await;
-        });
-
-        // Issue the request.
-        let url = format!("http://{}{}", addr, case.endpoint);
-        let client = reqwest::Client::new();
-
-        let response = match case.method.as_str() {
-            "POST" => {
-                match case.request_body {
-                    Some(body) => {
-                        // JSON body — sets Content-Type: application/json automatically.
-                        client.post(&url).json(&body).send().await
-                    }
-                    None => {
-                        // Null body — send POST with no body to trigger parse error.
-                        client.post(&url).body("").send().await
-                    }
-                }
+        let request = match (case.method.as_str(), case.request_body.as_ref()) {
+            ("POST", Some(body)) => {
+                let bytes = serde_json::to_vec(body).expect("serialize request body");
+                Request::builder()
+                    .method("POST")
+                    .uri(&case.endpoint)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(bytes))
+                    .expect("build request")
             }
-            _ => client.get(&url).send().await,
-        }
-        .expect("HTTP request");
+            ("POST", None) => Request::builder()
+                .method("POST")
+                .uri(&case.endpoint)
+                .body(Body::empty())
+                .expect("build request"),
+            _ => Request::builder()
+                .method("GET")
+                .uri(&case.endpoint)
+                .body(Body::empty())
+                .expect("build request"),
+        };
 
-        // --- Assertions ---
+        let response = router.oneshot(request).await.expect("router oneshot");
 
         let actual_status = response.status().as_u16();
         let actual_content_type = response
             .headers()
-            .get(reqwest::header::CONTENT_TYPE)
+            .get(CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_owned();
 
-        // Collect body before consuming response.
-        let body_bytes = response.bytes().await.expect("response body");
+        let body_bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect response body")
+            .to_bytes();
 
         assert_eq!(
             actual_status, case.expected_status_code,
@@ -174,22 +134,7 @@ fn run_api_endpoint_test(path: impl AsRef<Path>) {
         if let Some(expected_body) = case.expected_body {
             let actual_body: Value =
                 serde_json::from_slice(&body_bytes).expect("parse response body as JSON");
-            assert_eq!(actual_body, expected_body, "body mismatch in {}", test_name,);
+            assert_eq!(actual_body, expected_body, "body mismatch in {}", test_name);
         }
-
-        server_handle.abort();
-        println!("  \x1b[32m✓ PASS\x1b[0m");
     });
-}
-
-// ---------------------------------------------------------------------------
-// Test discovery
-// ---------------------------------------------------------------------------
-
-#[test_resources("test_vectors/api_endpoint/**/*.json")]
-fn api_endpoint(spec_file: &str) {
-    let test_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join(spec_file);
-    run_api_endpoint_test(test_path);
 }

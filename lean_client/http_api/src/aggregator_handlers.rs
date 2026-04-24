@@ -5,14 +5,29 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde::Deserialize;
-use serde_json::json;
+use serde::{Deserialize, Serialize};
 
 use crate::aggregator_controller::SharedController;
 
 #[derive(Deserialize)]
 pub(crate) struct ToggleRequest {
     enabled: bool,
+}
+
+#[derive(Serialize)]
+struct ErrorResponse {
+    error: &'static str,
+}
+
+#[derive(Serialize)]
+struct StatusResponse {
+    is_aggregator: bool,
+}
+
+#[derive(Serialize)]
+struct ToggleResponse {
+    is_aggregator: bool,
+    previous: bool,
 }
 
 /// Handle `GET /lean/v0/admin/aggregator`.
@@ -26,14 +41,18 @@ pub async fn handle_status(State(ctrl): State<SharedController>) -> Response {
     let Some(ctrl) = ctrl else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "Aggregator controller not available"})),
+            Json(ErrorResponse {
+                error: "Aggregator controller not available",
+            }),
         )
             .into_response();
     };
 
     (
         StatusCode::OK,
-        Json(json!({"is_aggregator": ctrl.is_enabled()})),
+        Json(StatusResponse {
+            is_aggregator: ctrl.is_enabled(),
+        }),
     )
         .into_response()
 }
@@ -57,7 +76,9 @@ pub async fn handle_toggle(
     let Some(ctrl) = ctrl else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": "Aggregator controller not available"})),
+            Json(ErrorResponse {
+                error: "Aggregator controller not available",
+            }),
         )
             .into_response();
     };
@@ -67,7 +88,9 @@ pub async fn handle_toggle(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Invalid or malformed request body"})),
+                Json(ErrorResponse {
+                    error: "Invalid or malformed request body",
+                }),
             )
                 .into_response();
         }
@@ -75,10 +98,12 @@ pub async fn handle_toggle(
 
     let previous = ctrl.set_enabled(req.enabled).await;
 
-    let response_body = json!({
-        "is_aggregator": req.enabled,
-        "previous": previous,
-    });
-
-    (StatusCode::OK, Json(response_body)).into_response()
+    (
+        StatusCode::OK,
+        Json(ToggleResponse {
+            is_aggregator: req.enabled,
+            previous,
+        }),
+    )
+        .into_response()
 }

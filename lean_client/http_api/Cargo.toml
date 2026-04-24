@@ -22,9 +22,10 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 fork_choice = { workspace = true }
+http-body-util = { workspace = true }
 parking_lot = { workspace = true }
-reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 test-generator = { workspace = true }
 tokio = { workspace = true }
+tower = { workspace = true }
