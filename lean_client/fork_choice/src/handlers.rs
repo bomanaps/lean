@@ -49,25 +49,16 @@ fn validate_attestation_data(store: &Store, data: &AttestationData) -> Result<()
     );
 
     // Validate checkpoint slots match block slots.
-    // Skip the source slot-match when the root is the store's known justified or
-    // finalized checkpoint: after checkpoint sync the anchor block sits at
-    // anchor_slot in store.blocks but the checkpoint carries the actual historical
-    // slot from the downloaded state (e.g. 100994 vs anchor 101002).
     let source_block = &store.blocks[&data.source.root];
     let target_block = &store.blocks[&data.target.root];
     let head_block = &store.blocks[&data.head.root];
 
-    let source_is_trusted_checkpoint = data.source.root == store.latest_justified.root
-        || data.source.root == store.latest_finalized.root;
-
-    if !source_is_trusted_checkpoint {
-        ensure!(
-            source_block.slot == data.source.slot,
-            "Source checkpoint slot mismatch: checkpoint {} vs block {}",
-            data.source.slot.0,
-            source_block.slot.0
-        );
-    }
+    ensure!(
+        source_block.slot == data.source.slot,
+        "Source checkpoint slot mismatch: checkpoint {} vs block {}",
+        data.source.slot.0,
+        source_block.slot.0
+    );
 
     ensure!(
         target_block.slot == data.target.slot,
