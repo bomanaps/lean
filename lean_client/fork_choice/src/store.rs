@@ -207,19 +207,18 @@ pub fn get_forkchoice_store(
         block_header.hash_tree_root()
     };
 
-    // Substitute anchor_root for the checkpoint roots (the historical
-    // justified/finalized blocks are not in our store), but keep the actual
-    // slots from the downloaded state.  validate_attestation_data skips
-    // the block-slot match when the source root is a known checkpoint.
-    let latest_justified = Checkpoint {
+    // Seed both checkpoints from the anchor block itself: (root=anchor_root,
+    // slot=anchor_slot). The store treats the anchor as the new "genesis" for
+    // fork choice — pre-anchor history is pruned — so the embedded checkpoints
+    // from the downloaded state are intentionally ignored. This keeps the
+    // checkpoint slot/root pair internally consistent with the block at
+    // anchor_root, mirroring the beacon-chain seeding convention.
+    let anchor_checkpoint = Checkpoint {
         root: block_root,
-        slot: anchor_state.latest_justified.slot,
+        slot: block_slot,
     };
-
-    let latest_finalized = Checkpoint {
-        root: block_root,
-        slot: anchor_state.latest_finalized.slot,
-    };
+    let latest_justified = anchor_checkpoint.clone();
+    let latest_finalized = anchor_checkpoint;
 
     // Store the original anchor_state - do NOT modify it
     // Modifying checkpoints would change its hash_tree_root(), breaking the
@@ -454,12 +453,17 @@ fn extract_attestations_from_aggregated_payloads(
 
 /// Update safe target from aggregated attestations.
 ///
-/// Safe target is computed by merging both aggregated payload pools:
-/// - latest_known_aggregated_payloads: from block bodies (on-chain)
-/// - latest_new_aggregated_payloads: from gossip aggregation topic
+/// Runs at interval 3 of the slot cycle, strictly before the migration step at
+/// interval 4 that promotes `latest_new_aggregated_payloads` into
+/// `latest_known_aggregated_payloads`. Only the "new" pool is consulted here.
 ///
-/// Both pools are merged because at interval 3 (when this runs), the migration
-/// to "known" (interval 4) hasn't happened yet.
+/// Safe target is an *availability* signal: a block is "safe" when 2/3+ of
+/// validators currently online — as seen by this node right now — vote for a
+/// descendant of it. Votes already living in the "known" pool reflect
+/// historical knowledge (block-included attestations, gossip migrated in
+/// previous slots, locally-stored self-attestations); counting them would let
+/// safe target keep advancing on stale evidence even when live participation
+/// has collapsed, defeating the signal's purpose.
 pub fn update_safe_target(store: &mut Store) {
     let n_validators = if let Some(state) = store.states.get(&store.head) {
         state.validators.len_usize()
@@ -472,20 +476,11 @@ pub fn update_safe_target(store: &mut Store) {
     let min_score = (n_validators * 2 + 2) / 3;
     let root = store.latest_justified.root;
 
-    // Merge both aggregated payload pools to see all attestations
-    let mut all_payloads: HashMap<H256, Vec<AggregatedSignatureProof>> =
-        store.latest_known_aggregated_payloads.clone();
-
-    for (data_root, proofs) in &store.latest_new_aggregated_payloads {
-        all_payloads
-            .entry(*data_root)
-            .or_default()
-            .extend(proofs.clone());
-    }
-
-    // Extract per-validator attestations from merged payloads
+    // Extract per-validator attestations from the "new" pool only.
+    // The "known" pool is intentionally excluded — see the doc comment above
+    // for the availability rationale tied to the interval-3/interval-4 ordering.
     let attestations = extract_attestations_from_aggregated_payloads(
-        &all_payloads,
+        &store.latest_new_aggregated_payloads,
         &store.attestation_data_by_root,
     );
 
