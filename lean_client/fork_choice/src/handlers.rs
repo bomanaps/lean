@@ -8,7 +8,8 @@ use tracing::warn;
 
 use crate::block_cache::BlockCache;
 use crate::store::{
-    INTERVALS_PER_SLOT, MILLIS_PER_INTERVAL, STATE_PRUNE_BUFFER, Store, tick_interval, update_head,
+    GOSSIP_DISPARITY_INTERVALS, INTERVALS_PER_SLOT, MILLIS_PER_INTERVAL, STATE_PRUNE_BUFFER, Store,
+    tick_interval, update_head,
 };
 
 #[inline]
@@ -74,15 +75,19 @@ fn validate_attestation_data(store: &Store, data: &AttestationData) -> Result<()
         head_block.slot.0
     );
 
-    // Validate attestation is not too far in the future
-    // We allow a small margin for clock disparity (1 slot), but no further.
-    let current_slot = store.time / INTERVALS_PER_SLOT;
+    // Honest validators emit votes only after their slot has begun. Allow exactly
+    // one interval (~800 ms) of clock skew between peers; a whole-slot margin would
+    // let an adversary pre-publish next-slot aggregates ahead of any honest
+    // validator. Lean analogue of mainnet's MAXIMUM_GOSSIP_CLOCK_DISPARITY.
+    let attestation_start_interval = data.slot.0 * INTERVALS_PER_SLOT;
 
     ensure!(
-        data.slot.0 <= current_slot + 1,
-        "Attestation too far in future: attestation slot {} > current slot {} + 1",
+        attestation_start_interval <= store.time + GOSSIP_DISPARITY_INTERVALS,
+        "Attestation too far in future: data slot {} (start interval {}) > store time {} + {}",
         data.slot.0,
-        current_slot
+        attestation_start_interval,
+        store.time,
+        GOSSIP_DISPARITY_INTERVALS,
     );
 
     Ok(())

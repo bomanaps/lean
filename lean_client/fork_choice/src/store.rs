@@ -16,6 +16,11 @@ pub const SECONDS_PER_SLOT: u64 = 4;
 /// Milliseconds per interval: (4 * 1000) / 5 = 800ms
 /// Using milliseconds avoids integer division truncation (4/5 = 0 in integer math)
 pub const MILLIS_PER_INTERVAL: u64 = (SECONDS_PER_SLOT * 1000) / INTERVALS_PER_SLOT;
+/// Future-slot tolerance for attestation gossip, in intervals.
+/// Bounds the clock skew the time check absorbs when admitting a vote whose
+/// slot has not yet started locally. One interval is ~800 ms — the lean
+/// analogue of mainnet's MAXIMUM_GOSSIP_CLOCK_DISPARITY.
+pub const GOSSIP_DISPARITY_INTERVALS: u64 = 1;
 
 /// Forkchoice store tracking chain state and validator attestations
 
