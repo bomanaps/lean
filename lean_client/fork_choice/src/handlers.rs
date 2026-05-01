@@ -1,6 +1,9 @@
+use std::collections::HashSet;
+
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use containers::{
     AttestationData, SignatureKey, SignedAggregatedAttestation, SignedAttestation, SignedBlock,
+    State,
 };
 use metrics::METRICS;
 use ssz::{H256, SszHash};
@@ -8,8 +11,8 @@ use tracing::warn;
 
 use crate::block_cache::BlockCache;
 use crate::store::{
-    GOSSIP_DISPARITY_INTERVALS, INTERVALS_PER_SLOT, MILLIS_PER_INTERVAL, STATE_PRUNE_BUFFER, Store,
-    tick_interval, update_head,
+    BLOCKS_TO_KEEP, GOSSIP_DISPARITY_INTERVALS, HEAD_RETENTION_SLOTS, INTERVALS_PER_SLOT,
+    MILLIS_PER_INTERVAL, STATES_TO_KEEP, STATE_PRUNE_BUFFER, Store, tick_interval, update_head,
 };
 
 #[inline]
@@ -480,15 +483,21 @@ fn on_attestation_internal(
 /// 3. Processing attestations included in the block body (on-chain)
 /// 4. Updating the forkchoice head
 /// 5. Processing the proposer's attestation (as if gossiped)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockOutcome {
+    Applied,
+    AlreadyKnown,
+}
+
 pub fn on_block(
     store: &mut Store,
     cache: &mut BlockCache,
     signed_block: SignedBlock,
-) -> Result<()> {
+) -> Result<BlockOutcome> {
     let block_root = signed_block.block.hash_tree_root();
 
     if store.blocks.contains_key(&block_root) {
-        return Ok(());
+        return Ok(BlockOutcome::AlreadyKnown);
     }
 
     let parent_root = signed_block.block.parent_root;
@@ -503,48 +512,34 @@ pub fn on_block(
     process_block_internal(store, signed_block, block_root)?;
     process_pending_blocks(store, cache, vec![block_root]);
 
-    Ok(())
+    Ok(BlockOutcome::Applied)
 }
 
-fn process_block_internal(
-    store: &mut Store,
-    signed_block: SignedBlock,
-    block_root: H256,
-) -> Result<()> {
+/// CPU-bound portion of block processing: verify XMSS signatures against the parent state
+/// and run the state transition. Safe to run on a `DedicatedExecutor` thread because it
+/// touches no `Store` state.
+pub fn verify_and_transition(parent_state: State, signed_block: SignedBlock) -> Result<State> {
     let _timer = METRICS.get().map(|metrics| {
         metrics
             .lean_fork_choice_block_processing_time_seconds
             .start_timer()
     });
 
+    signed_block.verify_signatures(parent_state.clone())?;
+    parent_state.state_transition(signed_block, true)
+}
+
+/// Store-mutating portion of block processing: must run on the chain task. Inserts the
+/// block + post-state, retries pending attestations, advances justification/finalization,
+/// processes block-body attestations on-chain, and recomputes the head.
+pub fn apply_verified_block(
+    store: &mut Store,
+    signed_block: SignedBlock,
+    new_state: State,
+    block_root: H256,
+) -> Result<()> {
     let block = signed_block.block.clone();
-    let attestations_count = block.body.attestations.len_u64();
 
-    // Get parent state for validation
-    let state = store
-        .states
-        .get(&block.parent_root)
-        .ok_or(anyhow!("no parent state"))?;
-
-    // Debug: Log parent state checkpoints before transition
-    tracing::debug!(
-        block_slot = block.slot.0,
-        attestations_in_block = attestations_count,
-        parent_justified_slot = state.latest_justified.slot.0,
-        parent_finalized_slot = state.latest_finalized.slot.0,
-        justified_slots_len = state.justified_slots.0.len(),
-        "Processing block - parent state info"
-    );
-
-    // Verify block signatures against parent state before executing the state transition.
-    // If any signature is invalid the error propagates and the block is rejected;
-    // it never enters store.blocks or store.states.
-    signed_block.verify_signatures(state.clone())?;
-
-    // Execute state transition to get post-state (signatures verified above)
-    let new_state = state.state_transition(signed_block.clone(), true)?;
-
-    // Debug: Log new state checkpoints after transition
     tracing::debug!(
         block_slot = block.slot.0,
         new_justified_slot = new_state.latest_justified.slot.0,
@@ -555,6 +550,17 @@ fn process_block_internal(
 
     store.blocks.insert(block_root, block.clone());
     store.states.insert(block_root, new_state.clone());
+
+    METRICS.get().map(|m| {
+        m.grandine_store_blocks_size.set(store.blocks.len() as i64);
+        m.grandine_store_states_size.set(store.states.len() as i64);
+        m.grandine_store_gossip_signatures_size
+            .set(store.gossip_signatures.len() as i64);
+        m.grandine_store_known_aggregated_payloads_size
+            .set(store.latest_known_aggregated_payloads.len() as i64);
+        m.grandine_store_new_aggregated_payloads_size
+            .set(store.latest_new_aggregated_payloads.len() as i64);
+    });
 
     // Retry attestations that arrived before this block was known.
     // Drain the queue for this root and re-process each attestation.
@@ -647,7 +653,7 @@ fn process_block_internal(
             .retain(|_, data| data.target.slot.0 > finalized_slot);
         METRICS.get().map(|m| {
             m.grandine_attestation_data_by_root
-                .set(store.attestation_data_by_root.len() as i64)
+                .set(store.attestation_data_by_root.len() as i64);
         });
     }
 
@@ -723,7 +729,122 @@ fn process_block_internal(
 
     update_head(store);
 
+    prune_with_retention_bounds(store);
+
     Ok(())
+}
+
+/// Defensive retention bounds. Runs unconditionally on every `apply_verified_block`
+/// so map growth stays bounded even when `latest_finalized` does not advance —
+/// the spec-mandated `prune_stale_attestation_data` is a necessary but not a
+/// sufficient bound, since it never fires while finalization is stalled.
+fn prune_with_retention_bounds(store: &mut Store) {
+    let head_slot = store
+        .blocks
+        .get(&store.head)
+        .map(|b| b.slot.0)
+        .unwrap_or(0);
+    let keep_min_slot = head_slot.saturating_sub(HEAD_RETENTION_SLOTS);
+
+    let mut protected: HashSet<H256> = HashSet::with_capacity(4);
+    protected.insert(store.latest_finalized.root);
+    protected.insert(store.latest_justified.root);
+    protected.insert(store.head);
+    protected.insert(store.safe_target);
+
+    if store.blocks.len() > BLOCKS_TO_KEEP {
+        let mut by_slot: Vec<(H256, u64)> = store
+            .blocks
+            .iter()
+            .map(|(root, block)| (*root, block.slot.0))
+            .collect();
+        by_slot.sort_by_key(|(_, slot)| std::cmp::Reverse(*slot));
+        let evict: HashSet<H256> = by_slot
+            .into_iter()
+            .skip(BLOCKS_TO_KEEP)
+            .filter(|(root, _)| !protected.contains(root))
+            .map(|(root, _)| root)
+            .collect();
+        store.blocks.retain(|root, _| !evict.contains(root));
+    }
+
+    if store.states.len() > STATES_TO_KEEP {
+        let mut by_slot: Vec<(H256, u64)> = store
+            .states
+            .iter()
+            .map(|(root, state)| (*root, state.slot.0))
+            .collect();
+        by_slot.sort_by_key(|(_, slot)| std::cmp::Reverse(*slot));
+        let evict: HashSet<H256> = by_slot
+            .into_iter()
+            .skip(STATES_TO_KEEP)
+            .filter(|(root, _)| !protected.contains(root))
+            .map(|(root, _)| root)
+            .collect();
+        store.states.retain(|root, _| !evict.contains(root));
+    }
+
+    // Three retain calls below read attestation_data_by_root as a secondary index;
+    // attestation_data_by_root must be pruned last so the lookups can resolve.
+    let adr = &store.attestation_data_by_root;
+    store.gossip_signatures.retain(|key, _| {
+        adr.get(&key.data_root)
+            .is_none_or(|data| data.target.slot.0 >= keep_min_slot)
+    });
+    store.latest_known_aggregated_payloads.retain(|data_root, _| {
+        adr.get(data_root)
+            .is_none_or(|data| data.target.slot.0 >= keep_min_slot)
+    });
+    store.latest_new_aggregated_payloads.retain(|data_root, _| {
+        adr.get(data_root)
+            .is_none_or(|data| data.target.slot.0 >= keep_min_slot)
+    });
+    store
+        .attestation_data_by_root
+        .retain(|_, data| data.target.slot.0 >= keep_min_slot);
+
+    METRICS.get().map(|m| {
+        m.grandine_store_blocks_size.set(store.blocks.len() as i64);
+        m.grandine_store_states_size.set(store.states.len() as i64);
+        m.grandine_store_gossip_signatures_size
+            .set(store.gossip_signatures.len() as i64);
+        m.grandine_store_known_aggregated_payloads_size
+            .set(store.latest_known_aggregated_payloads.len() as i64);
+        m.grandine_store_new_aggregated_payloads_size
+            .set(store.latest_new_aggregated_payloads.len() as i64);
+        m.grandine_attestation_data_by_root
+            .set(store.attestation_data_by_root.len() as i64);
+    });
+}
+
+/// Synchronous wrapper retained for the cascade in `process_pending_blocks` and for tests.
+/// The production path on the chain task drives `verify_and_transition` on the
+/// `DedicatedExecutor` and `apply_verified_block` on the chain task directly.
+fn process_block_internal(
+    store: &mut Store,
+    signed_block: SignedBlock,
+    block_root: H256,
+) -> Result<()> {
+    let block = signed_block.block.clone();
+    let attestations_count = block.body.attestations.len_u64();
+
+    let parent_state = store
+        .states
+        .get(&block.parent_root)
+        .ok_or(anyhow!("no parent state"))?
+        .clone();
+
+    tracing::debug!(
+        block_slot = block.slot.0,
+        attestations_in_block = attestations_count,
+        parent_justified_slot = parent_state.latest_justified.slot.0,
+        parent_finalized_slot = parent_state.latest_finalized.slot.0,
+        justified_slots_len = parent_state.justified_slots.0.len(),
+        "Processing block - parent state info"
+    );
+
+    let new_state = verify_and_transition(parent_state, signed_block.clone())?;
+    apply_verified_block(store, signed_block, new_state, block_root)
 }
 
 pub fn process_pending_blocks(store: &mut Store, cache: &mut BlockCache, mut roots: Vec<H256>) {

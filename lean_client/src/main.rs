@@ -4,12 +4,14 @@ use containers::{
     Block, BlockBody, BlockHeader, BlockSignatures, Checkpoint, Config, SignedBlock, Slot, State,
     Status, Validator,
 };
+use dedicated_executor::DedicatedExecutor;
 use ethereum_types::H256;
 use features::Feature;
 use fork_choice::{
     block_cache::BlockCache,
     handlers::{
-        on_aggregated_attestation, on_attestation, on_block, on_gossip_attestation, on_tick,
+        apply_verified_block, on_aggregated_attestation, on_attestation, on_gossip_attestation,
+        on_tick, verify_and_transition,
     },
     store::{
         INTERVALS_PER_SLOT, MILLIS_PER_INTERVAL, Store, execute_block_production,
@@ -45,6 +47,7 @@ use validator::{ValidatorConfig, ValidatorService};
 use xmss::{PublicKey, Signature};
 
 mod aggregation;
+mod banner;
 
 fn load_node_key(path: &str) -> Result<Keypair, Box<dyn std::error::Error>> {
     let hex_str = std::fs::read_to_string(path)?.trim().to_string();
@@ -401,6 +404,14 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    info!("{}", banner::banner());
+    info!("════════════════════════════════════════════════════════");
+    info!(
+        "🚀 lean_client v{} started",
+        env!("CARGO_PKG_VERSION")
+    );
+    info!("════════════════════════════════════════════════════════");
+
     let args = Args::parse();
 
     for feature in args.features {
@@ -436,12 +447,38 @@ async fn main() -> Result<()> {
     let (outbound_p2p_sender, outbound_p2p_receiver) =
         mpsc::unbounded_channel::<OutboundP2pRequest>();
     let (chain_message_sender, mut chain_message_receiver) =
-        mpsc::unbounded_channel::<ChainMessage>();
+        mpsc::channel::<ChainMessage>(1024);
     // Separate channel for validator task → chain task request-response messages.
     // Keeps ValidatorChainMessage (which carries oneshot senders) separate from
     // ChainMessage (which is Clone and used by the network layer).
     let (validator_chain_sender, mut validator_chain_receiver) =
         mpsc::unbounded_channel::<ValidatorChainMessage>();
+
+    let num_cpus = num_cpus::get();
+    let cpu_normal_executor = Arc::new(DedicatedExecutor::new(
+        "lean-cpu-normal",
+        (num_cpus / 2).max(2),
+        None,
+    ));
+    let cpu_low_executor = Arc::new(DedicatedExecutor::new(
+        "lean-cpu-low",
+        (num_cpus / 4).max(1),
+        Some(19),
+    ));
+
+    // Verified blocks travel back from the executor to the chain task on this channel.
+    // Tuple: (block_root, signed_block, should_gossip, verify outcome).
+    // `should_gossip` is threaded so Phase 3 can rebroadcast only blocks that arrived
+    // with should_gossip=true AND applied successfully (Bug 1 invariant).
+    // tx side increments `grandine_verify_result_channel_depth`; rx decrements after recv.
+    //
+    // Shutdown semantics: if the chain task exits, `verify_result_rx` is dropped and
+    // any in-flight `tx.send()` returns Err — the spawned forwarder rolls back the
+    // gauge inc and exits. The verify itself runs to completion on the executor
+    // (output discarded). `DedicatedExecutor::Drop` joins worker threads, so no
+    // verify thread leaks past process shutdown.
+    let (verify_result_tx, mut verify_result_rx) =
+        mpsc::channel::<(H256, SignedBlock, bool, Result<State>)>(1024);
 
     let (genesis_time, validators, genesis_log_inv_rate, genesis_attestation_committee_count) =
         if let Some(genesis_path) = &args.genesis {
@@ -595,6 +632,7 @@ async fn main() -> Result<()> {
                             config.clone(),
                             num_validators,
                             keys_path,
+                            cpu_normal_executor.clone(),
                             args.is_aggregator,
                         ) {
                             Ok(service) => {
@@ -615,6 +653,7 @@ async fn main() -> Result<()> {
                                 Some(ValidatorService::new_with_aggregator(
                                     config,
                                     num_validators,
+                                    cpu_normal_executor.clone(),
                                     args.is_aggregator,
                                 ))
                             }
@@ -627,6 +666,7 @@ async fn main() -> Result<()> {
                         Some(ValidatorService::new_with_aggregator(
                             config,
                             num_validators,
+                            cpu_normal_executor.clone(),
                             args.is_aggregator,
                         ))
                     }
@@ -640,6 +680,7 @@ async fn main() -> Result<()> {
                     Some(ValidatorService::new_with_aggregator(
                         config,
                         num_validators,
+                        cpu_normal_executor.clone(),
                         args.is_aggregator,
                     ))
                 }
@@ -831,6 +872,7 @@ async fn main() -> Result<()> {
                                     "Chain message channel closed during anchor block wait"
                                 ));
                             };
+                            METRICS.get().map(|m| m.grandine_chain_message_channel_depth.dec());
                             if let ChainMessage::ProcessBlock { signed_block, .. } = msg {
                                 let root = signed_block.block.hash_tree_root();
                                 if root == expected_root {
@@ -923,6 +965,15 @@ async fn main() -> Result<()> {
             root: s.head,
             slot: s.blocks.get(&s.head).map(|b| b.slot).unwrap_or(Slot(0)),
         };
+
+        METRICS.get().map(|m| {
+            if let Ok(j) = i64::try_from(s.latest_justified.slot.0) {
+                m.lean_latest_justified_slot.set(j);
+            }
+            if let Ok(f) = i64::try_from(s.latest_finalized.slot.0) {
+                m.lean_latest_finalized_slot.set(f);
+            }
+        });
     }
 
     let chain_outbound_sender = outbound_p2p_sender.clone();
@@ -971,9 +1022,13 @@ async fn main() -> Result<()> {
     // watch channel = lossless latest-value semantics: send() always overwrites so
     // the aggregation task always sees the most recent trigger even if XMSS was
     // still running when a newer slot arrived. No trigger is ever silently dropped.
-    let has_aggregator = vs_for_chain.is_some();
-    let mut aggregator =
-        vs_for_chain.map(|vs| aggregation::AggregationService::new(vs, chain_log_inv_rate));
+    let mut aggregator = vs_for_chain
+        .map(|vs| aggregation::AggregationService::new(vs, store.clone(), chain_log_inv_rate));
+    // Whether this node has any validator service at all. Used for sync-state
+    // coloring; NOT a per-slot aggregator gate. The per-slot aggregator check
+    // lives at the snapshot trigger site below and goes through
+    // `AggregationService::is_aggregator_for_slot`.
+    let has_aggregator = aggregator.is_some();
 
     // Channel for the chain task to signal block arrival to the validator task.
     let (block_slot_tx, block_slot_rx) = watch::channel::<u64>(0);
@@ -1011,6 +1066,13 @@ async fn main() -> Result<()> {
                     let target_interval = now_millis.saturating_sub(genesis_millis) / MILLIS_PER_INTERVAL;
                     let has_proposal = target_interval % INTERVALS_PER_SLOT == 0;
                     on_tick(&mut *store.write(), now_millis, has_proposal);
+
+                    // Sample the cpu_normal executor's queue depth once per tick.
+                    // Counts both XMSS block verify and attestation signing tasks.
+                    METRICS.get().map(|m| {
+                        m.grandine_cpu_normal_executor_tasks_in_flight
+                            .set(cpu_normal_executor.tasks() as i64)
+                    });
 
                     let (current_slot, current_interval) = {
                         let s = store.read();
@@ -1059,13 +1121,25 @@ async fn main() -> Result<()> {
                     //      after a long block-processing burst) → trigger still fires for
                     //      the current slot, mirroring zeam's explicit catch-up loop.
                     // last_agg_slot prevents double-firing within the same slot.
-                    if has_aggregator && current_interval >= 2 && current_slot > last_agg_slot {
-                        last_agg_slot = current_slot;
-                        let snapshot = store.read().clone();
-                        if let Some(ref agg) = aggregator {
-                            agg.trigger(current_slot, snapshot);
+                    // Only trigger if this node is the aggregator for this slot.
+                    // Previously gated on `has_aggregator` (any-validator-service),
+                    // which made every validator node deep-clone the Store every
+                    // slot — pure waste on non-aggregators. The per-slot check via
+                    // AggregationService::is_aggregator_for_slot routes through the
+                    // ValidatorService AtomicBool flag, so admin-API runtime toggles
+                    // are still honored.
+                    if let Some(ref agg) = aggregator {
+                        if agg.is_aggregator_for_slot(Slot(current_slot))
+                            && current_interval >= 2
+                            && current_slot > last_agg_slot
+                        {
+                            last_agg_slot = current_slot;
+                            METRICS.get().map(|m| {
+                                m.lean_aggregation_snapshots_triggered_total.inc()
+                            });
+                            agg.trigger(current_slot);
+                            info!(slot = current_slot, "Aggregation phase - triggered");
                         }
-                        info!(slot = current_slot, "Aggregation phase - triggered");
                     }
 
                     match current_interval {
@@ -1093,8 +1167,180 @@ async fn main() -> Result<()> {
                     let nf = *network_finalized_slot.lock();
                     evaluate_sync_state(&mut sync_state, peers, head_slot, nf);
                 }
+                // Phase 3 (apply) is placed ABOVE `chain_message_receiver.recv()` in the
+                // biased select so completed verifies always drain before we accept new
+                // chain messages. Without this priority, a backlog of incoming gossip
+                // would starve apply: chain_message would always be ready, biased polling
+                // would pick it every iteration, and verified blocks would never land in
+                // store.blocks (observed live: depth 200+ growing, store_blocks_size frozen).
+                result = verify_result_rx.recv() => {
+                    let Some((block_root, signed_block, should_gossip, outcome)) = result else { break };
+                    METRICS
+                        .get()
+                        .map(|m| m.grandine_verify_result_channel_depth.dec());
+                    // RAII timer for Phase 3 apply wall-clock; records on Drop so
+                    // all `continue` early-exits are captured automatically.
+                    let _apply_timer = METRICS
+                        .get()
+                        .map(|m| m.lean_chain_task_apply_seconds.start_timer());
+
+                    // Skip if another path already applied this block (e.g. cascade race).
+                    if store.read().blocks.contains_key(&block_root) {
+                        continue;
+                    }
+
+                    // Skip if parent state was pruned by finalization while verify ran.
+                    // `apply_verified_block` retains finalized + buffer states only; if
+                    // finalization advanced past this block's parent during the verify
+                    // window, the post-state we just received is no longer applicable.
+                    // Drop it; if the block becomes head-relevant it will be re-fetched
+                    // via BlocksByRoot.
+                    let parent_root = signed_block.block.parent_root;
+                    if !store.read().states.contains_key(&parent_root) {
+                        warn!(
+                            block_root = %format!("0x{:x}", block_root),
+                            "Parent state pruned during verify, dropping result"
+                        );
+                        continue;
+                    }
+
+                    let block_slot = signed_block.block.slot;
+
+                    match outcome {
+                        Ok(new_state) => {
+                            let apply_result = apply_verified_block(
+                                &mut *store.write(),
+                                signed_block.clone(),
+                                new_state,
+                                block_root,
+                            );
+
+                            match apply_result {
+                                Ok(()) => {
+                                    info!("Block processed successfully");
+                                    let _ = block_slot_tx.send(block_slot.0);
+
+                                    {
+                                        let s = store.read();
+                                        let mut status = status_provider.write();
+                                        status.finalized = s.latest_finalized.clone();
+                                        status.head = Checkpoint {
+                                            root: s.head,
+                                            slot: s.blocks.get(&s.head).map(|b| b.slot).unwrap_or(Slot(0)),
+                                        };
+                                    }
+
+                                    // Bug 1 invariant: rebroadcast only on Apply (apply_verified_block
+                                    // is reached only when the dedup guard above missed, i.e. the
+                                    // block is new to us). The original ChainMessage carried
+                                    // should_gossip; cascade respawns will set it to false.
+                                    if should_gossip {
+                                        if let Err(e) = outbound_p2p_sender.send(
+                                            OutboundP2pRequest::GossipBlock(signed_block.clone())
+                                        ) {
+                                            warn!("Failed to gossip block: {}", e);
+                                        } else {
+                                            info!(slot = block_slot.0, "Broadcasted block");
+                                        }
+                                    }
+
+                                    let head_slot = { let s = store.read(); s.blocks.get(&s.head).map(|b| b.slot.0).unwrap_or(0) };
+                                    let nf = *network_finalized_slot.lock();
+                                    check_sync_complete(&mut sync_state, head_slot, block_cache.orphan_count(), nf);
+
+                                    // Cascade: orphans waiting on this block can now verify.
+                                    // Spawn each cached child against the just-applied state and
+                                    // route the result back through `verify_result_tx`. The reply
+                                    // re-enters this same arm, so grandchildren are picked up
+                                    // automatically without going through `chain_message_sender`
+                                    // (avoids burst pressure on the bounded chain channel).
+                                    let cascade_children: Vec<(H256, SignedBlock)> = block_cache
+                                        .get_children(&block_root)
+                                        .into_iter()
+                                        .map(|p| (p.root, p.block.clone()))
+                                        .collect();
+
+                                    if !cascade_children.is_empty() {
+                                        if let Some(cascade_parent_state) =
+                                            store.read().states.get(&block_root).cloned()
+                                        {
+                                            for (child_root, child_block) in cascade_children {
+                                                let exec = cpu_normal_executor.clone();
+                                                let result_tx = verify_result_tx.clone();
+                                                let parent_state_for_child =
+                                                    cascade_parent_state.clone();
+                                                let child_for_verify = child_block.clone();
+                                                METRICS.get().map(|m| {
+                                                    m.grandine_verify_result_channel_depth.inc()
+                                                });
+                                                tokio::spawn(async move {
+                                                    let child_for_send = child_for_verify.clone();
+                                                    let job = exec.spawn(async move {
+                                                        verify_and_transition(
+                                                            parent_state_for_child,
+                                                            child_for_verify,
+                                                        )
+                                                    });
+                                                    let outcome = job.await.unwrap_or_else(|e| {
+                                                        Err(anyhow::anyhow!("executor: {e}"))
+                                                    });
+                                                    if result_tx
+                                                        .send((
+                                                            child_root,
+                                                            child_for_send,
+                                                            false, // cascade: never re-gossip
+                                                            outcome,
+                                                        ))
+                                                        .await
+                                                        .is_err()
+                                                    {
+                                                        METRICS.get().map(|m| {
+                                                            m.grandine_verify_result_channel_depth
+                                                                .dec()
+                                                        });
+                                                    }
+                                                });
+                                                block_cache.remove(&child_root);
+                                            }
+                                        }
+                                    }
+
+                                    METRICS
+                                        .get()
+                                        .map(|m| m.grandine_block_cache_size.set(block_cache.len() as i64));
+
+                                    // Drain block roots queued by retried attestations inside
+                                    // apply_verified_block.
+                                    let missing: Vec<H256> = store.write().pending_fetch_roots.drain().collect();
+                                    METRICS.get().map(|m| m.grandine_pending_fetch_roots.set(0));
+                                    if !missing.is_empty() {
+                                        if let Err(e) = outbound_p2p_sender.send(
+                                            OutboundP2pRequest::RequestBlocksByRoot(missing)
+                                        ) {
+                                            warn!("Failed to request blocks missing from retried attestations: {}", e);
+                                        }
+                                    }
+                                }
+                                Err(e) => warn!(
+                                    block_root = %format!("0x{:x}", block_root),
+                                    "Problem applying verified block: {}", e
+                                ),
+                            }
+                        }
+                        Err(e) => warn!(
+                            block_root = %format!("0x{:x}", block_root),
+                            "Block verify failed: {}", e
+                        ),
+                    }
+                }
                 message = chain_message_receiver.recv() => {
                     let Some(message) = message else { break };
+                    METRICS.get().map(|m| m.grandine_chain_message_channel_depth.dec());
+                    // RAII timer: HistogramTimer records on Drop, so all `continue`
+                    // exits inside the match below are captured automatically.
+                    let _chain_message_timer = METRICS
+                        .get()
+                        .map(|m| m.lean_chain_task_chain_message_seconds.start_timer());
                     match message {
                         ChainMessage::ProcessBlock {
                             signed_block,
@@ -1115,6 +1361,10 @@ async fn main() -> Result<()> {
                             let block_root = signed_block.block.hash_tree_root();
                             let parent_root = signed_block.block.parent_root;
 
+                            if store.read().blocks.contains_key(&block_root) {
+                                continue;
+                            }
+
                             info!(
                                 slot = block_slot.0,
                                 block_root = %format!("0x{:x}", block_root),
@@ -1128,11 +1378,6 @@ async fn main() -> Result<()> {
                                 .unwrap()
                                 .as_millis() as u64;
                             on_tick(&mut *store.write(), now_millis, false);
-
-                            let parent_exists = {
-                                let s = store.read();
-                                parent_root.is_zero() || s.states.contains_key(&parent_root)
-                            };
 
                             // Store block immediately so we can serve it to peers via
                             // BlocksByRoot even if it can't be processed yet (e.g. parent
@@ -1155,7 +1400,16 @@ async fn main() -> Result<()> {
                                 }
                             }
 
-                            if !parent_exists {
+                            // Snapshot parent state for the executor. If absent, treat as
+                            // orphan and re-queue. Genesis (parent_root.is_zero()) is loaded
+                            // at startup, so a None here for non-zero parents means the
+                            // parent block hasn't been processed yet.
+                            let parent_state = {
+                                let s = store.read();
+                                s.states.get(&parent_root).cloned()
+                            };
+
+                            let Some(parent_state) = parent_state else {
                                 block_cache.add(
                                     signed_block.clone(),
                                     block_root,
@@ -1192,53 +1446,41 @@ async fn main() -> Result<()> {
                                 check_sync_complete(&mut sync_state, head_slot, block_cache.orphan_count(), nf);
 
                                 continue;
-                            }
+                            };
 
-                            let result = {on_block(&mut *store.write(), &mut block_cache, signed_block.clone())};
-                            match result {
-                                Ok(()) => {
-                                    info!("Block processed successfully");
-                                    let _ = block_slot_tx.send(block_slot.0);
-
-                                    {
-                                        let s = store.read();
-                                        let mut status = status_provider.write();
-                                        status.finalized = s.latest_finalized.clone();
-                                        status.head = Checkpoint {
-                                            root: s.head,
-                                            slot: s.blocks.get(&s.head).map(|b| b.slot).unwrap_or(Slot(0)),
-                                        };
-                                    }
-
-                                    if should_gossip {
-                                        if let Err(e) = outbound_p2p_sender.send(
-                                            OutboundP2pRequest::GossipBlock(signed_block)
-                                        ) {
-                                            warn!("Failed to gossip block: {}", e);
-                                        } else {
-                                            info!(slot = block_slot.0, "Broadcasted block");
-                                        }
-                                    }
-
-                                    let head_slot = { let s = store.read(); s.blocks.get(&s.head).map(|b| b.slot.0).unwrap_or(0) };
-                                    let nf = *network_finalized_slot.lock();
-                                    check_sync_complete(&mut sync_state, head_slot, block_cache.orphan_count(), nf);
+                            // Phase 1: ship verify+state_transition to the cpu_normal executor.
+                            // The chain task returns to the select! loop immediately and processes
+                            // the verified outcome later via verify_result_rx (Phase 3).
+                            // No store mutation happens here; gossip rebroadcast and post-apply
+                            // bookkeeping are deferred to Phase 3 once we know the block applied.
+                            let exec = cpu_normal_executor.clone();
+                            let result_tx = verify_result_tx.clone();
+                            let signed_block_for_verify = signed_block.clone();
+                            METRICS
+                                .get()
+                                .map(|m| m.grandine_verify_result_channel_depth.inc());
+                            tokio::spawn(async move {
+                                let signed_block_for_send = signed_block_for_verify.clone();
+                                let job = exec.spawn(async move {
+                                    verify_and_transition(parent_state, signed_block_for_verify)
+                                });
+                                let outcome = job
+                                    .await
+                                    .unwrap_or_else(|e| {
+                                        Err(anyhow::anyhow!("executor: {e}"))
+                                    });
+                                if result_tx
+                                    .send((block_root, signed_block_for_send, should_gossip, outcome))
+                                    .await
+                                    .is_err()
+                                {
+                                    // Receiver gone (chain task exited): roll back the inc above
+                                    // since this entry will never be drained.
+                                    METRICS
+                                        .get()
+                                        .map(|m| m.grandine_verify_result_channel_depth.dec());
                                 }
-                                Err(e) => warn!("Problem processing block: {}", e),
-                            }
-
-                            METRICS.get().map(|m| m.grandine_block_cache_size.set(block_cache.len() as i64));
-
-                            // Drain block roots queued by retried attestations inside on_block.
-                            let missing: Vec<H256> = store.write().pending_fetch_roots.drain().collect();
-                            METRICS.get().map(|m| m.grandine_pending_fetch_roots.set(0));
-                            if !missing.is_empty() {
-                                if let Err(e) = outbound_p2p_sender.send(
-                                    OutboundP2pRequest::RequestBlocksByRoot(missing)
-                                ) {
-                                    warn!("Failed to request blocks missing from retried attestations: {}", e);
-                                }
-                            }
+                            });
                         }
                         ChainMessage::ProcessAttestation {
                             signed_attestation,
@@ -1363,6 +1605,7 @@ async fn main() -> Result<()> {
                 }
                 v_message = validator_chain_receiver.recv() => {
                     let Some(v_message) = v_message else { break };
+                    METRICS.get().map(|m| m.grandine_validator_chain_message_channel_depth.dec());
                     match v_message {
                         ValidatorChainMessage::ProduceBlock { slot, proposer_index, sender } => {
                             let block_build_start = Instant::now();
@@ -1468,13 +1711,18 @@ async fn main() -> Result<()> {
                                 );
 
                                 let (tx, rx) = oneshot::channel();
-                                if validator_chain_sender
+                                let send_result = validator_chain_sender
                                     .send(ValidatorChainMessage::ProduceBlock {
                                         slot: Slot(current_slot),
                                         proposer_index: proposer_idx,
                                         sender: tx,
-                                    })
-                                    .is_err()
+                                    });
+                                if send_result.is_ok() {
+                                    METRICS.get().map(|m| {
+                                        m.grandine_validator_chain_message_channel_depth.inc()
+                                    });
+                                }
+                                if send_result.is_err()
                                 {
                                     warn!("Validator task: chain channel closed, stopping");
                                     break;
@@ -1505,13 +1753,19 @@ async fn main() -> Result<()> {
                                             block_root = %format!("0x{:x}", block_root),
                                             "Validator task: block signed, sending to chain"
                                         );
-                                        if chain_msg_sender_for_validator
+                                        let send_result = chain_msg_sender_for_validator
                                             .send(ChainMessage::ProcessBlock {
                                                 signed_block,
                                                 is_trusted: true,
                                                 should_gossip: true,
                                             })
-                                            .is_err()
+                                            .await;
+                                        if send_result.is_ok() {
+                                            METRICS.get().map(|m| {
+                                                m.grandine_chain_message_channel_depth.inc()
+                                            });
+                                        }
+                                        if send_result.is_err()
                                         {
                                             warn!(
                                                 "Validator task: chain message channel closed, stopping"
@@ -1551,12 +1805,17 @@ async fn main() -> Result<()> {
                         }
 
                         let (tx, rx) = oneshot::channel();
-                        if validator_chain_sender
+                        let send_result = validator_chain_sender
                             .send(ValidatorChainMessage::BuildAttestationData {
                                 slot: Slot(current_slot),
                                 sender: tx,
-                            })
-                            .is_err()
+                            });
+                        if send_result.is_ok() {
+                            METRICS.get().map(|m| {
+                                m.grandine_validator_chain_message_channel_depth.inc()
+                            });
+                        }
+                        if send_result.is_err()
                         {
                             warn!("Validator task: chain channel closed, stopping");
                             break;
@@ -1569,10 +1828,12 @@ async fn main() -> Result<()> {
                                 } else {
                                     u64::MAX
                                 };
-                                let attestations = vs.create_attestations_from_data(
-                                    Slot(current_slot),
-                                    attestation_data,
-                                );
+                                let attestations = vs
+                                    .create_attestations_from_data(
+                                        Slot(current_slot),
+                                        attestation_data,
+                                    )
+                                    .await;
                                 for signed_att in attestations {
                                     if signed_att.validator_id == proposer_index {
                                         continue;
@@ -1588,13 +1849,19 @@ async fn main() -> Result<()> {
                                         subnet_id = subnet_id,
                                         "Validator task: broadcasting attestation"
                                     );
-                                    if chain_msg_sender_for_validator
+                                    let send_result = chain_msg_sender_for_validator
                                         .send(ChainMessage::ProcessAttestation {
                                             signed_attestation: signed_att,
                                             is_trusted: true,
                                             should_gossip: true,
                                         })
-                                        .is_err()
+                                        .await;
+                                    if send_result.is_ok() {
+                                        METRICS.get().map(|m| {
+                                            m.grandine_chain_message_channel_depth.inc()
+                                        });
+                                    }
+                                    if send_result.is_err()
                                     {
                                         warn!(
                                             "Validator task: chain message channel closed, stopping"

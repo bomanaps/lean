@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Result, anyhow, ensure};
 use bitvec::{bitvec, order::Lsb0, vec::BitVec};
 use metrics::METRICS;
 use serde::{Deserialize, Serialize};
@@ -10,8 +10,10 @@ use typenum::{Prod, U262144};
 use xmss::{PublicKey, Signature};
 
 use crate::{
-    AggregatedSignatureProof, Attestation, Checkpoint, Config, SignatureKey, Slot,
-    attestation::{AggregatedAttestation, AggregatedAttestations, AggregationBits},
+    AggregatedSignatureProof, Checkpoint, Config, Slot,
+    attestation::{
+        AggregatedAttestation, AggregatedAttestations, AggregationBits, AttestationData,
+    },
     block::{Block, BlockBody, BlockHeader, SignedBlock},
     validator::{Validator, ValidatorRegistryLimit, Validators},
 };
@@ -604,37 +606,24 @@ impl State {
 
     /// Build a valid block on top of this state.
     ///
-    /// Computes the post-state and creates a block with the correct state root.
-    /// If `available_attestations` and `known_block_roots` are provided,
-    /// performs fixed-point attestation collection: iteratively adds valid
-    /// attestations until no more can be included. This is necessary because
-    /// processing attestations may update the justified checkpoint, which may
-    /// make additional attestations valid.
+    /// Iterates over `aggregated_payloads` keyed by `data_root` (with the
+    /// AttestationData carried in the value), applies the spec's fixed-point
+    /// attestation selection: sort by `target.slot`, admit entries whose
+    /// `head.root` is known and whose `source` matches the current justified
+    /// checkpoint, greedily select proofs maximizing validator coverage, run
+    /// the STF, and repeat as long as the post-state's justified checkpoint
+    /// advances. Caps distinct AttestationData entries at MAX_ATTESTATIONS_DATA.
     ///
-    /// # Arguments
-    ///
-    /// * `slot` - Target slot for the block
-    /// * `proposer_index` - Validator index of the proposer
-    /// * `parent_root` - Root of the parent block (must match state after slot processing)
-    /// * `initial_attestations` - Initial attestations to include
-    /// * `available_attestations` - Optional pool of attestations to collect from
-    /// * `known_block_roots` - Optional set of known block roots for attestation validation
-    /// * `gossip_signatures` - Optional map of individual signatures from gossip
-    /// * `aggregated_payloads` - Optional map of aggregated signature proofs
-    ///
-    /// # Returns
-    ///
-    /// Tuple of (Block, post-State, collected aggregated attestations, aggregated proofs)
+    /// Aggregator-published proofs are the sole input — no gossip-time
+    /// re-aggregation at proposal. Matches leanSpec build_block, ethlambda's
+    /// blockchain::store::build_block, and zeam's getProposalAttestations.
     pub fn build_block(
         &self,
         slot: Slot,
         proposer_index: u64,
         parent_root: H256,
-        initial_attestations: Option<Vec<Attestation>>,
-        available_attestations: Option<Vec<Attestation>>,
-        known_block_roots: Option<&HashSet<H256>>,
-        gossip_signatures: Option<&HashMap<SignatureKey, Signature>>,
-        aggregated_payloads: Option<&HashMap<H256, Vec<AggregatedSignatureProof>>>,
+        known_block_roots: &HashSet<H256>,
+        aggregated_payloads: &HashMap<H256, (AttestationData, Vec<AggregatedSignatureProof>)>,
         log_inv_rate: usize,
     ) -> Result<(
         Block,
@@ -642,120 +631,105 @@ impl State {
         Vec<AggregatedAttestation>,
         Vec<AggregatedSignatureProof>,
     )> {
-        // Initialize attestation set
-        let mut attestations = initial_attestations.unwrap_or_default();
+        let mut selected: Vec<(AggregatedAttestation, AggregatedSignatureProof)> = Vec::new();
 
-        // Fixed-point attestation collection loop
-        // Iteratively add valid attestations until no new ones can be added
-        loop {
-            // Create candidate block with current attestation set
-            let aggregated = AggregatedAttestation::aggregate_by_data(&attestations);
-
-            let candidate_block = Block {
-                slot,
-                proposer_index,
-                parent_root,
-                state_root: H256::zero(),
-                body: BlockBody {
-                    attestations: AggregatedAttestations::try_from_iter(aggregated.into_iter())?,
-                },
+        if !aggregated_payloads.is_empty() {
+            // Genesis edge case: process_block_header rebinds latest_justified.root
+            // to parent_root when building on slot 0. Apply the same derivation
+            // here so attestation sources match.
+            let mut current_justified = if self.latest_block_header.slot == Slot(0) {
+                Checkpoint {
+                    root: parent_root,
+                    slot: self.latest_justified.slot,
+                }
+            } else {
+                self.latest_justified.clone()
             };
 
-            // Apply state transition to get the post-block state
-            let post_state = self.process_slots(slot)?.process_block(&candidate_block)?;
+            // Sort by target.slot for deterministic processing order.
+            let mut sorted_entries: Vec<(&H256, &(AttestationData, Vec<AggregatedSignatureProof>))> =
+                aggregated_payloads.iter().collect();
+            sorted_entries.sort_by_key(|(_, (data, _))| data.target.slot);
 
-            let Some(ref available_attestations) = available_attestations else {
-                // No attestation source provided: done after computing post_state
-                break;
-            };
+            let mut processed_data_roots: HashSet<H256> = HashSet::new();
 
-            let Some(known_block_roots) = known_block_roots else {
-                // No attestation source provided: done after computing post_state
-                break;
-            };
+            loop {
+                let mut found_new = false;
 
-            //  Find new valid attestations matching post-state justification
-            let mut new_attestations = Vec::new();
+                for &(data_root, (att_data, proofs)) in &sorted_entries {
+                    if processed_data_roots.contains(data_root) {
+                        continue;
+                    }
+                    if processed_data_roots.len() >= MAX_ATTESTATIONS_DATA {
+                        break;
+                    }
+                    if !known_block_roots.contains(&att_data.head.root) {
+                        continue;
+                    }
+                    if att_data.source != current_justified {
+                        continue;
+                    }
 
-            // Track distinct AttestationData roots already accepted and newly added this iteration
-            let accepted_data_roots: HashSet<H256> = attestations
-                .iter()
-                .map(|a| a.data.hash_tree_root())
-                .collect();
-            let mut new_att_data_roots: HashSet<H256> = HashSet::new();
+                    processed_data_roots.insert(*data_root);
+                    found_new = true;
 
-            for attestation in available_attestations {
-                let data = &attestation.data;
-                let validator_id = attestation.validator_id;
-                let data_root = data.hash_tree_root();
-                let sig_key = SignatureKey::new(validator_id, data_root);
-
-                // Skip if target block is unknown
-                if !known_block_roots.contains(&data.head.root) {
-                    continue;
+                    let indices = AggregatedSignatureProof::select_greedily(proofs);
+                    for idx in indices {
+                        let proof = proofs[idx].clone();
+                        selected.push((
+                            AggregatedAttestation {
+                                aggregation_bits: proof.participants.clone(),
+                                data: att_data.clone(),
+                            },
+                            proof,
+                        ));
+                    }
                 }
 
-                // Skip if attestation source does not match post-state's latest justified
-                if data.source != post_state.latest_justified {
-                    continue;
+                if !found_new {
+                    break;
                 }
 
-                // Avoid adding duplicates of attestations already in the candidate set
-                if attestations.contains(attestation) {
-                    continue;
-                }
+                // Run STF on a candidate block to see if justification advanced.
+                let candidate_attestations = AggregatedAttestations::try_from_iter(
+                    selected.iter().map(|(att, _)| att.clone()),
+                )?;
+                let candidate_block = Block {
+                    slot,
+                    proposer_index,
+                    parent_root,
+                    state_root: H256::zero(),
+                    body: BlockBody {
+                        attestations: candidate_attestations,
+                    },
+                };
+                let post_state = self.process_slots(slot)?.process_block(&candidate_block)?;
 
-                // Enforce MAX_ATTESTATIONS_DATA: only admit a new AttestationData if under the limit
-                let is_existing_data = accepted_data_roots.contains(&data_root)
-                    || new_att_data_roots.contains(&data_root);
-                if !is_existing_data
-                    && accepted_data_roots.len() + new_att_data_roots.len() >= MAX_ATTESTATIONS_DATA
-                {
-                    continue;
-                }
-
-                // We can only include an attestation if we have some way to later provide
-                // an aggregated proof for its group:
-                // - either a per validator XMSS signature from gossip, or
-                // - at least one aggregated proof learned from a block that references
-                //   this validator+data.
-                let has_gossip_sig =
-                    gossip_signatures.is_some_and(|sigs| sigs.contains_key(&sig_key));
-                let has_block_proof =
-                    aggregated_payloads.is_some_and(|payloads| payloads.contains_key(&data_root));
-
-                if has_gossip_sig || has_block_proof {
-                    new_att_data_roots.insert(data_root);
-                    new_attestations.push(attestation.clone());
+                if post_state.latest_justified != current_justified {
+                    current_justified = post_state.latest_justified;
+                } else {
+                    break;
                 }
             }
-
-            // Fixed point reached: no new attestations found
-            if new_attestations.is_empty() {
-                break;
-            }
-
-            // Add new attestations and continue iteration
-            attestations.extend(new_attestations);
         }
 
-        let (aggregated_attestations, aggregated_signatures) = self.compute_aggregated_signatures(
-            &attestations,
-            gossip_signatures,
-            aggregated_payloads,
-            log_inv_rate,
-        )?;
+        // Compact: merge proofs sharing the same AttestationData via recursive
+        // aggregation so each AttestationData appears at most once in the body.
+        let compacted = self.compact_proofs_by_data(selected, log_inv_rate)?;
 
         METRICS.get().map(|metrics| {
             metrics
                 .lean_pq_sig_attestations_in_aggregated_signatures_total
                 .inc_by(
-                    aggregated_attestations
+                    compacted
                         .iter()
-                        .map(|v| v.aggregation_bits.to_validator_indices().len())
+                        .map(|(att, _)| att.aggregation_bits.to_validator_indices().len())
                         .sum::<usize>() as u64,
                 );
         });
+
+        let (aggregated_attestations, aggregated_signatures): (Vec<_>, Vec<_>) =
+            compacted.into_iter().unzip();
 
         let mut final_block = Block {
             slot,
@@ -764,7 +738,7 @@ impl State {
             state_root: H256::zero(),
             body: BlockBody {
                 attestations: AggregatedAttestations::try_from_iter(
-                    aggregated_attestations.clone(),
+                    aggregated_attestations.iter().cloned(),
                 )?,
             },
         };
@@ -781,309 +755,107 @@ impl State {
         ))
     }
 
-    pub fn compute_aggregated_signatures(
+    /// Merge selected (AggregatedAttestation, Proof) entries that share the
+    /// same AttestationData into a single recursive proof via
+    /// `aggregate_with_children`, preserving first-occurrence order. A block
+    /// body must contain at most one entry per AttestationData (spec invariant).
+    fn compact_proofs_by_data(
         &self,
-        attestations: &[Attestation],
-        gossip_signatures: Option<&HashMap<SignatureKey, Signature>>,
-        aggregated_payloads: Option<&HashMap<H256, Vec<AggregatedSignatureProof>>>,
+        entries: Vec<(AggregatedAttestation, AggregatedSignatureProof)>,
         log_inv_rate: usize,
-    ) -> Result<(Vec<AggregatedAttestation>, Vec<AggregatedSignatureProof>)> {
-        let mut results: Vec<(AggregatedAttestation, AggregatedSignatureProof)> = Vec::new();
+    ) -> Result<Vec<(AggregatedAttestation, AggregatedSignatureProof)>> {
+        if entries.len() <= 1 {
+            return Ok(entries);
+        }
 
-        // Group individual attestations by data
-        for aggregated in AggregatedAttestation::aggregate_by_data(attestations) {
-            let data = &aggregated.data;
-            let data_root = data.hash_tree_root();
-            let validator_ids = aggregated.aggregation_bits.to_validator_indices();
+        let mut order: Vec<H256> = Vec::new();
+        let mut groups: HashMap<H256, Vec<(AggregatedAttestation, AggregatedSignatureProof)>> =
+            HashMap::new();
+        for (att, proof) in entries {
+            let dr = att.data.hash_tree_root();
+            if !groups.contains_key(&dr) {
+                order.push(dr);
+            }
+            groups.entry(dr).or_default().push((att, proof));
+        }
 
-            // Phase 1: Gossip Collection
-            // Try to collect individual signatures from gossip network
-            let mut gossip_sigs = Vec::new();
-            let mut gossip_keys = Vec::new();
-            let mut gossip_ids = Vec::new();
+        let mut compacted: Vec<(AggregatedAttestation, AggregatedSignatureProof)> =
+            Vec::with_capacity(order.len());
 
-            let mut remaining = HashSet::new();
+        for data_root in order {
+            let group = groups.remove(&data_root).expect("group exists for data_root");
+            if group.len() == 1 {
+                compacted.extend(group);
+                continue;
+            }
 
-            if let Some(gossip_signatures) = gossip_signatures {
-                for vid in validator_ids {
-                    let key = SignatureKey::new(vid, data_root);
-                    if let Some(sig) = gossip_signatures.get(&key) {
-                        gossip_sigs.push(sig.clone());
-                        gossip_keys.push(
+            let data = group[0].0.data.clone();
+
+            let child_pk_vecs: Vec<Vec<PublicKey>> = group
+                .iter()
+                .map(|(_, proof)| {
+                    proof
+                        .get_participant_indices()
+                        .into_iter()
+                        .filter_map(|vid| {
                             self.validators
                                 .get(vid)
+                                .ok()
                                 .map(|v| v.attestation_pubkey.clone())
-                                .context(format!("invalid validator id {vid}"))?,
-                        );
-                        gossip_ids.push(vid);
-                    } else {
-                        remaining.insert(vid);
-                    }
+                        })
+                        .collect()
+                })
+                .collect();
+
+            let children_arg: Vec<(&[PublicKey], &AggregatedSignatureProof)> = child_pk_vecs
+                .iter()
+                .zip(group.iter())
+                .map(|(pks, (_, proof))| (pks.as_slice(), proof))
+                .collect();
+
+            let mut all_validator_ids: Vec<u64> = group
+                .iter()
+                .flat_map(|(_, proof)| proof.get_participant_indices())
+                .collect();
+            all_validator_ids.sort();
+            all_validator_ids.dedup();
+            let all_participants = AggregationBits::from_validator_indices(&all_validator_ids);
+
+            match AggregatedSignatureProof::aggregate_with_children(
+                all_participants.clone(),
+                &children_arg,
+                Vec::<PublicKey>::new(),
+                Vec::<Signature>::new(),
+                data_root,
+                data.slot.0 as u32,
+                log_inv_rate,
+            ) {
+                Ok(merged_proof) => {
+                    info!(
+                        slot = data.slot.0,
+                        children = group.len(),
+                        validators = all_validator_ids.len(),
+                        "compact_proofs_by_data: merged proofs into recursive proof"
+                    );
+                    compacted.push((
+                        AggregatedAttestation {
+                            aggregation_bits: all_participants,
+                            data,
+                        },
+                        merged_proof,
+                    ));
                 }
-            } else {
-                // No gossip data: all validators need fallback
-                remaining = validator_ids.iter().copied().collect();
-            }
-
-            // If we collected any gossip signatures, create an aggregated proof
-            if !gossip_ids.is_empty() {
-                let participants = AggregationBits::from_validator_indices(&gossip_ids);
-
-                let proof = AggregatedSignatureProof::aggregate(
-                    participants.clone(),
-                    gossip_keys,
-                    gossip_sigs,
-                    data_root,
-                    data.slot.0 as u32,
-                    log_inv_rate,
-                )?;
-
-                results.push((
-                    AggregatedAttestation {
-                        aggregation_bits: participants,
-                        data: data.clone(),
-                    },
-                    proof,
-                ));
-            }
-
-            // Phase 2: Fallback to block proofs using greedy set-cover.
-            // Collect all selected proofs as children, then compress into ONE
-            // recursive proof via aggregate_with_children (spec intent).
-            if let Some(payloads) = aggregated_payloads {
-                if !remaining.is_empty() {
-                    if let Some(candidates) = payloads.get(&data_root) {
-                        if !candidates.is_empty() {
-                            let mut phase2_children: Vec<&AggregatedSignatureProof> = Vec::new();
-
-                            loop {
-                                if remaining.is_empty() {
-                                    break;
-                                }
-
-                                let Some((best_proof, covered_set)) = candidates
-                                    .iter()
-                                    .map(|proof| {
-                                        let proof_validators: HashSet<u64> =
-                                            proof.get_participant_indices().into_iter().collect();
-                                        let intersection: HashSet<u64> = remaining
-                                            .intersection(&proof_validators)
-                                            .copied()
-                                            .collect();
-                                        (proof, intersection)
-                                    })
-                                    .max_by_key(|(_, intersection)| intersection.len())
-                                else {
-                                    break;
-                                };
-
-                                if covered_set.is_empty() {
-                                    break;
-                                }
-
-                                phase2_children.push(best_proof);
-                                for vid in &covered_set {
-                                    remaining.remove(vid);
-                                }
-                            }
-
-                            if !phase2_children.is_empty() {
-                                if phase2_children.len() == 1 {
-                                    // leanSpec state.py: `if len(proofs) == 1: sig = proofs[0]`
-                                    // Single proof: pass through directly without re-aggregating.
-                                    let single_proof = (*phase2_children[0]).clone();
-                                    let phase2_participants = single_proof.participants.clone();
-
-                                    info!(
-                                        slot = data.slot.0,
-                                        validators =
-                                            phase2_children[0].get_participant_indices().len(),
-                                        "Phase 2: single proof passed through directly"
-                                    );
-                                    results.push((
-                                        AggregatedAttestation {
-                                            aggregation_bits: phase2_participants,
-                                            data: data.clone(),
-                                        },
-                                        single_proof,
-                                    ));
-                                } else {
-                                    let child_pk_vecs: Vec<Vec<PublicKey>> = phase2_children
-                                        .iter()
-                                        .map(|child| {
-                                            child
-                                                .get_participant_indices()
-                                                .into_iter()
-                                                .filter_map(|vid| {
-                                                    self.validators
-                                                        .get(vid)
-                                                        .ok()
-                                                        .map(|v| v.attestation_pubkey.clone())
-                                                })
-                                                .collect()
-                                        })
-                                        .collect();
-
-                                    let children_arg: Vec<(
-                                        &[PublicKey],
-                                        &AggregatedSignatureProof,
-                                    )> = child_pk_vecs
-                                        .iter()
-                                        .zip(phase2_children.iter())
-                                        .map(|(pks, proof)| (pks.as_slice(), *proof))
-                                        .collect();
-
-                                    let mut phase2_validator_ids: Vec<u64> = phase2_children
-                                        .iter()
-                                        .flat_map(|child| child.get_participant_indices())
-                                        .collect();
-                                    phase2_validator_ids.sort();
-                                    phase2_validator_ids.dedup();
-
-                                    let phase2_participants =
-                                        AggregationBits::from_validator_indices(
-                                            &phase2_validator_ids,
-                                        );
-
-                                    match AggregatedSignatureProof::aggregate_with_children(
-                                        phase2_participants.clone(),
-                                        &children_arg,
-                                        Vec::<PublicKey>::new(),
-                                        Vec::<Signature>::new(),
-                                        data_root,
-                                        data.slot.0 as u32,
-                                        log_inv_rate,
-                                    ) {
-                                        Ok(proof) => {
-                                            info!(
-                                                slot = data.slot.0,
-                                                children = phase2_children.len(),
-                                                validators = phase2_validator_ids.len(),
-                                                "Phase 2: recursive block proof via aggregate_with_children"
-                                            );
-                                            results.push((
-                                                AggregatedAttestation {
-                                                    aggregation_bits: phase2_participants,
-                                                    data: data.clone(),
-                                                },
-                                                proof,
-                                            ));
-                                        }
-                                        Err(e) => {
-                                            warn!(
-                                                error = %e,
-                                                "Phase 2 recursive aggregation failed, skipping"
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "compact_proofs_by_data: merge failed, keeping proofs separate"
+                    );
+                    compacted.extend(group);
                 }
             }
         }
 
-        // Handle empty case
-        if results.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
-        }
-
-        // Post-loop compaction: the main loop may have emitted a Phase 1 (gossip) proof
-        // AND a Phase 2 (children) proof for the same AttestationData.
-        // Per spec, each AttestationData must appear at most once in the block body —
-        // merge any such pairs into a single recursive proof via aggregate_with_children.
-        let mut proof_groups: HashMap<
-            H256,
-            Vec<(AggregatedAttestation, AggregatedSignatureProof)>,
-        > = HashMap::new();
-        for (att, proof) in results {
-            proof_groups
-                .entry(att.data.hash_tree_root())
-                .or_default()
-                .push((att, proof));
-        }
-
-        let mut compacted: Vec<(AggregatedAttestation, AggregatedSignatureProof)> = Vec::new();
-
-        for (data_root, group) in proof_groups {
-            if group.len() == 1 {
-                // Only one proof for this data — no merge needed
-                compacted.extend(group);
-            } else {
-                // Multiple proofs (e.g. Phase 1 gossip + Phase 2 children) —
-                // merge into one recursive proof so each AttestationData appears once.
-                let data = group[0].0.data.clone();
-
-                let child_pk_vecs: Vec<Vec<PublicKey>> = group
-                    .iter()
-                    .map(|(_, proof)| {
-                        proof
-                            .get_participant_indices()
-                            .into_iter()
-                            .filter_map(|vid| {
-                                self.validators
-                                    .get(vid)
-                                    .ok()
-                                    .map(|v| v.attestation_pubkey.clone())
-                            })
-                            .collect()
-                    })
-                    .collect();
-
-                let children_arg: Vec<(&[PublicKey], &AggregatedSignatureProof)> = child_pk_vecs
-                    .iter()
-                    .zip(group.iter())
-                    .map(|(pks, (_, proof))| (pks.as_slice(), proof))
-                    .collect();
-
-                let mut all_validator_ids: Vec<u64> = group
-                    .iter()
-                    .flat_map(|(_, proof)| proof.get_participant_indices())
-                    .collect();
-                all_validator_ids.sort();
-                all_validator_ids.dedup();
-                let all_participants = AggregationBits::from_validator_indices(&all_validator_ids);
-
-                match AggregatedSignatureProof::aggregate_with_children(
-                    all_participants.clone(),
-                    &children_arg,
-                    Vec::<PublicKey>::new(),
-                    Vec::<Signature>::new(),
-                    data_root,
-                    data.slot.0 as u32,
-                    log_inv_rate,
-                ) {
-                    Ok(merged_proof) => {
-                        info!(
-                            slot = data.slot.0,
-                            children = group.len(),
-                            validators = all_validator_ids.len(),
-                            "Post-loop compaction: merged proofs into recursive proof"
-                        );
-                        compacted.push((
-                            AggregatedAttestation {
-                                aggregation_bits: all_participants,
-                                data,
-                            },
-                            merged_proof,
-                        ));
-                    }
-                    Err(e) => {
-                        warn!(
-                            error = %e,
-                            "Post-loop compaction failed, keeping proofs separate"
-                        );
-                        compacted.extend(group);
-                    }
-                }
-            }
-        }
-
-        let (aggregated_attestations, aggregated_proofs): (Vec<_>, Vec<_>) =
-            compacted.into_iter().unzip();
-
-        Ok((aggregated_attestations, aggregated_proofs))
+        Ok(compacted)
     }
 }
 

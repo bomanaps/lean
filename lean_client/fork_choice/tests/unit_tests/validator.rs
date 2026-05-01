@@ -6,14 +6,73 @@ use std::collections::HashMap;
 
 use crate::unit_tests::common::create_test_store;
 use containers::{
-    Attestation, AttestationData, Block, BlockBody, Checkpoint, Config, SignatureKey, SignedBlock,
-    Slot, State, Validator,
+    AggregatedSignatureProof, AggregationBits, Attestation, AttestationData, Block, BlockBody,
+    Checkpoint, Config, SignedBlock, Slot, State, Validator,
 };
 use fork_choice::store::{Store, get_forkchoice_store, produce_block_with_signatures, update_head};
 use rand::SeedableRng;
 use rand_chacha::ChaChaRng;
 use ssz::{H256, SszHash};
 use xmss::SecretKey;
+
+/// Build an `AggregatedSignatureProof` for the given validator set on the
+/// given AttestationData, then publish it into the proposer's input pool
+/// (`store.latest_known_aggregated_payloads` + `store.attestation_data_by_root`).
+/// Mirrors what an aggregator's `maybe_aggregate` would have done at runtime.
+fn publish_aggregated_payload(
+    store: &mut Store,
+    data: &AttestationData,
+    validator_ids: &[u64],
+    keys: &HashMap<u64, SecretKey>,
+) {
+    let data_root = data.hash_tree_root();
+    let head_state = store
+        .states
+        .get(&store.head)
+        .expect("head state must exist");
+
+    let pubkeys: Vec<_> = validator_ids
+        .iter()
+        .map(|&vid| {
+            head_state
+                .validators
+                .get(vid)
+                .expect("validator index out of range")
+                .attestation_pubkey
+                .clone()
+        })
+        .collect();
+
+    let signatures: Vec<_> = validator_ids
+        .iter()
+        .map(|&vid| {
+            keys.get(&vid)
+                .expect("missing secret key")
+                .sign(data_root, data.slot.0 as u32)
+                .expect("XMSS signing failed")
+        })
+        .collect();
+
+    let participants = AggregationBits::from_validator_indices(validator_ids);
+    let proof = AggregatedSignatureProof::aggregate(
+        participants,
+        pubkeys,
+        signatures,
+        data_root,
+        data.slot.0 as u32,
+        1,
+    )
+    .expect("AggregatedSignatureProof::aggregate failed");
+
+    store
+        .attestation_data_by_root
+        .insert(data_root, data.clone());
+    store
+        .latest_known_aggregated_payloads
+        .entry(data_root)
+        .or_default()
+        .push(proof);
+}
 
 fn create_test_store_with_signers() -> (Store, HashMap<u64, SecretKey>) {
     let config = Config { genesis_time: 1000 };
@@ -104,29 +163,16 @@ fn test_produce_block_with_attestations() {
     };
     let target = store.get_attestation_target();
 
-    // Add attestations for validators 5 and 6
-    for vid in [5u64, 6] {
-        let data = AttestationData {
-            slot: head_block.slot,
-            head: head_checkpoint.clone(),
-            target: target.clone(),
-            source: store.latest_justified.clone(),
-        };
-        store.latest_known_attestations.insert(vid, data.clone());
-
-        let data_root = data.hash_tree_root();
-        let sig_key = SignatureKey {
-            validator_id: vid,
-            data_root: data_root.clone(),
-        };
-        store.gossip_signatures.insert(
-            sig_key,
-            keys.get(&vid)
-                .unwrap()
-                .sign(data_root, head_block.slot.0 as u32)
-                .unwrap(),
-        );
-    }
+    // Publish a single aggregated payload covering validators 5 and 6 — this
+    // mirrors what an aggregator's `maybe_aggregate` would publish via gossip
+    // and what `on_aggregated_attestation` would land in the proposer's pool.
+    let data = AttestationData {
+        slot: head_block.slot,
+        head: head_checkpoint,
+        target,
+        source: store.latest_justified.clone(),
+    };
+    publish_aggregated_payload(&mut store, &data, &[5u64, 6], &keys);
 
     let slot = Slot(2);
     let validator_idx = 2;
@@ -234,7 +280,8 @@ fn test_produce_block_empty_attestations() {
 fn test_produce_block_state_consistency() {
     let (mut store, keys) = create_test_store_with_signers();
 
-    // Add an attestation for validator 7
+    // Publish an aggregated payload for validator 7. Same shape as a real
+    // aggregator-published payload feeding the proposer's pool.
     let head_block = store.blocks[&store.head].clone();
     let head_checkpoint = Checkpoint {
         root: store.head,
@@ -247,18 +294,7 @@ fn test_produce_block_state_consistency() {
         target,
         source: store.latest_justified.clone(),
     };
-    store.latest_known_attestations.insert(7, data.clone());
-    let sig_key = SignatureKey {
-        validator_id: 7,
-        data_root: data.hash_tree_root(),
-    };
-    store.gossip_signatures.insert(
-        sig_key,
-        keys.get(&7)
-            .unwrap()
-            .sign(data.hash_tree_root(), head_block.slot.0 as u32)
-            .unwrap(),
-    );
+    publish_aggregated_payload(&mut store, &data, &[7u64], &keys);
 
     let slot = Slot(4);
     let validator_idx = 4;
