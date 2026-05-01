@@ -2,12 +2,12 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, anyhow, ensure};
 use containers::{
-    AggregatedSignatureProof, Attestation, AttestationData, Block, BlockHeader, Checkpoint, Config,
+    AggregatedSignatureProof, AttestationData, Block, BlockHeader, Checkpoint, Config,
     SignatureKey, SignedAggregatedAttestation, SignedAttestation, SignedBlock, Slot, State,
 };
 use metrics::{METRICS, set_gauge_u64};
 use ssz::{H256, SszHash};
-use tracing::warn;
+use tracing::{info, warn};
 use xmss::Signature;
 
 pub type Interval = u64;
@@ -109,6 +109,19 @@ const JUSTIFICATION_LOOKBACK_SLOTS: u64 = 3;
 /// finalization jumps without risk of evicting a parent state still needed
 /// for an in-flight state transition.
 pub const STATE_PRUNE_BUFFER: u64 = 128;
+
+/// Hard upper bound on `store.blocks` entries when finalization stalls.
+/// At ~4s slots this is roughly 24h of chain history.
+pub const BLOCKS_TO_KEEP: usize = 21_600;
+
+/// Hard upper bound on `store.states` entries when finalization stalls.
+/// At ~4s slots this is roughly 3.3h of state history.
+pub const STATES_TO_KEEP: usize = 3_000;
+
+/// Slot-distance retention for attestation-related maps. Entries whose
+/// target.slot falls below `head_slot - HEAD_RETENTION_SLOTS` are evicted
+/// regardless of finalization state.
+pub const HEAD_RETENTION_SLOTS: u64 = 128;
 
 impl Store {
     pub fn produce_attestation_data(&self, slot: Slot) -> Result<AttestationData> {
@@ -559,10 +572,12 @@ pub struct BlockProductionInputs {
     pub validator_index: u64,
     pub head_root: H256,
     pub head_state: State,
-    pub available_attestations: Vec<Attestation>,
     pub known_block_roots: HashSet<H256>,
-    pub gossip_signatures: HashMap<SignatureKey, Signature>,
-    pub aggregated_payloads: HashMap<H256, Vec<AggregatedSignatureProof>>,
+    /// Joined view of `latest_known_aggregated_payloads` keyed by `data_root`,
+    /// with the `AttestationData` carried in the value. Entries whose
+    /// `attestation_data_by_root` lookup misses are dropped from this map and
+    /// counted in `lean_build_block_pool_missing_att_data`.
+    pub aggregated_payloads: HashMap<H256, (AttestationData, Vec<AggregatedSignatureProof>)>,
     pub log_inv_rate: usize,
     pub store_latest_justified: Checkpoint,
 }
@@ -590,55 +605,39 @@ pub fn prepare_block_production(
         expected_proposer
     );
 
-    // Step 1: individual attestations already tracked per-validator.
-    let mut available_attestations: Vec<Attestation> = store
-        .latest_known_attestations
-        .iter()
-        .map(|(validator_idx, attestation_data)| Attestation {
-            validator_id: *validator_idx,
-            data: attestation_data.clone(),
-        })
-        .collect();
-
-    // Step 2: synthesize entries for validators that arrived *only* via
-    // on_aggregated_attestation.  Those validators have proofs in
-    // latest_known_aggregated_payloads but were never inserted into
-    // latest_known_attestations, so build_block's fixed-point loop would
-    // otherwise silently skip them.
-    {
-        let known_validators: HashSet<u64> =
-            store.latest_known_attestations.keys().copied().collect();
-        let mut seen_synthesized: HashSet<(u64, H256)> = HashSet::new();
-        for (data_root, proofs) in &store.latest_known_aggregated_payloads {
-            if let Some(att_data) = store.attestation_data_by_root.get(data_root) {
-                for proof in proofs {
-                    for vid in proof.participants.to_validator_indices() {
-                        if !known_validators.contains(&vid)
-                            && seen_synthesized.insert((vid, *data_root))
-                        {
-                            available_attestations.push(Attestation {
-                                validator_id: vid,
-                                data: att_data.clone(),
-                            });
-                        }
-                    }
-                }
-            }
+    // Join `latest_known_aggregated_payloads` (proofs only, keyed by data_root)
+    // with `attestation_data_by_root` (the secondary index storing the
+    // AttestationData itself) into the spec-shaped pool unit consumed by
+    // build_block. Entries whose secondary-index lookup misses are dropped and
+    // counted; this keeps the proposer aligned with leanSpec/zeam/ethlambda
+    // which carry att_data inside the pool value.
+    let mut aggregated_payloads: HashMap<
+        H256,
+        (AttestationData, Vec<AggregatedSignatureProof>),
+    > = HashMap::with_capacity(store.latest_known_aggregated_payloads.len());
+    let mut missing_att_data: u64 = 0;
+    for (data_root, proofs) in &store.latest_known_aggregated_payloads {
+        if let Some(att_data) = store.attestation_data_by_root.get(data_root) {
+            aggregated_payloads.insert(*data_root, (att_data.clone(), proofs.clone()));
+        } else {
+            missing_att_data += 1;
+        }
+    }
+    if missing_att_data > 0 {
+        if let Some(m) = METRICS.get() {
+            m.lean_build_block_pool_missing_att_data
+                .inc_by(missing_att_data);
         }
     }
 
     let known_block_roots: HashSet<H256> = store.blocks.keys().copied().collect();
-    let gossip_signatures = store.gossip_signatures.clone();
-    let aggregated_payloads = store.latest_known_aggregated_payloads.clone();
 
     Ok(BlockProductionInputs {
         slot,
         validator_index,
         head_root,
         head_state,
-        available_attestations,
         known_block_roots,
-        gossip_signatures,
         aggregated_payloads,
         log_inv_rate,
         store_latest_justified: store.latest_justified.clone(),
@@ -653,26 +652,46 @@ pub fn execute_block_production(
         validator_index,
         head_root,
         head_state,
-        available_attestations,
         known_block_roots,
-        gossip_signatures,
         aggregated_payloads,
         log_inv_rate,
         store_latest_justified,
     } = inputs;
+
+    let pool_known_payloads = aggregated_payloads.len();
+    let pool_known_payloads_proofs: usize = aggregated_payloads
+        .values()
+        .map(|(_, proofs)| proofs.len())
+        .sum();
+    let pool_known_block_roots = known_block_roots.len();
+
+    info!(
+        slot = slot.0,
+        proposer = validator_index,
+        head_root = %head_root,
+        pool_known_payloads,
+        pool_known_payloads_proofs,
+        pool_known_block_roots,
+        "proposer pool snapshot"
+    );
 
     let (final_block, final_post_state, _aggregated_attestations, signatures) = head_state
         .build_block(
             slot,
             validator_index,
             head_root,
-            None,
-            Some(available_attestations),
-            Some(&known_block_roots),
-            Some(&gossip_signatures),
-            Some(&aggregated_payloads),
+            &known_block_roots,
+            &aggregated_payloads,
             log_inv_rate,
         )?;
+
+    info!(
+        slot = slot.0,
+        proposer = validator_index,
+        block_attestations = final_block.body.attestations.len_usize(),
+        block_signatures = signatures.len(),
+        "proposer block built"
+    );
 
     ensure!(
         final_post_state.latest_justified.slot >= store_latest_justified.slot,

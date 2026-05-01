@@ -166,6 +166,60 @@ pub struct Metrics {
     /// XMSS verifications skipped because the signature was already cached
     pub grandine_xmss_verify_skipped_total: IntCounter,
 
+    pub grandine_chain_message_channel_depth: IntGauge,
+    pub grandine_validator_chain_message_channel_depth: IntGauge,
+    pub grandine_verify_result_channel_depth: IntGauge,
+    pub grandine_cpu_normal_executor_tasks_in_flight: IntGauge,
+
+    /// Wall-clock time of the aggregation snapshot deep-clone. After V2, the
+    /// clone runs on the aggregation worker thread (not the chain task), so this
+    /// no longer reflects chain-task wall-clock; it reflects how expensive a
+    /// single Store deep-clone is at the moment the aggregation worker picks up
+    /// a trigger.
+    pub lean_aggregation_snapshot_clone_seconds: Histogram,
+
+    /// Total number of times the chain task triggered an aggregation snapshot.
+    /// Compare against `lean_aggregation_snapshot_clone_seconds_count` to derive
+    /// dropped-trigger count (watch channel overwrites unconsumed values).
+    pub lean_aggregation_snapshots_triggered_total: IntCounter,
+
+    /// Number of payload entries dropped at proposal time because the
+    /// `attestation_data_by_root` secondary index has no AttestationData for
+    /// the data_root present in `latest_known_aggregated_payloads`. Drift
+    /// between the two maps would silently shrink the proposer's pool.
+    pub lean_build_block_pool_missing_att_data: IntCounter,
+
+    /// Snapshot size at clone time, measured in total entries across the largest
+    /// Store maps (blocks + states + gossip_signatures + known_aggregated_payloads
+    /// + new_aggregated_payloads + attestation_data_by_root). Used to correlate
+    /// snapshot wall-clock and aggregator memory growth with chain length.
+    pub lean_aggregation_snapshot_size_entries: Histogram,
+
+    /// Number of aggregation snapshots currently held in memory by the worker
+    /// thread (inc when `spawn_blocking` task starts, dec when it returns).
+    /// Should oscillate 0..=1 with the watch-channel design; sustained values
+    /// of 1 mean the worker is continuously busy (XMSS slower than slot rate).
+    pub lean_aggregation_in_flight_snapshots: IntGauge,
+
+    /// Time the chain task spends processing one `ChainMessage` (block,
+    /// attestation, aggregated attestation, etc.). Captures total work done
+    /// inside the `chain_message_receiver.recv() => { … }` select arm body
+    /// regardless of message kind. Bimodal distribution expected: spawn-only
+    /// path for blocks vs full write-locked attestation processing.
+    pub lean_chain_task_chain_message_seconds: Histogram,
+
+    /// Time the chain task spends inside the `verify_result_rx.recv() => { … }`
+    /// arm body — i.e. Phase 3 apply work (apply_verified_block + post-apply
+    /// bookkeeping + cascade respawn). Used to compare apply cost against the
+    /// snapshot/message-processing costs.
+    pub lean_chain_task_apply_seconds: Histogram,
+    pub grandine_store_blocks_size: IntGauge,
+    pub grandine_store_states_size: IntGauge,
+    pub grandine_store_gossip_signatures_size: IntGauge,
+    pub grandine_store_known_aggregated_payloads_size: IntGauge,
+    pub grandine_store_new_aggregated_payloads_size: IntGauge,
+    pub grandine_pending_blocks_by_root_size: IntGauge,
+
     pub lean_block_building_time_seconds: Histogram,
     pub lean_block_building_payload_aggregation_time_seconds: Histogram,
     pub lean_block_aggregated_payloads: Histogram,
@@ -431,6 +485,78 @@ impl Metrics {
                 "grandine_xmss_verify_skipped_total",
                 "XMSS verifications skipped (signature already cached) — root cause 4 indicator",
             )?,
+            grandine_chain_message_channel_depth: IntGauge::new(
+                "grandine_chain_message_channel_depth",
+                "Pending ChainMessage queue depth",
+            )?,
+            grandine_validator_chain_message_channel_depth: IntGauge::new(
+                "grandine_validator_chain_message_channel_depth",
+                "Pending ValidatorChainMessage queue depth",
+            )?,
+            grandine_verify_result_channel_depth: IntGauge::new(
+                "grandine_verify_result_channel_depth",
+                "Pending verify-result queue depth (verified blocks awaiting apply on chain task)",
+            )?,
+            grandine_cpu_normal_executor_tasks_in_flight: IntGauge::new(
+                "grandine_cpu_normal_executor_tasks_in_flight",
+                "Active tasks on cpu_normal DedicatedExecutor (XMSS block verify + attestation signing combined)",
+            )?,
+            lean_aggregation_snapshot_clone_seconds: Histogram::with_opts(histogram_opts!(
+                "lean_aggregation_snapshot_clone_seconds",
+                "Wall-clock time of the aggregation snapshot deep-clone (runs on aggregation worker thread)",
+                vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0],
+            ))?,
+            lean_aggregation_snapshots_triggered_total: IntCounter::new(
+                "lean_aggregation_snapshots_triggered_total",
+                "Total aggregation snapshot triggers issued by the chain task (aggregator nodes only)",
+            )?,
+            lean_build_block_pool_missing_att_data: IntCounter::new(
+                "lean_build_block_pool_missing_att_data",
+                "Total payload entries dropped at proposal time because attestation_data_by_root has no entry for the data_root",
+            )?,
+            lean_aggregation_snapshot_size_entries: Histogram::with_opts(histogram_opts!(
+                "lean_aggregation_snapshot_size_entries",
+                "Total entries across all major Store maps at snapshot clone time",
+                vec![100.0, 500.0, 1000.0, 5000.0, 10000.0, 50000.0, 100000.0, 500000.0],
+            ))?,
+            lean_aggregation_in_flight_snapshots: IntGauge::new(
+                "lean_aggregation_in_flight_snapshots",
+                "Snapshots currently held by the aggregation spawn_blocking worker (0 or 1 expected)",
+            )?,
+            lean_chain_task_chain_message_seconds: Histogram::with_opts(histogram_opts!(
+                "lean_chain_task_chain_message_seconds",
+                "Wall-clock time the chain task spends inside one ChainMessage select-arm body",
+                vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0],
+            ))?,
+            lean_chain_task_apply_seconds: Histogram::with_opts(histogram_opts!(
+                "lean_chain_task_apply_seconds",
+                "Wall-clock time the chain task spends inside one verify_result (Phase 3 apply) select-arm body",
+                vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0],
+            ))?,
+            grandine_store_blocks_size: IntGauge::new(
+                "grandine_store_blocks_size",
+                "Entries in store.blocks",
+            )?,
+            grandine_store_states_size: IntGauge::new(
+                "grandine_store_states_size",
+                "Entries in store.states",
+            )?,
+            grandine_store_gossip_signatures_size: IntGauge::new(
+                "grandine_store_gossip_signatures_size",
+                "Entries in store.gossip_signatures",
+            )?,
+            grandine_store_known_aggregated_payloads_size: IntGauge::new(
+                "grandine_store_known_aggregated_payloads_size",
+                "Entries in latest_known_aggregated_payloads",
+            )?,
+            grandine_store_new_aggregated_payloads_size: IntGauge::new(
+                "grandine_store_new_aggregated_payloads_size",
+                "Entries in latest_new_aggregated_payloads",
+            )?,
+            grandine_pending_blocks_by_root_size: IntGauge::new(
+                "grandine_pending_blocks_by_root_size",
+                "In-flight BlocksByRoot requests",
+            )?,
 
             // Block Production Metrics
             lean_block_building_time_seconds: Histogram::with_opts(histogram_opts!(
@@ -616,6 +742,43 @@ impl Metrics {
         ))?;
         default_registry.register(Box::new(self.grandine_fork_choice_new_attestations.clone()))?;
         default_registry.register(Box::new(self.grandine_xmss_verify_skipped_total.clone()))?;
+        default_registry
+            .register(Box::new(self.grandine_chain_message_channel_depth.clone()))?;
+        default_registry.register(Box::new(
+            self.grandine_validator_chain_message_channel_depth.clone(),
+        ))?;
+        default_registry
+            .register(Box::new(self.grandine_verify_result_channel_depth.clone()))?;
+        default_registry.register(Box::new(
+            self.grandine_cpu_normal_executor_tasks_in_flight.clone(),
+        ))?;
+        default_registry
+            .register(Box::new(self.lean_aggregation_snapshot_clone_seconds.clone()))?;
+        default_registry.register(Box::new(
+            self.lean_aggregation_snapshots_triggered_total.clone(),
+        ))?;
+        default_registry.register(Box::new(
+            self.lean_build_block_pool_missing_att_data.clone(),
+        ))?;
+        default_registry
+            .register(Box::new(self.lean_aggregation_snapshot_size_entries.clone()))?;
+        default_registry
+            .register(Box::new(self.lean_aggregation_in_flight_snapshots.clone()))?;
+        default_registry
+            .register(Box::new(self.lean_chain_task_chain_message_seconds.clone()))?;
+        default_registry.register(Box::new(self.lean_chain_task_apply_seconds.clone()))?;
+        default_registry.register(Box::new(self.grandine_store_blocks_size.clone()))?;
+        default_registry.register(Box::new(self.grandine_store_states_size.clone()))?;
+        default_registry
+            .register(Box::new(self.grandine_store_gossip_signatures_size.clone()))?;
+        default_registry.register(Box::new(
+            self.grandine_store_known_aggregated_payloads_size.clone(),
+        ))?;
+        default_registry.register(Box::new(
+            self.grandine_store_new_aggregated_payloads_size.clone(),
+        ))?;
+        default_registry
+            .register(Box::new(self.grandine_pending_blocks_by_root_size.clone()))?;
 
         // Block Production Metrics
         default_registry.register(Box::new(self.lean_block_building_time_seconds.clone()))?;

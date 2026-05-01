@@ -49,12 +49,14 @@ use crate::{
     },
 };
 
-const MAX_BLOCKS_BY_ROOT_RETRIES: u8 = 3;
+const MAX_BLOCKS_BY_ROOT_RETRIES: u8 = 10;
 const MAX_BLOCK_FETCH_DEPTH: u32 = 65536;
 const MAX_BLOCKS_PER_REQUEST: usize = 10;
 /// Stalled request timeout. If a peer accepts the stream but never sends a response,
 /// the request is cancelled and retried with a different peer after this duration.
-const BLOCKS_BY_ROOT_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+/// Set comfortably above libp2p's default protocol timeout (10s) so the app-layer
+/// gives the underlying stream room to complete under host CPU contention.
+const BLOCKS_BY_ROOT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct PendingBlocksRequest {
     roots: Vec<H256>,
@@ -774,6 +776,10 @@ where
                 } => {
                     let pending = self.pending_blocks_by_root.remove(&request_id);
                     let request_depth = pending.as_ref().map(|p| p.depth).unwrap_or(0);
+                    METRICS.get().map(|m| {
+                        m.grandine_pending_blocks_by_root_size
+                            .set(self.pending_blocks_by_root.len() as i64)
+                    });
 
                     // Release in-flight tracking so these roots can be re-requested if needed.
                     // Retry paths re-add them via send_blocks_by_root_request_internal.
@@ -957,6 +963,10 @@ where
             } => {
                 warn!(peer = %peer, ?error, "BlocksByRoot outbound request failed");
                 if let Some(req) = self.pending_blocks_by_root.remove(&request_id) {
+                    METRICS.get().map(|m| {
+                        m.grandine_pending_blocks_by_root_size
+                            .set(self.pending_blocks_by_root.len() as i64)
+                    });
                     // Release in-flight tracking before retry; retry re-adds via send_internal.
                     for root in &req.roots {
                         self.in_flight_roots.remove(root);
@@ -1025,6 +1035,10 @@ where
 
         for request_id in timed_out {
             if let Some(req) = self.pending_blocks_by_root.remove(&request_id) {
+                METRICS.get().map(|m| {
+                    m.grandine_pending_blocks_by_root_size
+                        .set(self.pending_blocks_by_root.len() as i64)
+                });
                 warn!(
                     num_roots = req.roots.len(),
                     depth = req.depth,
@@ -1417,6 +1431,10 @@ where
                 created_at: tokio::time::Instant::now(),
             },
         );
+        METRICS.get().map(|m| {
+            m.grandine_pending_blocks_by_root_size
+                .set(self.pending_blocks_by_root.len() as i64)
+        });
     }
 
     fn build_behaviour(

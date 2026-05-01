@@ -92,6 +92,46 @@ impl AggregatedSignatureProof {
     ) -> Result<()> {
         self.proof_data.verify(public_keys, message, slot)
     }
+
+    /// Greedy set-cover over a slice of proofs, returning indices of the proofs
+    /// to admit in priority order. Repeatedly picks the proof covering the
+    /// most uncovered validators; stops when no remaining proof adds coverage.
+    /// Mirrors leanSpec `AggregatedSignatureProof.select_greedily`.
+    pub fn select_greedily(proofs: &[AggregatedSignatureProof]) -> Vec<usize> {
+        let mut selected: Vec<usize> = Vec::new();
+        let mut covered: HashSet<u64> = HashSet::new();
+        let mut remaining: HashSet<usize> = (0..proofs.len()).collect();
+
+        while !remaining.is_empty() {
+            let best = remaining
+                .iter()
+                .copied()
+                .map(|idx| {
+                    let new_count = proofs[idx]
+                        .get_participant_indices()
+                        .into_iter()
+                        .filter(|vid| !covered.contains(vid))
+                        .count();
+                    (idx, new_count)
+                })
+                .max_by_key(|(_, n)| *n);
+
+            let Some((best_idx, best_count)) = best else {
+                break;
+            };
+            if best_count == 0 {
+                break;
+            }
+
+            for vid in proofs[best_idx].get_participant_indices() {
+                covered.insert(vid);
+            }
+            selected.push(best_idx);
+            remaining.remove(&best_idx);
+        }
+
+        selected
+    }
 }
 
 /// Bitlist representing validator participation in an attestation.

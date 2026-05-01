@@ -5,9 +5,11 @@ edition = { workspace = true }
 [dependencies]
 anyhow = { workspace = true }
 containers = { workspace = true }
+dedicated_executor = { workspace = true }
 env-config = { workspace = true }
 ethereum-types = { workspace = true }
 fork_choice = { workspace = true }
+futures = { workspace = true }
 metrics = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }

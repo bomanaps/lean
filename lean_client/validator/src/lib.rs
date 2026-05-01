@@ -1,6 +1,7 @@
 // Lean validator client with XMSS signing support
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::Deserialize;
@@ -10,7 +11,9 @@ use containers::{
     AggregatedSignatureProof, AggregationBits, AttestationData, AttestationSignatures, Block,
     BlockSignatures, SignedAggregatedAttestation, SignedAttestation, SignedBlock, Slot,
 };
+use dedicated_executor::DedicatedExecutor;
 use fork_choice::store::Store;
+use futures::stream::{FuturesUnordered, StreamExt};
 use metrics::{METRICS, stop_and_discard, stop_and_record};
 use rayon::prelude::*;
 use ssz::H256;
@@ -98,7 +101,12 @@ impl ValidatorConfig {
 pub struct ValidatorService {
     pub config: ValidatorConfig,
     pub num_validators: u64,
-    key_manager: Option<KeyManager>,
+    /// Wrapped in `Arc` so each per-validator XMSS signing job can be moved
+    /// into a `DedicatedExecutor` task without cloning the secret keys.
+    key_manager: Option<Arc<KeyManager>>,
+    /// Shared CPU pool used for offloading XMSS attestation signing off the
+    /// validator task / chain task.
+    cpu_normal_executor: Arc<DedicatedExecutor>,
     /// Whether this node performs aggregation duties (devnet-3).
     /// Uses `AtomicBool` for interior mutability so the admin API can toggle
     /// the flag at runtime without requiring `&mut self` or a write lock.
@@ -151,13 +159,18 @@ fn extend_children_greedily<'a>(
 }
 
 impl ValidatorService {
-    pub fn new(config: ValidatorConfig, num_validators: u64) -> Self {
-        Self::new_with_aggregator(config, num_validators, false)
+    pub fn new(
+        config: ValidatorConfig,
+        num_validators: u64,
+        cpu_normal_executor: Arc<DedicatedExecutor>,
+    ) -> Self {
+        Self::new_with_aggregator(config, num_validators, cpu_normal_executor, false)
     }
 
     pub fn new_with_aggregator(
         config: ValidatorConfig,
         num_validators: u64,
+        cpu_normal_executor: Arc<DedicatedExecutor>,
         is_aggregator: bool,
     ) -> Self {
         info!(
@@ -178,6 +191,7 @@ impl ValidatorService {
             config,
             num_validators,
             key_manager: None,
+            cpu_normal_executor,
             is_aggregator: AtomicBool::new(is_aggregator),
         }
     }
@@ -186,14 +200,22 @@ impl ValidatorService {
         config: ValidatorConfig,
         num_validators: u64,
         keys_dir: impl AsRef<Path>,
+        cpu_normal_executor: Arc<DedicatedExecutor>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::new_with_keys_and_aggregator(config, num_validators, keys_dir, false)
+        Self::new_with_keys_and_aggregator(
+            config,
+            num_validators,
+            keys_dir,
+            cpu_normal_executor,
+            false,
+        )
     }
 
     pub fn new_with_keys_and_aggregator(
         config: ValidatorConfig,
         num_validators: u64,
         keys_dir: impl AsRef<Path>,
+        cpu_normal_executor: Arc<DedicatedExecutor>,
         is_aggregator: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut key_manager = KeyManager::new(&keys_dir)?;
@@ -229,7 +251,8 @@ impl ValidatorService {
         Ok(Self {
             config,
             num_validators,
-            key_manager: Some(key_manager),
+            key_manager: Some(Arc::new(key_manager)),
+            cpu_normal_executor,
             is_aggregator: AtomicBool::new(is_aggregator),
         })
     }
@@ -567,7 +590,7 @@ impl ValidatorService {
     /// The validator task calls `BuildAttestationData` on the chain task first,
     /// receives the `AttestationData` via oneshot, then calls this method.
     /// This keeps XMSS signing entirely off the chain task's thread.
-    pub fn create_attestations_from_data(
+    pub async fn create_attestations_from_data(
         &self,
         slot: Slot,
         attestation_data: AttestationData,
@@ -587,58 +610,81 @@ impl ValidatorService {
                 .start_timer()
         });
 
-        self.config
-            .validator_indices
-            .iter()
-            .filter_map(|&idx| {
-                let signature = if let Some(ref key_manager) = self.key_manager {
-                    let message = attestation_data.hash_tree_root();
-                    let epoch = slot.0 as u32;
-
-                    let _timer = METRICS.get().map(|metrics| {
-                        metrics
-                            .lean_pq_sig_attestation_signing_time_seconds
-                            .start_timer()
-                    });
-
-                    match key_manager.sign_attestation(idx, epoch, message) {
-                        Ok(sig) => {
-                            METRICS.get().map(|metrics| {
-                                metrics.lean_pq_sig_attestation_signatures_total.inc();
-                            });
-                            info!(
-                                slot = slot.0,
-                                validator = idx,
-                                target_slot = attestation_data.target.slot.0,
-                                source_slot = attestation_data.source.slot.0,
-                                "Created signed attestation"
-                            );
-                            sig
-                        }
-                        Err(e) => {
-                            warn!(
-                                validator = idx,
-                                error = %e,
-                                "Failed to sign attestation, skipping"
-                            );
-                            return None;
-                        }
-                    }
-                } else {
+        // No keys: return zero-signature attestations directly (test / passive mode).
+        let Some(key_manager) = self.key_manager.as_ref() else {
+            return self
+                .config
+                .validator_indices
+                .iter()
+                .map(|&idx| {
                     info!(
                         slot = slot.0,
                         validator = idx,
                         "Created attestation with zero signature"
                     );
-                    Signature::default()
-                };
-
-                Some(SignedAttestation {
-                    validator_id: idx,
-                    message: attestation_data.clone(),
-                    signature,
+                    SignedAttestation {
+                        validator_id: idx,
+                        message: attestation_data.clone(),
+                        signature: Signature::default(),
+                    }
                 })
-            })
-            .collect()
+                .collect();
+        };
+
+        let message = attestation_data.hash_tree_root();
+        let epoch = slot.0 as u32;
+        let target_slot = attestation_data.target.slot.0;
+        let source_slot = attestation_data.source.slot.0;
+
+        // Fan out signing across the executor's worker threads so we get
+        // concurrent XMSS signing instead of one-at-a-time on this task.
+        let mut sign_jobs = FuturesUnordered::new();
+        for &idx in &self.config.validator_indices {
+            let exec = self.cpu_normal_executor.clone();
+            let km = Arc::clone(key_manager);
+            sign_jobs.push(async move {
+                let job = exec.spawn(async move {
+                    let _timer = METRICS.get().map(|metrics| {
+                        metrics
+                            .lean_pq_sig_attestation_signing_time_seconds
+                            .start_timer()
+                    });
+                    km.sign_attestation(idx, epoch, message)
+                });
+                let result = job
+                    .await
+                    .unwrap_or_else(|e| Err(anyhow!("executor: {e}")));
+                (idx, result)
+            });
+        }
+
+        let mut attestations = Vec::with_capacity(self.config.validator_indices.len());
+        while let Some((idx, sig_result)) = sign_jobs.next().await {
+            match sig_result {
+                Ok(signature) => {
+                    METRICS.get().map(|metrics| {
+                        metrics.lean_pq_sig_attestation_signatures_total.inc();
+                    });
+                    info!(
+                        slot = slot.0,
+                        validator = idx,
+                        target_slot,
+                        source_slot,
+                        "Created signed attestation"
+                    );
+                    attestations.push(SignedAttestation {
+                        validator_id: idx,
+                        message: attestation_data.clone(),
+                        signature,
+                    });
+                }
+                Err(e) => warn!(
+                    validator = idx,
+                    error = %e,
+                    "Failed to sign attestation, skipping"
+                ),
+            }
+        }
+        attestations
     }
 }

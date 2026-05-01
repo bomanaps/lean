@@ -1,5 +1,6 @@
 use std::io;
 use std::io::{Read, Write};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use containers::{SignedBlock, Status};
@@ -294,6 +295,17 @@ impl LeanCodec {
             // 3-byte LE length field (bytes 1..=3 of header)
             let chunk_len =
                 u32::from_le_bytes([data[pos + 1], data[pos + 2], data[pos + 3], 0]) as usize;
+            if pos + 4 + chunk_len > data.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "snappy chunk_len {} at pos {} exceeds buffer len {}",
+                        chunk_len,
+                        pos,
+                        data.len()
+                    ),
+                ));
+            }
             pos += 4 + chunk_len;
         }
 
@@ -560,7 +572,12 @@ pub fn build(protocols: impl IntoIterator<Item = String>) -> ReqResp {
         .map(|name| (LeanProtocol(name), ProtocolSupport::Full))
         .collect::<Vec<_>>();
 
-    RequestResponse::with_codec(LeanCodec::default(), protocols, Config::default())
+    // libp2p Config::default() sets request_timeout to 10s. Under host CPU
+    // contention, lean's tokio worker can be late polling the stream and the
+    // protocol layer kills the request before our app-level retry logic gets
+    // a chance to react. Raise it well above the app-layer 30s timeout.
+    let config = Config::default().with_request_timeout(Duration::from_secs(60));
+    RequestResponse::with_codec(LeanCodec::default(), protocols, config)
 }
 
 /// Build a RequestResponse behavior for Status protocol only
