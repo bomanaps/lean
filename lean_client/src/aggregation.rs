@@ -37,11 +37,7 @@ impl AggregationService {
     /// The worker holds an `Arc<RwLock<Store>>` reference so it can read +
     /// clone the snapshot on its own thread instead of forcing the chain task
     /// to do the deep-clone.
-    pub fn new(
-        vs: Arc<ValidatorService>,
-        store: Arc<RwLock<Store>>,
-        log_rate: usize,
-    ) -> Self {
+    pub fn new(vs: Arc<ValidatorService>, store: Arc<RwLock<Store>>, log_rate: usize) -> Self {
         let (agg_tx, mut agg_rx) = watch::channel::<Option<u64>>(None);
         let (res_tx, res_rx) = mpsc::channel::<(
             u64,
@@ -99,11 +95,7 @@ impl AggregationService {
             }
         });
 
-        Self {
-            vs,
-            agg_tx,
-            res_rx,
-        }
+        Self { vs, agg_tx, res_rx }
     }
 
     /// Returns true if this node should aggregate for the given slot. Used by

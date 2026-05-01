@@ -651,9 +651,7 @@ impl ValidatorService {
                     });
                     km.sign_attestation(idx, epoch, message)
                 });
-                let result = job
-                    .await
-                    .unwrap_or_else(|e| Err(anyhow!("executor: {e}")));
+                let result = job.await.unwrap_or_else(|e| Err(anyhow!("executor: {e}")));
                 (idx, result)
             });
         }

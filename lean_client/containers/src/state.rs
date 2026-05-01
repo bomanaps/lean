@@ -647,8 +647,10 @@ impl State {
             };
 
             // Sort by target.slot for deterministic processing order.
-            let mut sorted_entries: Vec<(&H256, &(AttestationData, Vec<AggregatedSignatureProof>))> =
-                aggregated_payloads.iter().collect();
+            let mut sorted_entries: Vec<(
+                &H256,
+                &(AttestationData, Vec<AggregatedSignatureProof>),
+            )> = aggregated_payloads.iter().collect();
             sorted_entries.sort_by_key(|(_, (data, _))| data.target.slot);
 
             let mut processed_data_roots: HashSet<H256> = HashSet::new();
@@ -783,7 +785,9 @@ impl State {
             Vec::with_capacity(order.len());
 
         for data_root in order {
-            let group = groups.remove(&data_root).expect("group exists for data_root");
+            let group = groups
+                .remove(&data_root)
+                .expect("group exists for data_root");
             if group.len() == 1 {
                 compacted.extend(group);
                 continue;

@@ -406,10 +406,7 @@ async fn main() -> Result<()> {
 
     info!("{}", banner::banner());
     info!("════════════════════════════════════════════════════════");
-    info!(
-        "🚀 lean_client v{} started",
-        env!("CARGO_PKG_VERSION")
-    );
+    info!("🚀 lean_client v{} started", env!("CARGO_PKG_VERSION"));
     info!("════════════════════════════════════════════════════════");
 
     let args = Args::parse();
@@ -446,8 +443,7 @@ async fn main() -> Result<()> {
 
     let (outbound_p2p_sender, outbound_p2p_receiver) =
         mpsc::unbounded_channel::<OutboundP2pRequest>();
-    let (chain_message_sender, mut chain_message_receiver) =
-        mpsc::channel::<ChainMessage>(1024);
+    let (chain_message_sender, mut chain_message_receiver) = mpsc::channel::<ChainMessage>(1024);
     // Separate channel for validator task → chain task request-response messages.
     // Keeps ValidatorChainMessage (which carries oneshot senders) separate from
     // ChainMessage (which is Clone and used by the network layer).
@@ -1711,19 +1707,19 @@ async fn main() -> Result<()> {
                                 );
 
                                 let (tx, rx) = oneshot::channel();
-                                let send_result = validator_chain_sender
-                                    .send(ValidatorChainMessage::ProduceBlock {
+                                let send_result = validator_chain_sender.send(
+                                    ValidatorChainMessage::ProduceBlock {
                                         slot: Slot(current_slot),
                                         proposer_index: proposer_idx,
                                         sender: tx,
-                                    });
+                                    },
+                                );
                                 if send_result.is_ok() {
                                     METRICS.get().map(|m| {
                                         m.grandine_validator_chain_message_channel_depth.inc()
                                     });
                                 }
-                                if send_result.is_err()
-                                {
+                                if send_result.is_err() {
                                     warn!("Validator task: chain channel closed, stopping");
                                     break;
                                 }
@@ -1765,8 +1761,7 @@ async fn main() -> Result<()> {
                                                 m.grandine_chain_message_channel_depth.inc()
                                             });
                                         }
-                                        if send_result.is_err()
-                                        {
+                                        if send_result.is_err() {
                                             warn!(
                                                 "Validator task: chain message channel closed, stopping"
                                             );
@@ -1805,18 +1800,18 @@ async fn main() -> Result<()> {
                         }
 
                         let (tx, rx) = oneshot::channel();
-                        let send_result = validator_chain_sender
-                            .send(ValidatorChainMessage::BuildAttestationData {
+                        let send_result = validator_chain_sender.send(
+                            ValidatorChainMessage::BuildAttestationData {
                                 slot: Slot(current_slot),
                                 sender: tx,
-                            });
+                            },
+                        );
                         if send_result.is_ok() {
-                            METRICS.get().map(|m| {
-                                m.grandine_validator_chain_message_channel_depth.inc()
-                            });
+                            METRICS
+                                .get()
+                                .map(|m| m.grandine_validator_chain_message_channel_depth.inc());
                         }
-                        if send_result.is_err()
-                        {
+                        if send_result.is_err() {
                             warn!("Validator task: chain channel closed, stopping");
                             break;
                         }
@@ -1857,12 +1852,11 @@ async fn main() -> Result<()> {
                                         })
                                         .await;
                                     if send_result.is_ok() {
-                                        METRICS.get().map(|m| {
-                                            m.grandine_chain_message_channel_depth.inc()
-                                        });
+                                        METRICS
+                                            .get()
+                                            .map(|m| m.grandine_chain_message_channel_depth.inc());
                                     }
-                                    if send_result.is_err()
-                                    {
+                                    if send_result.is_err() {
                                         warn!(
                                             "Validator task: chain message channel closed, stopping"
                                         );
