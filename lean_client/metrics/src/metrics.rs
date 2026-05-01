@@ -517,7 +517,9 @@ impl Metrics {
             lean_aggregation_snapshot_size_entries: Histogram::with_opts(histogram_opts!(
                 "lean_aggregation_snapshot_size_entries",
                 "Total entries across all major Store maps at snapshot clone time",
-                vec![100.0, 500.0, 1000.0, 5000.0, 10000.0, 50000.0, 100000.0, 500000.0],
+                vec![
+                    100.0, 500.0, 1000.0, 5000.0, 10000.0, 50000.0, 100000.0, 500000.0
+                ],
             ))?,
             lean_aggregation_in_flight_snapshots: IntGauge::new(
                 "lean_aggregation_in_flight_snapshots",
@@ -526,7 +528,9 @@ impl Metrics {
             lean_chain_task_chain_message_seconds: Histogram::with_opts(histogram_opts!(
                 "lean_chain_task_chain_message_seconds",
                 "Wall-clock time the chain task spends inside one ChainMessage select-arm body",
-                vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0],
+                vec![
+                    0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0
+                ],
             ))?,
             lean_chain_task_apply_seconds: Histogram::with_opts(histogram_opts!(
                 "lean_chain_task_apply_seconds",
@@ -742,43 +746,39 @@ impl Metrics {
         ))?;
         default_registry.register(Box::new(self.grandine_fork_choice_new_attestations.clone()))?;
         default_registry.register(Box::new(self.grandine_xmss_verify_skipped_total.clone()))?;
-        default_registry
-            .register(Box::new(self.grandine_chain_message_channel_depth.clone()))?;
+        default_registry.register(Box::new(self.grandine_chain_message_channel_depth.clone()))?;
         default_registry.register(Box::new(
             self.grandine_validator_chain_message_channel_depth.clone(),
         ))?;
-        default_registry
-            .register(Box::new(self.grandine_verify_result_channel_depth.clone()))?;
+        default_registry.register(Box::new(self.grandine_verify_result_channel_depth.clone()))?;
         default_registry.register(Box::new(
             self.grandine_cpu_normal_executor_tasks_in_flight.clone(),
         ))?;
-        default_registry
-            .register(Box::new(self.lean_aggregation_snapshot_clone_seconds.clone()))?;
+        default_registry.register(Box::new(
+            self.lean_aggregation_snapshot_clone_seconds.clone(),
+        ))?;
         default_registry.register(Box::new(
             self.lean_aggregation_snapshots_triggered_total.clone(),
         ))?;
         default_registry.register(Box::new(
             self.lean_build_block_pool_missing_att_data.clone(),
         ))?;
-        default_registry
-            .register(Box::new(self.lean_aggregation_snapshot_size_entries.clone()))?;
-        default_registry
-            .register(Box::new(self.lean_aggregation_in_flight_snapshots.clone()))?;
-        default_registry
-            .register(Box::new(self.lean_chain_task_chain_message_seconds.clone()))?;
+        default_registry.register(Box::new(
+            self.lean_aggregation_snapshot_size_entries.clone(),
+        ))?;
+        default_registry.register(Box::new(self.lean_aggregation_in_flight_snapshots.clone()))?;
+        default_registry.register(Box::new(self.lean_chain_task_chain_message_seconds.clone()))?;
         default_registry.register(Box::new(self.lean_chain_task_apply_seconds.clone()))?;
         default_registry.register(Box::new(self.grandine_store_blocks_size.clone()))?;
         default_registry.register(Box::new(self.grandine_store_states_size.clone()))?;
-        default_registry
-            .register(Box::new(self.grandine_store_gossip_signatures_size.clone()))?;
+        default_registry.register(Box::new(self.grandine_store_gossip_signatures_size.clone()))?;
         default_registry.register(Box::new(
             self.grandine_store_known_aggregated_payloads_size.clone(),
         ))?;
         default_registry.register(Box::new(
             self.grandine_store_new_aggregated_payloads_size.clone(),
         ))?;
-        default_registry
-            .register(Box::new(self.grandine_pending_blocks_by_root_size.clone()))?;
+        default_registry.register(Box::new(self.grandine_pending_blocks_by_root_size.clone()))?;
 
         // Block Production Metrics
         default_registry.register(Box::new(self.lean_block_building_time_seconds.clone()))?;

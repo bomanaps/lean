@@ -12,7 +12,7 @@ use tracing::warn;
 use crate::block_cache::BlockCache;
 use crate::store::{
     BLOCKS_TO_KEEP, GOSSIP_DISPARITY_INTERVALS, HEAD_RETENTION_SLOTS, INTERVALS_PER_SLOT,
-    MILLIS_PER_INTERVAL, STATES_TO_KEEP, STATE_PRUNE_BUFFER, Store, tick_interval, update_head,
+    MILLIS_PER_INTERVAL, STATE_PRUNE_BUFFER, STATES_TO_KEEP, Store, tick_interval, update_head,
 };
 
 #[inline]
@@ -739,11 +739,7 @@ pub fn apply_verified_block(
 /// the spec-mandated `prune_stale_attestation_data` is a necessary but not a
 /// sufficient bound, since it never fires while finalization is stalled.
 fn prune_with_retention_bounds(store: &mut Store) {
-    let head_slot = store
-        .blocks
-        .get(&store.head)
-        .map(|b| b.slot.0)
-        .unwrap_or(0);
+    let head_slot = store.blocks.get(&store.head).map(|b| b.slot.0).unwrap_or(0);
     let keep_min_slot = head_slot.saturating_sub(HEAD_RETENTION_SLOTS);
 
     let mut protected: HashSet<H256> = HashSet::with_capacity(4);
@@ -791,10 +787,12 @@ fn prune_with_retention_bounds(store: &mut Store) {
         adr.get(&key.data_root)
             .is_none_or(|data| data.target.slot.0 >= keep_min_slot)
     });
-    store.latest_known_aggregated_payloads.retain(|data_root, _| {
-        adr.get(data_root)
-            .is_none_or(|data| data.target.slot.0 >= keep_min_slot)
-    });
+    store
+        .latest_known_aggregated_payloads
+        .retain(|data_root, _| {
+            adr.get(data_root)
+                .is_none_or(|data| data.target.slot.0 >= keep_min_slot)
+        });
     store.latest_new_aggregated_payloads.retain(|data_root, _| {
         adr.get(data_root)
             .is_none_or(|data| data.target.slot.0 >= keep_min_slot)
