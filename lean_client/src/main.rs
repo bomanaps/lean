@@ -47,7 +47,6 @@ use validator::{ValidatorConfig, ValidatorService};
 use xmss::{PublicKey, Signature};
 
 mod aggregation;
-mod banner;
 
 fn load_node_key(path: &str) -> Result<Keypair, Box<dyn std::error::Error>> {
     let hex_str = std::fs::read_to_string(path)?.trim().to_string();
@@ -404,10 +403,11 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    info!("{}", banner::banner());
-    info!("════════════════════════════════════════════════════════");
-    info!("🚀 lean_client v{} started", env!("CARGO_PKG_VERSION"));
-    info!("════════════════════════════════════════════════════════");
+    info!(
+        "Starting grandine v{} ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("GRANDINE_GIT_COMMIT_HASH"),
+    );
 
     let args = Args::parse();
 
