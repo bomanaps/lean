@@ -1,0 +1,24 @@
+{
+    "tests/consensus/devnet/networking/test_discv5_message_rejections.py::test_discv5_ping_decode_rejects_wrong_element_count[fork_Devnet][fork_devnet-networking_codec]": {
+        "network": "Devnet",
+        "leanEnv": "prod",
+        "expectException": "MessageDecodingError",
+        "codecName": "decode_failure",
+        "input": {
+            "decoder": "discv5_message",
+            "bytes": "0x01c0"
+        },
+        "output": {
+            "decoder": "discv5_message",
+            "errorType": "MessageDecodingError",
+            "errorMessage": "PING requires 2 elements"
+        },
+        "_info": {
+            "hash": "0x84b4a22afaf754c0b165d6e5eadaa2311b5f5294c80d6fde1261f79fabfe1523",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/devnet/networking/test_discv5_message_rejections.py::test_discv5_ping_decode_rejects_wrong_element_count[fork_Devnet]",
+            "description": "A PING payload with the wrong number of RLP elements is rejected.\n\n    PING requires exactly two fields: request_id and enr_seq. The payload\n    0x01 (ping type) followed by 0xc0 (empty RLP list) carries zero\n    elements, so the decoder must refuse to build a PING record.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

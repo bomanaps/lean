@@ -1,0 +1,24 @@
+{
+    "tests/consensus/devnet/networking/test_snappy_frame_rejections.py::test_snappy_frame_decode_rejects_empty_input[fork_Devnet][fork_devnet-networking_codec]": {
+        "network": "Devnet",
+        "leanEnv": "prod",
+        "expectException": "SnappyDecompressionError",
+        "codecName": "decode_failure",
+        "input": {
+            "decoder": "snappy_frame",
+            "bytes": "0x"
+        },
+        "output": {
+            "decoder": "snappy_frame",
+            "errorType": "SnappyDecompressionError",
+            "errorMessage": "Input too short for framed snappy"
+        },
+        "_info": {
+            "hash": "0x956609c2eb435a50eaac92968012dd205b21867661afb9953da21b911bdf7178",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/devnet/networking/test_snappy_frame_rejections.py::test_snappy_frame_decode_rejects_empty_input[fork_Devnet]",
+            "description": "Empty input is not a valid snappy frame and must be rejected.\n\n    Every framed snappy stream begins with a ten-byte stream identifier.\n    Zero bytes cannot satisfy that minimum so the decoder aborts early\n    with SnappyDecompressionError.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

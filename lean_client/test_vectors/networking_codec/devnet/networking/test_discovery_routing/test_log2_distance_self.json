@@ -1,0 +1,21 @@
+{
+    "tests/consensus/devnet/networking/test_discovery_routing.py::test_log2_distance_self[fork_Devnet][fork_devnet-networking_codec]": {
+        "network": "Devnet",
+        "leanEnv": "prod",
+        "codecName": "log2_distance",
+        "input": {
+            "nodeA": "0xaaaa8419e9f49d0083561b48287df592939a8d19947d8c0ef88f2a4856a69fbb",
+            "nodeB": "0xaaaa8419e9f49d0083561b48287df592939a8d19947d8c0ef88f2a4856a69fbb"
+        },
+        "output": {
+            "distance": 0
+        },
+        "_info": {
+            "hash": "0xb79d37d018201fd36d7398d66736a770293abea659e54b97ab7d93b709fc47cd",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/devnet/networking/test_discovery_routing.py::test_log2_distance_self[fork_Devnet]",
+            "description": "Log2 distance to self is 0.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

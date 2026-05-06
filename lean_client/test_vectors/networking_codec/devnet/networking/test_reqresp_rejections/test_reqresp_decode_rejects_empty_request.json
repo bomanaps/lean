@@ -1,0 +1,24 @@
+{
+    "tests/consensus/devnet/networking/test_reqresp_rejections.py::test_reqresp_decode_rejects_empty_request[fork_Devnet][fork_devnet-networking_codec]": {
+        "network": "Devnet",
+        "leanEnv": "prod",
+        "expectException": "CodecError",
+        "codecName": "decode_failure",
+        "input": {
+            "decoder": "reqresp_request",
+            "bytes": "0x"
+        },
+        "output": {
+            "decoder": "reqresp_request",
+            "errorType": "CodecError",
+            "errorMessage": "Empty request"
+        },
+        "_info": {
+            "hash": "0xe2be6615ea27aa96906365f450a0fe9f114ace60f7d3606f89a49da11e857619",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/devnet/networking/test_reqresp_rejections.py::test_reqresp_decode_rejects_empty_request[fork_Devnet]",
+            "description": "Decoding an empty request is rejected with CodecError.\n\n    The req/resp framing demands a length-prefix varint followed by a\n    compressed payload. Zero input carries neither, so the decoder must\n    refuse before any downstream parsing.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

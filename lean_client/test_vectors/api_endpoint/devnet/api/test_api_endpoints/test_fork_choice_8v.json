@@ -3,10 +3,12 @@
         "network": "Devnet",
         "leanEnv": "prod",
         "endpoint": "/lean/v0/fork_choice",
+        "method": "GET",
         "genesisParams": {
             "numValidators": 8,
             "genesisTime": 0
         },
+        "initialIsAggregator": false,
         "expectedStatusCode": 200,
         "expectedContentType": "application/json",
         "expectedBody": {
@@ -32,7 +34,7 @@
             "validator_count": 8
         },
         "_info": {
-            "hash": "0x0b66df5b4fb0c872fa9f0f3f69f241c7214349e3d28d708da46a264eaf12c63a",
+            "hash": "0xe3cd4c738e97a2078e332c512fddb24bf56c0420e139f2c58064f5287b45e2d6",
             "comment": "`leanSpec` generated test",
             "testId": "tests/consensus/devnet/api/test_api_endpoints.py::test_fork_choice_8v[fork_Devnet]",
             "description": "Fork choice tree at genesis with 8 validators. Same shape, higher count.",

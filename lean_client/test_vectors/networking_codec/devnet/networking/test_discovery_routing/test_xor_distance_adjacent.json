@@ -1,0 +1,21 @@
+{
+    "tests/consensus/devnet/networking/test_discovery_routing.py::test_xor_distance_adjacent[fork_Devnet][fork_devnet-networking_codec]": {
+        "network": "Devnet",
+        "leanEnv": "prod",
+        "codecName": "xor_distance",
+        "input": {
+            "nodeA": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "nodeB": "0x0000000000000000000000000000000000000000000000000000000000000002"
+        },
+        "output": {
+            "distance": "0x3"
+        },
+        "_info": {
+            "hash": "0x71fb7f0b896b14a3fa5c6aa35210376c162317caa38e587d362c9a1414849740",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/devnet/networking/test_discovery_routing.py::test_xor_distance_adjacent[fork_Devnet]",
+            "description": "XOR of 0x01 and 0x02 is 0x03 (lowest bits).",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}
