@@ -1,0 +1,24 @@
+{
+    "tests/consensus/devnet/networking/test_enr_rejections.py::test_enr_decode_rejects_oversize_payload[fork_Devnet][fork_devnet-networking_codec]": {
+        "network": "Devnet",
+        "leanEnv": "prod",
+        "expectException": "ValueError",
+        "codecName": "decode_failure",
+        "input": {
+            "decoder": "enr",
+            "bytes": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        "output": {
+            "decoder": "enr",
+            "errorType": "ValueError",
+            "errorMessage": "ENR exceeds max size: 301 > 300"
+        },
+        "_info": {
+            "hash": "0xe9301a5ed55c710820e09987803bf1a005d5b35144f3b48b4b17df349dea82d0",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/devnet/networking/test_enr_rejections.py::test_enr_decode_rejects_oversize_payload[fork_Devnet]",
+            "description": "An ENR RLP payload above the 300-byte cap is rejected.\n\n    EIP-778 caps the encoded ENR at 300 bytes so records can travel\n    comfortably through DNS TXT records. A 301-byte input must be\n    rejected before any RLP parsing runs.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

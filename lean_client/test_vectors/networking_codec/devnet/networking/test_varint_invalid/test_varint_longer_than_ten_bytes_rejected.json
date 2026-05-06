@@ -1,0 +1,24 @@
+{
+    "tests/consensus/devnet/networking/test_varint_invalid.py::test_varint_longer_than_ten_bytes_rejected[fork_Devnet][fork_devnet-networking_codec]": {
+        "network": "Devnet",
+        "leanEnv": "prod",
+        "expectException": "VarintError",
+        "codecName": "decode_failure",
+        "input": {
+            "decoder": "varint",
+            "bytes": "0x8080808080808080808080"
+        },
+        "output": {
+            "decoder": "varint",
+            "errorType": "VarintError",
+            "errorMessage": "Varint too long"
+        },
+        "_info": {
+            "hash": "0x2ea2b27aa23d5bc6c7907ab15aa2fcbfbf48cc943d461558e1268bf9da3012d8",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/devnet/networking/test_varint_invalid.py::test_varint_longer_than_ten_bytes_rejected[fork_Devnet]",
+            "description": "A varint running eleven continuation bytes exceeds the 64-bit cap and is rejected.\n\n    A uint64 fits in at most ten varint bytes (70 bits with 6 unused). Eleven\n    continuation bytes means the decoder cannot represent the value and must\n    raise `VarintError(\"Varint too long\")`.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

@@ -4,14 +4,14 @@
         "leanEnv": "prod",
         "endpoint": "/lean/v0/admin/aggregator",
         "method": "POST",
-        "initialIsAggregator": true,
-        "requestBody": {
-            "enabled": true
-        },
         "genesisParams": {
             "numValidators": 4,
             "genesisTime": 0
         },
+        "requestBody": {
+            "enabled": true
+        },
+        "initialIsAggregator": true,
         "expectedStatusCode": 200,
         "expectedContentType": "application/json",
         "expectedBody": {
@@ -19,6 +19,7 @@
             "previous": true
         },
         "_info": {
+            "hash": "0xe4d9c5d8178a36c7ddade1372c479b286f96080d2fe553ced3ff1d37f81b29b5",
             "comment": "`leanSpec` generated test",
             "testId": "tests/consensus/devnet/api/test_api_endpoints.py::test_aggregator_toggle_idempotent_enable[fork_Devnet]",
             "description": "POST enable=true on an already-enabled node returns previous=true and is a no-op.",

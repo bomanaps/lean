@@ -1,8 +1,8 @@
 ### Variables
 
 # Commit of lean specification. Allows to specify which spec version to use,
-#   when generating test vectors. Currently set to devnet-3 spec version.
-LEAN_SPEC_COMMIT ?= f64b1038caef043849147c791ddd64907fbf19a7
+#   when generating test vectors. Pinned to leanSpec PR #682 merge commit.
+LEAN_SPEC_COMMIT ?= 62eff6e7e6041a283877a546a07cb3b83f4f7d5b
 # Docker image name. Used for both release (with publish) and local builds.
 DOCKER_REPO ?= sifrai/lean
 # Image tag.

@@ -1,0 +1,27 @@
+{
+    "tests/consensus/devnet/networking/test_discv5_packet.py::test_discv5_packet_whoareyou[fork_Devnet][fork_devnet-networking_codec]": {
+        "network": "Devnet",
+        "leanEnv": "prod",
+        "codecName": "discv5_packet",
+        "input": {
+            "packetType": "whoareyou",
+            "destNodeId": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "nonce": "0x222222222222222222222222",
+            "maskingIv": "0x33333333333333333333333333333333",
+            "idNonce": "0x66666666666666666666666666666666",
+            "enrSeq": 42
+        },
+        "output": {
+            "encoded": "0x333333333333333333333333333333338a222e7ce7bf806691f20df705eccc9db30a68ddb7e0fb68e2e9d156e2b111ca349a67bbd5ffa62eefec4a62419adb",
+            "flag": 1,
+            "authdataSize": 24
+        },
+        "_info": {
+            "hash": "0x3c3c5e02b4ff9fe45221633ec5110d0e2ae48d1df54e73a56a9bfd7a646e6367",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/devnet/networking/test_discv5_packet.py::test_discv5_packet_whoareyou[fork_Devnet]",
+            "description": "WHOAREYOU packet (flag=1) with known inputs pins the full wire bytes.\n\n    WHOAREYOU carries no encrypted payload. The authdata is the 16-byte\n    ID nonce concatenated with the 8-byte ENR sequence number.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

@@ -1,0 +1,24 @@
+{
+    "tests/consensus/devnet/networking/test_gossipsub_rpc_rejections.py::test_gossipsub_rpc_decode_rejects_unknown_wire_type[fork_Devnet][fork_devnet-networking_codec]": {
+        "network": "Devnet",
+        "leanEnv": "prod",
+        "expectException": "ProtobufDecodeError",
+        "codecName": "decode_failure",
+        "input": {
+            "decoder": "gossipsub_rpc",
+            "bytes": "0x0e"
+        },
+        "output": {
+            "decoder": "gossipsub_rpc",
+            "errorType": "ProtobufDecodeError",
+            "errorMessage": "Unknown wire type: 6"
+        },
+        "_info": {
+            "hash": "0xc0c504c4d438535088dd2ee38cf36ed9b9c65e3ab9886ca0c1e5000acbead9c2",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/devnet/networking/test_gossipsub_rpc_rejections.py::test_gossipsub_rpc_decode_rejects_unknown_wire_type[fork_Devnet]",
+            "description": "A protobuf tag with an unrecognised wire type must be rejected.\n\n    The tag byte 0x0e encodes field number 1 with wire type 6. Wire types\n    beyond the set 0, 1, 2, 5 are unassigned; any occurrence in RPC traffic\n    must be rejected rather than silently skipped.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

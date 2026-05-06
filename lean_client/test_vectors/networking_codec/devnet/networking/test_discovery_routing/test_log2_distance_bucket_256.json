@@ -1,0 +1,21 @@
+{
+    "tests/consensus/devnet/networking/test_discovery_routing.py::test_log2_distance_bucket_256[fork_Devnet][fork_devnet-networking_codec]": {
+        "network": "Devnet",
+        "leanEnv": "prod",
+        "codecName": "log2_distance",
+        "input": {
+            "nodeA": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "nodeB": "0x8000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "output": {
+            "distance": 256
+        },
+        "_info": {
+            "hash": "0x297b8cfd64ded86acff60cb67bb8015d702e8fd15bd60707e203080b820b90b9",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/devnet/networking/test_discovery_routing.py::test_log2_distance_bucket_256[fork_Devnet]",
+            "description": "Highest bit only (0x80 in first byte) lands in bucket 256.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

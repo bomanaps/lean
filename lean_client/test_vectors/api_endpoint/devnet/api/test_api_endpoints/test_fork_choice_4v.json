@@ -3,10 +3,12 @@
         "network": "Devnet",
         "leanEnv": "prod",
         "endpoint": "/lean/v0/fork_choice",
+        "method": "GET",
         "genesisParams": {
             "numValidators": 4,
             "genesisTime": 0
         },
+        "initialIsAggregator": false,
         "expectedStatusCode": 200,
         "expectedContentType": "application/json",
         "expectedBody": {
@@ -32,7 +34,7 @@
             "validator_count": 4
         },
         "_info": {
-            "hash": "0x9fef671ba5f90989e6a16abe45cbe760772d2e64ead892dac806f910bd841dc5",
+            "hash": "0x3ca9c1339d2685d53ba440deac842390b3c3bd33467420f7e8afe1f969a20bb8",
             "comment": "`leanSpec` generated test",
             "testId": "tests/consensus/devnet/api/test_api_endpoints.py::test_fork_choice_4v[fork_Devnet]",
             "description": "Fork choice tree at genesis: single node, zero attestation weights.",

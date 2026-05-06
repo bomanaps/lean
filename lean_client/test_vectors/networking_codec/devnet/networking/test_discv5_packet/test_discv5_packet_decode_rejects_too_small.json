@@ -1,0 +1,25 @@
+{
+    "tests/consensus/devnet/networking/test_discv5_packet.py::test_discv5_packet_decode_rejects_too_small[fork_Devnet][fork_devnet-networking_codec]": {
+        "network": "Devnet",
+        "leanEnv": "prod",
+        "expectException": "ValueError",
+        "codecName": "decode_failure",
+        "input": {
+            "decoder": "discv5_packet",
+            "localNodeId": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "bytes": "0x00000000000000000000"
+        },
+        "output": {
+            "decoder": "discv5_packet",
+            "errorType": "ValueError",
+            "errorMessage": "Packet too small: 10 < 63"
+        },
+        "_info": {
+            "hash": "0x371dab06d19229596b801020c1545aa4a1e25a2366bbcf133fda73ac6e58b115",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/devnet/networking/test_discv5_packet.py::test_discv5_packet_decode_rejects_too_small[fork_Devnet]",
+            "description": "Decoding a packet below MIN_PACKET_SIZE must raise ValueError.\n\n    MIN_PACKET_SIZE is 63 bytes. A 10-byte blob cannot carry even the\n    masking IV plus a static header, so the decoder must reject before\n    any unmask work runs.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

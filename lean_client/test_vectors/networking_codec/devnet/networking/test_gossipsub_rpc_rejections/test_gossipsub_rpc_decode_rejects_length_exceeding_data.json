@@ -1,0 +1,24 @@
+{
+    "tests/consensus/devnet/networking/test_gossipsub_rpc_rejections.py::test_gossipsub_rpc_decode_rejects_length_exceeding_data[fork_Devnet][fork_devnet-networking_codec]": {
+        "network": "Devnet",
+        "leanEnv": "prod",
+        "expectException": "ProtobufDecodeError",
+        "codecName": "decode_failure",
+        "input": {
+            "decoder": "gossipsub_rpc",
+            "bytes": "0x0a64"
+        },
+        "output": {
+            "decoder": "gossipsub_rpc",
+            "errorType": "ProtobufDecodeError",
+            "errorMessage": "Length field 100 at position 1 exceeds data size 2"
+        },
+        "_info": {
+            "hash": "0xc18486b90d2aa2c1d1cfce22d50a64b562262fd290d7a361a67fbef16c6fdb6e",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/devnet/networking/test_gossipsub_rpc_rejections.py::test_gossipsub_rpc_decode_rejects_length_exceeding_data[fork_Devnet]",
+            "description": "A length-delimited field whose length runs past the payload is rejected.\n\n    The payload starts with tag 0x0a (field 1, length-delimited wire type)\n    followed by varint length 0x64 (100). The rest of the buffer carries\n    zero bytes, so the declared length cannot possibly be covered. The\n    decoder must raise before reading past the buffer end.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

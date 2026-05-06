@@ -1,0 +1,34 @@
+{
+    "tests/consensus/devnet/networking/test_reqresp_response_stream.py::test_stream_three_success_chunks_with_compressible_payloads[fork_Devnet][fork_devnet-networking_codec]": {
+        "network": "Devnet",
+        "leanEnv": "prod",
+        "codecName": "reqresp_response_stream",
+        "input": {
+            "chunks": [
+                {
+                    "responseCode": 0,
+                    "sszData": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+                },
+                {
+                    "responseCode": 0,
+                    "sszData": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                },
+                {
+                    "responseCode": 0,
+                    "sszData": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+            ]
+        },
+        "output": {
+            "encoded": "0x0040ff060000734e61507059000a000069f25079400000fa01000040ff060000734e61507059000a0000724a4f3f4000fffa01000040ff060000734e61507059000a00003b53b5474000aafa0100",
+            "chunkCount": 3
+        },
+        "_info": {
+            "hash": "0x2394ece6c81a1e26151d357573070006f64fe88be221aac7a3a799235095adb4",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/devnet/networking/test_reqresp_response_stream.py::test_stream_three_success_chunks_with_compressible_payloads[fork_Devnet]",
+            "description": "Three SUCCESS chunks whose payloads compress well.\n\n    Exercises the N>2 case and highlights that each chunk carries its\n    own snappy stream-identifier preamble inside the concatenated bytes;\n    stream-level parsers that reset snappy state between chunks must\n    produce identical output to stateful parsers.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}
