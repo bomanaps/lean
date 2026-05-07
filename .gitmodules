@@ -1,0 +1,3 @@
+[submodule "lean_client/dedicated_executor"]
+	path = lean_client/dedicated_executor
+	url = https://github.com/grandinetech/dedicated_executor
