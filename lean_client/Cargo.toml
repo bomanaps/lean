@@ -243,6 +243,7 @@ eth_ssz = { package = "ethereum_ssz", version = "0.10.0" }
 ethereum-types = "0.14"
 futures = "0.3"
 features = { git = "https://github.com/grandinetech/grandine", rev = "64afdee3c6be79fceffb66933dcb69a943f3f1ae" }
+git-version = "0.3"
 hex = "0.4.3"
 http-body-util = "0.1"
 http_api_utils = { git = "https://github.com/grandinetech/grandine", rev = "64afdee3c6be79fceffb66933dcb69a943f3f1ae" }
@@ -264,7 +265,7 @@ libp2p = { version = "0.56.0", default-features = false, features = [
 ] }
 libp2p-identity = { version = "0.2", features = ["secp256k1"] }
 libp2p-mplex = "0.39"
-dedicated_executor = { git = "https://github.com/bomanaps/dedicated_executor", rev = "e39afad2959e6ae3f55ed56f6117dfe12ec07359" }
+dedicated_executor = { path = "dedicated_executor" }
 num-bigint = "0.4"
 num-traits = "0.2"
 num_cpus = "1"
@@ -273,6 +274,7 @@ parking_lot = "0.12"
 paste = "1.0.15"
 pretty_assertions = "1.4"
 prometheus = { version = "0.14", features = ["process"] }
+prometheus_metrics = { git = "https://github.com/grandinetech/grandine", rev = "64afdee3c6be79fceffb66933dcb69a943f3f1ae" }
 rand = "0.10"
 rand_chacha = "0.10"
 rayon = "1"
@@ -315,6 +317,7 @@ dedicated_executor = { workspace = true }
 ethereum-types = { workspace = true }
 features = { workspace = true }
 fork_choice = { workspace = true }
+git-version = { workspace = true }
 hex = { workspace = true }
 http_api = { workspace = true }
 libp2p-identity = { workspace = true }

@@ -406,7 +406,7 @@ async fn main() -> Result<()> {
     info!(
         "Starting grandine v{} ({})",
         env!("CARGO_PKG_VERSION"),
-        env!("GRANDINE_GIT_COMMIT_HASH"),
+        git_version::git_version!(args = ["--always", "--abbrev=8"]),
     );
 
     let args = Args::parse();
@@ -455,11 +455,13 @@ async fn main() -> Result<()> {
         "lean-cpu-normal",
         (num_cpus / 2).max(2),
         None,
+        None,
     ));
     let cpu_low_executor = Arc::new(DedicatedExecutor::new(
         "lean-cpu-low",
         (num_cpus / 4).max(1),
         Some(19),
+        None,
     ));
 
     // Verified blocks travel back from the executor to the chain task on this channel.
