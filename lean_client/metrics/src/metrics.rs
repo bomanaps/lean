@@ -81,6 +81,9 @@ pub struct Metrics {
     /// Depth of fork choice reorgs (in blocks)
     pub lean_fork_choice_reorg_depth: Histogram,
 
+    /// Elapsed time between consecutive chain-task tick intervals
+    pub lean_tick_interval_duration_seconds: Histogram,
+
     // State Transition Metrics
     /// Latest justified slot
     pub lean_latest_justified_slot: IntGauge,
@@ -116,6 +119,9 @@ pub struct Metrics {
     // Network Metrics
     /// Number of connected peers
     pub lean_connected_peers: IntGaugeVec,
+
+    /// Number of peers in the gossipsub mesh
+    pub lean_gossip_mesh_peers: IntGaugeVec,
 
     /// Total number of peer connection events
     lean_peer_connection_events_total: IntCounterVec,
@@ -344,6 +350,13 @@ impl Metrics {
                 "Depth of fork choice reorgs (in blocks)",
                 vec![1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 20.0, 30.0, 50.0, 100.0]
             ))?,
+            lean_tick_interval_duration_seconds: Histogram::with_opts(histogram_opts!(
+                "lean_tick_interval_duration_seconds",
+                "Elapsed time between clock ticks in seconds",
+                vec![
+                    0.4, 0.6, 0.75, 0.8, 0.805, 0.81, 0.815, 0.82, 0.825, 0.85, 0.9, 1.0, 1.2, 1.6,
+                ]
+            ))?,
 
             // State Transition Metrics
             lean_latest_justified_slot: IntGauge::new(
@@ -405,6 +418,13 @@ impl Metrics {
             // Network Metrics
             lean_connected_peers: IntGaugeVec::new(
                 opts!("lean_connected_peers", "Number of connected peers",),
+                &["client"],
+            )?,
+            lean_gossip_mesh_peers: IntGaugeVec::new(
+                opts!(
+                    "lean_gossip_mesh_peers",
+                    "Number of peers in the gossipsub mesh",
+                ),
                 &["client"],
             )?,
             lean_peer_connection_events_total: IntCounterVec::new(
@@ -694,6 +714,7 @@ impl Metrics {
         ))?;
         default_registry.register(Box::new(self.lean_fork_choice_reorgs_total.clone()))?;
         default_registry.register(Box::new(self.lean_fork_choice_reorg_depth.clone()))?;
+        default_registry.register(Box::new(self.lean_tick_interval_duration_seconds.clone()))?;
         default_registry.register(Box::new(self.lean_latest_justified_slot.clone()))?;
         default_registry.register(Box::new(self.lean_latest_finalized_slot.clone()))?;
         default_registry.register(Box::new(self.lean_finalizations_total.clone()))?;
@@ -719,6 +740,7 @@ impl Metrics {
         ))?;
         default_registry.register(Box::new(self.lean_validators_count.clone()))?;
         default_registry.register(Box::new(self.lean_connected_peers.clone()))?;
+        default_registry.register(Box::new(self.lean_gossip_mesh_peers.clone()))?;
         default_registry.register(Box::new(self.lean_peer_connection_events_total.clone()))?;
         default_registry.register(Box::new(self.lean_peer_disconnection_events_total.clone()))?;
 

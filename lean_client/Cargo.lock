@@ -2415,6 +2415,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "containers",
  "fork_choice",
  "futures",
  "hex",
@@ -2423,6 +2424,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "spec_test_fixtures",
  "ssz",
  "test-generator",
  "tokio",
@@ -2430,6 +2432,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "validator",
+ "xmss",
 ]
 
 [[package]]
@@ -5790,6 +5793,18 @@ checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "spec_test_fixtures"
+version = "0.1.0"
+dependencies = [
+ "containers",
+ "hex",
+ "serde",
+ "serde_json",
+ "ssz",
+ "xmss",
 ]
 
 [[package]]

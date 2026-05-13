@@ -563,7 +563,7 @@ fn forkchoice(spec_file: &str) {
                             (store.config.genesis_time + (signed_block.block.slot.0 * 4)) * 1000;
                         on_tick(&mut store, block_time_millis, false);
 
-                        on_block(&mut store, &mut cache, signed_block).unwrap();
+                        on_block(&mut store, &mut cache, signed_block, true).unwrap();
                         Ok(block_root)
                     }));
 

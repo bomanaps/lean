@@ -1,0 +1,17 @@
+[package]
+name = "spec_test_fixtures"
+version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+
+[dependencies]
+containers = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ssz = { workspace = true }
+xmss = { workspace = true }
+
+[lints]
+workspace = true
