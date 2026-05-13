@@ -7,6 +7,7 @@ members = [
     "http_api",
     "metrics",
     "networking",
+    "spec_test_fixtures",
     "validator",
     "xmss",
 ]
@@ -227,6 +228,7 @@ fork_choice = { path = "./fork_choice" }
 http_api = { path = "./http_api" }
 metrics = { path = "./metrics" }
 networking = { path = "./networking" }
+spec_test_fixtures = { path = "./spec_test_fixtures" }
 validator = { path = "./validator" }
 xmss = { path = "./xmss" }
 

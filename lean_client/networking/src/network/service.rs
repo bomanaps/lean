@@ -350,6 +350,12 @@ where
         let mut timeout_interval = interval(BLOCKS_BY_ROOT_REQUEST_TIMEOUT);
         timeout_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+        // Periodic gossipsub mesh-peer count refresh. Reads the current set of
+        // unique peers across all subscribed mesh topics and publishes it as a
+        // gauge so churn between subscribe/unsubscribe events is captured.
+        let mut mesh_metric_interval = interval(Duration::from_secs(10));
+        mesh_metric_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
         loop {
             select! {
                 _ = reconnect_interval.tick() => {
@@ -360,6 +366,20 @@ where
                 }
                 _ = timeout_interval.tick() => {
                     self.sweep_timed_out_requests();
+                }
+                _ = mesh_metric_interval.tick() => {
+                    let mesh_peer_count = self
+                        .swarm
+                        .behaviour()
+                        .gossipsub
+                        .all_mesh_peers()
+                        .count() as i64;
+                    METRICS.get().map(|metrics| {
+                        metrics
+                            .lean_gossip_mesh_peers
+                            .with_label_values(&["unknown"])
+                            .set(mesh_peer_count)
+                    });
                 }
                 _ = discovery_interval.tick() => {
                     // Trigger active peer discovery

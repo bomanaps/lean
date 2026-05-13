@@ -979,10 +979,31 @@ async fn main() -> Result<()> {
     let http_store = store.clone();
     let aggregator_controller =
         Arc::new(AggregatorController::new(store.clone(), vs_for_controller));
+    // The hive `spec-assets-*` test suites drive the client through the
+    // `/lean/v0/test_driver/*` endpoints. They are only mounted when the
+    // simulator launches the client with `HIVE_LEAN_TEST_DRIVER=1`, so a
+    // production-mode binary will continue to expose the normal HTTP API
+    // and return 404 for any test-driver paths that get accidentally hit.
+    let test_driver_enabled = matches!(
+        std::env::var("HIVE_LEAN_TEST_DRIVER")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes")
+    );
     task::spawn(async move {
-        if let Err(err) =
+        let result = if test_driver_enabled {
+            info!("HTTP server starting in test-driver mode (HIVE_LEAN_TEST_DRIVER=1)");
+            http_api::run_test_driver_server(
+                args.http_config,
+                http_store,
+                Some(aggregator_controller),
+            )
+            .await
+        } else {
             http_api::run_server(args.http_config, http_store, Some(aggregator_controller)).await
-        {
+        };
+        if let Err(err) = result {
             error!("HTTP Server failed with error: {err:?}");
         }
     });
@@ -1041,6 +1062,9 @@ async fn main() -> Result<()> {
         // guard never fires twice for the same slot.
         let mut last_agg_slot: u64 = 0;
         let mut last_status_slot: Option<u64> = None;
+        // Tracks the previous tick instant so the duration between consecutive
+        // chain-task ticks can be observed at the top of each tick arm.
+        let mut last_tick_instant: Option<Instant> = None;
         let mut block_cache = BlockCache::new();
         let mut sync_state = if has_aggregator {
             SyncState::Syncing
@@ -1057,6 +1081,18 @@ async fn main() -> Result<()> {
             tokio::select! {
                 biased;
                 _ = tick_interval.tick() => {
+                    // Observe the duration since the previous tick before any
+                    // processing. The first tick after startup has nothing to
+                    // measure against and is skipped.
+                    let tick_instant = Instant::now();
+                    if let Some(prev) = last_tick_instant {
+                        let elapsed = tick_instant.duration_since(prev).as_secs_f64();
+                        METRICS.get().map(|m| {
+                            m.lean_tick_interval_duration_seconds.observe(elapsed)
+                        });
+                    }
+                    last_tick_instant = Some(tick_instant);
+
                     let now_millis = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap()
@@ -1117,7 +1153,7 @@ async fn main() -> Result<()> {
                     //   1. Normal: on_tick lands exactly at interval 2 → trigger fires.
                     //   2. Catch-up: on_tick skips past interval 2 (e.g. lands at 3 or 4
                     //      after a long block-processing burst) → trigger still fires for
-                    //      the current slot, mirroring zeam's explicit catch-up loop.
+                    //      the current slot via an explicit catch-up.
                     // last_agg_slot prevents double-firing within the same slot.
                     // Only trigger if this node is the aggregator for this slot.
                     // Previously gated on `has_aggregator` (any-validator-service),
@@ -1277,6 +1313,7 @@ async fn main() -> Result<()> {
                                                         verify_and_transition(
                                                             parent_state_for_child,
                                                             child_for_verify,
+                                                            true,
                                                         )
                                                     });
                                                     let outcome = job.await.unwrap_or_else(|e| {
@@ -1460,7 +1497,7 @@ async fn main() -> Result<()> {
                             tokio::spawn(async move {
                                 let signed_block_for_send = signed_block_for_verify.clone();
                                 let job = exec.spawn(async move {
-                                    verify_and_transition(parent_state, signed_block_for_verify)
+                                    verify_and_transition(parent_state, signed_block_for_verify, true)
                                 });
                                 let outcome = job
                                     .await

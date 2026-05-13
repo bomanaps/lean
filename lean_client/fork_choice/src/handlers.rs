@@ -493,6 +493,7 @@ pub fn on_block(
     store: &mut Store,
     cache: &mut BlockCache,
     signed_block: SignedBlock,
+    verify_signatures: bool,
 ) -> Result<BlockOutcome> {
     let block_root = signed_block.block.hash_tree_root();
 
@@ -509,8 +510,8 @@ pub fn on_block(
         );
     }
 
-    process_block_internal(store, signed_block, block_root)?;
-    process_pending_blocks(store, cache, vec![block_root]);
+    process_block_internal(store, signed_block, block_root, verify_signatures)?;
+    process_pending_blocks(store, cache, vec![block_root], verify_signatures);
 
     Ok(BlockOutcome::Applied)
 }
@@ -518,14 +519,25 @@ pub fn on_block(
 /// CPU-bound portion of block processing: verify XMSS signatures against the parent state
 /// and run the state transition. Safe to run on a `DedicatedExecutor` thread because it
 /// touches no `Store` state.
-pub fn verify_and_transition(parent_state: State, signed_block: SignedBlock) -> Result<State> {
+///
+/// Pass `verify_signatures = false` to skip the cryptographic signature check — only
+/// safe when signatures have already been validated upstream or when the caller is
+/// driving the function with synthetic signature placeholders (e.g. spec-test fixtures
+/// that ship unsigned blocks).
+pub fn verify_and_transition(
+    parent_state: State,
+    signed_block: SignedBlock,
+    verify_signatures: bool,
+) -> Result<State> {
     let _timer = METRICS.get().map(|metrics| {
         metrics
             .lean_fork_choice_block_processing_time_seconds
             .start_timer()
     });
 
-    signed_block.verify_signatures(parent_state.clone())?;
+    if verify_signatures {
+        signed_block.verify_signatures(parent_state.clone())?;
+    }
     parent_state.state_transition(signed_block, true)
 }
 
@@ -822,6 +834,7 @@ fn process_block_internal(
     store: &mut Store,
     signed_block: SignedBlock,
     block_root: H256,
+    verify_signatures: bool,
 ) -> Result<()> {
     let block = signed_block.block.clone();
     let attestations_count = block.body.attestations.len_u64();
@@ -841,11 +854,16 @@ fn process_block_internal(
         "Processing block - parent state info"
     );
 
-    let new_state = verify_and_transition(parent_state, signed_block.clone())?;
+    let new_state = verify_and_transition(parent_state, signed_block.clone(), verify_signatures)?;
     apply_verified_block(store, signed_block, new_state, block_root)
 }
 
-pub fn process_pending_blocks(store: &mut Store, cache: &mut BlockCache, mut roots: Vec<H256>) {
+pub fn process_pending_blocks(
+    store: &mut Store,
+    cache: &mut BlockCache,
+    mut roots: Vec<H256>,
+    verify_signatures: bool,
+) {
     while let Some(parent_root) = roots.pop() {
         let children: Vec<(H256, SignedBlock)> = cache
             .get_children(&parent_root)
@@ -855,7 +873,7 @@ pub fn process_pending_blocks(store: &mut Store, cache: &mut BlockCache, mut roo
 
         for (child_root, child_block) in children {
             cache.remove(&child_root);
-            if process_block_internal(store, child_block, child_root).is_ok() {
+            if process_block_internal(store, child_block, child_root, verify_signatures).is_ok() {
                 roots.push(child_root);
             }
         }

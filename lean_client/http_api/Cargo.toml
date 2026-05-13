@@ -7,6 +7,7 @@ edition = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
+containers = { workspace = true }
 fork_choice = { workspace = true }
 validator = { workspace = true }
 futures = { workspace = true }
@@ -15,10 +16,12 @@ metrics = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+spec_test_fixtures = { workspace = true }
 ssz = { workspace = true }
 tokio = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
+xmss = { workspace = true }
 
 [dev-dependencies]
 fork_choice = { workspace = true }
