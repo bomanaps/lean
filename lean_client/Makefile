@@ -20,7 +20,6 @@ CURRENT_DEVNET := devnet-4
 # Repo root that cross bind-mounts into its build container (see
 # `lean_client/Cross.toml`). Auto-derived locally; CI overrides via env.
 LEAN_REPO_ROOT ?= $(shell git rev-parse --show-toplevel)
-export LEAN_REPO_ROOT
 
 # Temporary variable, which constructs `--tag` arguments, to be passed into 
 #   docker build command. It is used as intermediatery step, not as config 
@@ -74,13 +73,13 @@ clean:
 x86_64-unknown-linux-gnu: ./target/x86_64-unknown-linux-gnu/release/lean_client
 
 ./target/x86_64-unknown-linux-gnu/release/lean_client:
-	cross build --bin lean_client --target x86_64-unknown-linux-gnu --profile release
+	LEAN_REPO_ROOT=$(LEAN_REPO_ROOT) cross build --bin lean_client --target x86_64-unknown-linux-gnu --profile release
 
 .PHONY: aarch64-unknown-linux-gnu
 aarch64-unknown-linux-gnu: ./target/aarch64-unknown-linux-gnu/release/lean_client
 
 ./target/aarch64-unknown-linux-gnu/release/lean_client:
-	cross build --bin lean_client --target aarch64-unknown-linux-gnu --profile release
+	LEAN_REPO_ROOT=$(LEAN_REPO_ROOT) cross build --bin lean_client --target aarch64-unknown-linux-gnu --profile release
 
 .PHONY: release
 release: docker
