@@ -1,0 +1,2 @@
+[build.env]
+volumes = ["LEAN_REPO_ROOT"]

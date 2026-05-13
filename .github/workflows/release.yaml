@@ -40,6 +40,7 @@ jobs:
       - name: Build & push docker images
         env:
           DOCKER_TAG: ${{ (github.ref_name == 'main' && 'unstable') || github.ref_name }}
+          LEAN_REPO_ROOT: ${{ github.workspace }}
         run: |
           make docker \
             DOCKER_TAG=${{ env.DOCKER_TAG }}
