@@ -17,6 +17,10 @@ GIT_BRANCH := $(shell git rev-parse --abbrev-ref HEAD)
 BUILD_DATE := $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 # Currently supported devnet. Used to publish devnet tag, along with `latest`.
 CURRENT_DEVNET := devnet-4
+# Repo root that cross bind-mounts into its build container (see
+# `lean_client/Cross.toml`). Auto-derived locally; CI overrides via env.
+LEAN_REPO_ROOT ?= $(shell git rev-parse --show-toplevel)
+export LEAN_REPO_ROOT
 
 # Temporary variable, which constructs `--tag` arguments, to be passed into 
 #   docker build command. It is used as intermediatery step, not as config 
