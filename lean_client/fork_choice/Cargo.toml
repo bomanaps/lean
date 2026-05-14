@@ -7,6 +7,7 @@ anyhow = { workspace = true }
 bls = { workspace = true }
 containers = { workspace = true }
 env-config = { workspace = true }
+indexmap = { workspace = true }
 metrics = { workspace = true }
 ssz = { workspace = true }
 tracing = { workspace = true }
