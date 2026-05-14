@@ -5,6 +5,7 @@ use containers::{
     AggregatedSignatureProof, AttestationData, Block, BlockHeader, Checkpoint, Config,
     SignatureKey, SignedAggregatedAttestation, SignedAttestation, SignedBlock, Slot, State,
 };
+use indexmap::IndexMap;
 use metrics::{METRICS, set_gauge_u64};
 use ssz::{H256, SszHash};
 use tracing::{info, warn};
@@ -74,14 +75,17 @@ pub struct Store {
     /// Aggregated signature proofs from block bodies (on-chain).
     /// These are attestations that have been included in blocks and are part of
     /// the "known" pool for safe target computation.
-    /// Keyed by attestation data root (H256).
-    pub latest_known_aggregated_payloads: HashMap<H256, Vec<AggregatedSignatureProof>>,
+    /// Keyed by attestation data root (H256). `IndexMap` preserves insertion
+    /// order so same-slot equivocation tie-breaks are deterministic and match
+    /// leanSpec's first-vote-wins semantics (Python dict insertion order).
+    pub latest_known_aggregated_payloads: IndexMap<H256, Vec<AggregatedSignatureProof>>,
 
     /// Aggregated signature proofs from gossip aggregation topic.
     /// These are newly received aggregations that haven't been migrated to "known" yet.
     /// At interval 3, we merge this with latest_known_aggregated_payloads for safe target.
-    /// Keyed by attestation data root (H256).
-    pub latest_new_aggregated_payloads: HashMap<H256, Vec<AggregatedSignatureProof>>,
+    /// Keyed by attestation data root (H256). See note on the `known` pool above
+    /// for why this is `IndexMap`.
+    pub latest_new_aggregated_payloads: IndexMap<H256, Vec<AggregatedSignatureProof>>,
 
     /// Attestation data indexed by hash (data_root).
     /// Used to look up the exact attestation data that was signed when
@@ -264,8 +268,8 @@ pub fn get_forkchoice_store(
         latest_known_attestations: HashMap::new(),
         latest_new_attestations: HashMap::new(),
         gossip_signatures: HashMap::new(),
-        latest_known_aggregated_payloads: HashMap::new(),
-        latest_new_aggregated_payloads: HashMap::new(),
+        latest_known_aggregated_payloads: IndexMap::new(),
+        latest_new_aggregated_payloads: IndexMap::new(),
         attestation_data_by_root: HashMap::new(),
         pending_attestations: HashMap::new(),
         pending_aggregated_attestations: HashMap::new(),
@@ -438,7 +442,7 @@ pub fn update_head(store: &mut Store) {
 /// Walks through all aggregated proofs and extracts the latest attestation
 /// data for each validator based on their participation bits.
 fn extract_attestations_from_aggregated_payloads(
-    payloads: &HashMap<H256, Vec<AggregatedSignatureProof>>,
+    payloads: &IndexMap<H256, Vec<AggregatedSignatureProof>>,
     attestation_data_by_root: &HashMap<H256, AttestationData>,
 ) -> HashMap<u64, AttestationData> {
     let mut attestations: HashMap<u64, AttestationData> = HashMap::new();
@@ -525,7 +529,7 @@ pub fn accept_new_attestations(store: &mut Store) {
         .extend(store.latest_new_attestations.drain());
     // Promote gossip-received aggregated proofs to the known pool so they
     // are available for block production at the next interval 0.
-    for (data_root, proofs) in store.latest_new_aggregated_payloads.drain() {
+    for (data_root, proofs) in store.latest_new_aggregated_payloads.drain(..) {
         store
             .latest_known_aggregated_payloads
             .entry(data_root)

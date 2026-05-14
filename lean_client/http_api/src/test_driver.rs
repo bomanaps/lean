@@ -17,7 +17,7 @@ use axum::{
     Json, Router, body::Bytes, extract::State as AxumState, http::StatusCode, routing::post,
 };
 use containers::{
-    AggregatedSignatureProof, BlockHeader, BlockSignatures, Config, SignedAggregatedAttestation,
+    AggregatedSignatureProof, BlockSignatures, Config, SignedAggregatedAttestation,
     SignedAttestation, SignedBlock, State,
 };
 use fork_choice::{
@@ -177,19 +177,6 @@ async fn init_fork_choice(
 
     let config = Config {
         genesis_time: anchor_state.config.genesis_time,
-    };
-
-    // Patch the latest_block_header.body_root to match the actual anchor block
-    // body. Fixtures emit a placeholder zero root in `latestBlockHeader` and
-    // expect the harness to fill it in from the anchor block (the existing
-    // local fork-choice test does the same).
-    let body_root = anchor_block.block.body.hash_tree_root();
-    anchor_state.latest_block_header = BlockHeader {
-        slot: anchor_block.block.slot,
-        proposer_index: anchor_block.block.proposer_index,
-        parent_root: anchor_block.block.parent_root,
-        state_root: anchor_block.block.state_root,
-        body_root,
     };
 
     let new_store = get_forkchoice_store(anchor_state, anchor_block, config, false);
