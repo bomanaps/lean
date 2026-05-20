@@ -293,6 +293,8 @@ ssz-types = "0.3"
 itertools = "0.14"
 test-generator = "0.3.1"
 thiserror = "2"
+tikv-jemallocator = { version = "0.6", features = ["stats", "unprefixed_malloc_on_supported_platforms"] }
+tikv-jemalloc-ctl = { version = "0.6", features = ["use_std"] }
 tiny-keccak = "2.0.2"
 tokio = { version = "1.0", features = ["full"] }
 tower = { version = "0.5", features = ["util"] }
@@ -335,3 +337,14 @@ tracing-subscriber = { workspace = true }
 validator = { workspace = true }
 xmss = { workspace = true }
 reqwest = { workspace = true }
+tikv-jemallocator = { workspace = true, optional = true }
+tikv-jemalloc-ctl = { workspace = true, optional = true }
+
+[features]
+default = ["jemalloc"]
+jemalloc = ["dep:tikv-jemallocator"]
+jemalloc_profiling = ["jemalloc", "dep:tikv-jemalloc-ctl", "tikv-jemallocator/profiling"]
+
+[profile.release]
+debug = "line-tables-only"
+strip = "none"
