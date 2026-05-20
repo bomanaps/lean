@@ -1,3 +1,12 @@
+#[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(all(feature = "jemalloc_profiling", not(target_env = "msvc")))]
+#[allow(non_upper_case_globals)]
+#[unsafe(export_name = "malloc_conf")]
+static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0";
+
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use containers::{
@@ -47,6 +56,54 @@ use validator::{ValidatorConfig, ValidatorService};
 use xmss::{PublicKey, Signature};
 
 mod aggregation;
+
+#[cfg(all(feature = "jemalloc_profiling", unix))]
+fn install_jemalloc_dump_signal_handler() {
+    use std::ffi::CString;
+    use tokio::signal::unix::{SignalKind, signal};
+
+    tokio::spawn(async move {
+        let mut stream = match signal(SignalKind::user_defined1()) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("failed to install SIGUSR1 handler for jemalloc dump: {e}");
+                return;
+            }
+        };
+        info!("SIGUSR1 handler installed; send `kill -USR1 <pid>` to dump jemalloc heap profile");
+
+        loop {
+            stream.recv().await;
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let path = format!("/tmp/grandine-heap-{ts}.prof");
+
+            info!(path = %path, "SIGUSR1 received, writing jemalloc heap dump");
+
+            let c_path = match CString::new(path.as_bytes()) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!("invalid path for jemalloc dump: {e}");
+                    continue;
+                }
+            };
+
+            let result = unsafe {
+                tikv_jemalloc_ctl::raw::write(
+                    b"prof.dump\0",
+                    c_path.as_ptr() as *mut std::os::raw::c_char,
+                )
+            };
+
+            match result {
+                Ok(()) => info!(path = %path, "jemalloc heap dump written"),
+                Err(e) => warn!("jemalloc heap dump failed: {e}"),
+            }
+        }
+    });
+}
 
 fn load_node_key(path: &str) -> Result<Keypair, Box<dyn std::error::Error>> {
     let hex_str = std::fs::read_to_string(path)?.trim().to_string();
@@ -408,6 +465,9 @@ async fn main() -> Result<()> {
         env!("CARGO_PKG_VERSION"),
         git_version::git_version!(args = ["--always", "--abbrev=8"]),
     );
+
+    #[cfg(all(feature = "jemalloc_profiling", unix))]
+    install_jemalloc_dump_signal_handler();
 
     let args = Args::parse();
 
