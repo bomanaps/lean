@@ -108,6 +108,23 @@ impl JustifiedSlots {
     }
 }
 
+fn attestation_data_matches_chain(
+    attestation_data: &AttestationData,
+    historical_block_hashes: &[H256],
+) -> bool {
+    if attestation_data.source.root.is_zero() || attestation_data.target.root.is_zero() {
+        return false;
+    }
+    let source_slot = attestation_data.source.slot.0 as usize;
+    let target_slot = attestation_data.target.slot.0 as usize;
+    if source_slot >= historical_block_hashes.len() || target_slot >= historical_block_hashes.len()
+    {
+        return false;
+    }
+    historical_block_hashes[source_slot] == attestation_data.source.root
+        && historical_block_hashes[target_slot] == attestation_data.target.root
+}
+
 #[derive(Clone, Debug, Ssz, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct State {
@@ -653,11 +670,10 @@ impl State {
         Vec<AggregatedSignatureProof>,
     )> {
         let mut selected: Vec<(AggregatedAttestation, AggregatedSignatureProof)> = Vec::new();
+        let mut child_payloads_consumed: u64 = 0;
+        let mut processed_data_roots_count: usize = 0;
 
         if !aggregated_payloads.is_empty() {
-            // Genesis edge case: process_block_header rebinds latest_justified.root
-            // to parent_root when building on slot 0. Apply the same derivation
-            // here so attestation sources match.
             let mut current_justified = if self.latest_block_header.slot == Slot(0) {
                 Checkpoint {
                     root: parent_root,
@@ -667,7 +683,23 @@ impl State {
                 self.latest_justified.clone()
             };
 
-            // Sort by target.slot for deterministic processing order.
+            let mut current_finalized_slot = self.latest_finalized.slot;
+            let mut current_justified_slots = self
+                .justified_slots
+                .clone()
+                .extend_to_slot(current_finalized_slot, Slot(slot.0.saturating_sub(1)));
+
+            let parent_slot = self.latest_block_header.slot.0 as usize;
+            let num_empty_slots = (slot.0 as usize).saturating_sub(parent_slot + 1);
+            let mut extended_historical_block_hashes: Vec<H256> = (&self.historical_block_hashes)
+                .into_iter()
+                .copied()
+                .collect();
+            extended_historical_block_hashes.push(parent_root);
+            for _ in 0..num_empty_slots {
+                extended_historical_block_hashes.push(H256::zero());
+            }
+
             let mut sorted_entries: Vec<(
                 &H256,
                 &(AttestationData, Vec<AggregatedSignatureProof>),
@@ -677,6 +709,11 @@ impl State {
             let mut processed_data_roots: HashSet<H256> = HashSet::new();
 
             loop {
+                let select_timer = METRICS.get().map(|m| {
+                    m.lean_block_proposal_attestation_build_phase_seconds
+                        .with_label_values(&["select_payloads"])
+                        .start_timer()
+                });
                 let mut found_new = false;
 
                 for &(data_root, (att_data, proofs)) in &sorted_entries {
@@ -689,7 +726,25 @@ impl State {
                     if !known_block_roots.contains(&att_data.head.root) {
                         continue;
                     }
-                    if att_data.source != current_justified {
+
+                    if !attestation_data_matches_chain(att_data, &extended_historical_block_hashes)
+                    {
+                        continue;
+                    }
+
+                    if !current_justified_slots
+                        .is_slot_justified(current_finalized_slot, att_data.source.slot)?
+                    {
+                        continue;
+                    }
+
+                    let is_genesis_self_vote =
+                        att_data.source.slot == Slot(0) && att_data.target.slot == Slot(0);
+
+                    if !is_genesis_self_vote
+                        && current_justified_slots
+                            .is_slot_justified(current_finalized_slot, att_data.target.slot)?
+                    {
                         continue;
                     }
 
@@ -697,6 +752,7 @@ impl State {
                     found_new = true;
 
                     let indices = AggregatedSignatureProof::select_greedily(proofs);
+                    child_payloads_consumed += indices.len() as u64;
                     for idx in indices {
                         let proof = proofs[idx].clone();
                         selected.push((
@@ -709,11 +765,18 @@ impl State {
                     }
                 }
 
+                drop(select_timer);
+
                 if !found_new {
                     break;
                 }
 
-                // Run STF on a candidate block to see if justification advanced.
+                let stf_timer = METRICS.get().map(|m| {
+                    m.lean_block_proposal_attestation_build_phase_seconds
+                        .with_label_values(&["stf_simulate"])
+                        .start_timer()
+                });
+
                 let candidate_attestations = AggregatedAttestations::try_from_iter(
                     selected.iter().map(|(att, _)| att.clone()),
                 )?;
@@ -728,17 +791,29 @@ impl State {
                 };
                 let post_state = self.process_slots(slot)?.process_block(&candidate_block)?;
 
-                if post_state.latest_justified != current_justified {
+                drop(stf_timer);
+
+                if post_state.latest_justified != current_justified
+                    || post_state.latest_finalized.slot != current_finalized_slot
+                {
                     current_justified = post_state.latest_justified;
+                    current_justified_slots = post_state.justified_slots.clone();
+                    current_finalized_slot = post_state.latest_finalized.slot;
                 } else {
                     break;
                 }
             }
+
+            processed_data_roots_count = processed_data_roots.len();
         }
 
-        // Compact: merge proofs sharing the same AttestationData via recursive
-        // aggregation so each AttestationData appears at most once in the body.
+        let compact_timer = METRICS.get().map(|m| {
+            m.lean_block_proposal_attestation_build_phase_seconds
+                .with_label_values(&["compact"])
+                .start_timer()
+        });
         let compacted = self.compact_proofs_by_data(selected, log_inv_rate)?;
+        drop(compact_timer);
 
         METRICS.get().map(|metrics| {
             metrics
@@ -753,6 +828,16 @@ impl State {
 
         let (aggregated_attestations, aggregated_signatures): (Vec<_>, Vec<_>) =
             compacted.into_iter().unzip();
+
+        METRICS.get().map(|m| {
+            m.lean_block_proposal_attestation_builds_total.inc();
+            m.lean_block_proposal_child_payloads_consumed_total
+                .inc_by(child_payloads_consumed);
+            m.lean_block_proposal_attestation_data_selected
+                .observe(processed_data_roots_count as f64);
+            m.lean_block_proposal_aggregates_selected
+                .observe(aggregated_signatures.len() as f64);
+        });
 
         let mut final_block = Block {
             slot,

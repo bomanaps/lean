@@ -3,7 +3,8 @@ use std::{sync::Arc, time::SystemTime};
 use anyhow::{Context, Result};
 use once_cell::sync::OnceCell;
 use prometheus::{
-    GaugeVec, Histogram, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, histogram_opts, opts,
+    GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
+    histogram_opts, opts,
 };
 
 pub static METRICS: OnceCell<Arc<Metrics>> = OnceCell::new();
@@ -194,6 +195,12 @@ pub struct Metrics {
     /// the data_root present in `latest_known_aggregated_payloads`. Drift
     /// between the two maps would silently shrink the proposer's pool.
     pub lean_build_block_pool_missing_att_data: IntCounter,
+    pub lean_build_block_fixed_point_no_converge_total: IntCounter,
+    pub lean_block_proposal_attestation_build_phase_seconds: HistogramVec,
+    pub lean_block_proposal_attestation_builds_total: IntCounter,
+    pub lean_block_proposal_child_payloads_consumed_total: IntCounter,
+    pub lean_block_proposal_attestation_data_selected: Histogram,
+    pub lean_block_proposal_aggregates_selected: Histogram,
 
     /// Snapshot size at clone time, measured in total entries across the largest
     /// Store maps (blocks + states + gossip_signatures + known_aggregated_payloads
@@ -534,6 +541,38 @@ impl Metrics {
                 "lean_build_block_pool_missing_att_data",
                 "Total payload entries dropped at proposal time because attestation_data_by_root has no entry for the data_root",
             )?,
+            lean_build_block_fixed_point_no_converge_total: IntCounter::new(
+                "lean_build_block_fixed_point_no_converge_total",
+                "Total build_block calls where the produced block's latest_justified did not reach the store's latest_justified",
+            )?,
+            lean_block_proposal_attestation_build_phase_seconds: HistogramVec::new(
+                histogram_opts!(
+                    "lean_block_proposal_attestation_build_phase_seconds",
+                    "Phase-level time in block-proposal attestation selection (build_block): select_payloads, compact, stf_simulate",
+                    vec![
+                        0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0
+                    ]
+                ),
+                &["phase"],
+            )?,
+            lean_block_proposal_attestation_builds_total: IntCounter::new(
+                "lean_block_proposal_attestation_builds_total",
+                "Completed block-proposal attestation selection runs (one per proposal attempt)",
+            )?,
+            lean_block_proposal_child_payloads_consumed_total: IntCounter::new(
+                "lean_block_proposal_child_payloads_consumed_total",
+                "Child aggregated payloads selected during greedy proof picking (before recursive compaction)",
+            )?,
+            lean_block_proposal_attestation_data_selected: Histogram::with_opts(histogram_opts!(
+                "lean_block_proposal_attestation_data_selected",
+                "Distinct AttestationData entries in the proposal block body",
+                vec![0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
+            ))?,
+            lean_block_proposal_aggregates_selected: Histogram::with_opts(histogram_opts!(
+                "lean_block_proposal_aggregates_selected",
+                "Aggregated signature proofs in the proposal result after compaction",
+                vec![0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]
+            ))?,
             lean_aggregation_snapshot_size_entries: Histogram::with_opts(histogram_opts!(
                 "lean_aggregation_snapshot_size_entries",
                 "Total entries across all major Store maps at snapshot clone time",
@@ -784,6 +823,26 @@ impl Metrics {
         ))?;
         default_registry.register(Box::new(
             self.lean_build_block_pool_missing_att_data.clone(),
+        ))?;
+        default_registry.register(Box::new(
+            self.lean_build_block_fixed_point_no_converge_total.clone(),
+        ))?;
+        default_registry.register(Box::new(
+            self.lean_block_proposal_attestation_build_phase_seconds
+                .clone(),
+        ))?;
+        default_registry.register(Box::new(
+            self.lean_block_proposal_attestation_builds_total.clone(),
+        ))?;
+        default_registry.register(Box::new(
+            self.lean_block_proposal_child_payloads_consumed_total
+                .clone(),
+        ))?;
+        default_registry.register(Box::new(
+            self.lean_block_proposal_attestation_data_selected.clone(),
+        ))?;
+        default_registry.register(Box::new(
+            self.lean_block_proposal_aggregates_selected.clone(),
         ))?;
         default_registry.register(Box::new(
             self.lean_aggregation_snapshot_size_entries.clone(),
