@@ -7,12 +7,15 @@ use std::collections::HashMap;
 use crate::unit_tests::common::create_test_store;
 use containers::{
     AggregatedSignatureProof, AggregationBits, Attestation, AttestationData, Block, BlockBody,
-    Checkpoint, Config, SignedBlock, Slot, State, Validator,
+    BlockSignatures, Checkpoint, Config, SignedBlock, Slot, State, Validator,
 };
+use fork_choice::block_cache::BlockCache;
+use fork_choice::handlers::on_block;
 use fork_choice::store::{Store, get_forkchoice_store, produce_block_with_signatures, update_head};
 use rand::SeedableRng;
 use rand_chacha::ChaChaRng;
 use ssz::{H256, SszHash};
+use std::collections::HashSet;
 use xmss::SecretKey;
 
 /// Build an `AggregatedSignatureProof` for the given validator set on the
@@ -109,7 +112,10 @@ fn create_test_store_with_signers() -> (Store, HashMap<u64, SecretKey>) {
         signature: Default::default(),
     };
 
-    (get_forkchoice_store(state, signed_block, config), keys)
+    (
+        get_forkchoice_store(state, signed_block, config, true),
+        keys,
+    )
 }
 // ---------------------------------------------------------------------------
 // TestBlockProduction
@@ -489,7 +495,7 @@ fn test_validator_operations_empty_store() {
         signature: Default::default(),
     };
 
-    let mut store = get_forkchoice_store(state, signed_block, config);
+    let mut store = get_forkchoice_store(state, signed_block, config, true);
 
     // Should be able to produce block and attestation
     let (_root, block, _sig) =
@@ -605,4 +611,176 @@ fn test_produce_attestation_data_uses_head_state_justified() {
 
     assert_eq!(attestation_data.source, expected_source);
     assert_ne!(attestation_data.source, store.latest_justified);
+}
+
+fn produce_and_apply(
+    store: &mut Store,
+    cache: &mut BlockCache,
+    slot: Slot,
+    keys: &HashMap<u64, SecretKey>,
+) -> H256 {
+    let num_validators = store.states[&store.head].validators.len_u64();
+    let proposer = slot.0 % num_validators;
+    let _ = keys;
+    let (_block_root, block, _sigs) =
+        produce_block_with_signatures(store, slot, proposer, 1).expect("block production failed");
+    let signed = SignedBlock {
+        block,
+        signature: BlockSignatures::default(),
+    };
+    let block_root = signed.block.hash_tree_root();
+    on_block(store, cache, signed, false).expect("on_block failed");
+    block_root
+}
+
+#[test]
+fn test_produce_block_closes_justification_gap() {
+    let (mut store, keys) = create_test_store_with_signers();
+    let mut cache = BlockCache::new();
+    let num_validators = store.states[&store.head].validators.len_u64();
+    let genesis_root = store.head;
+    let genesis_ckpt = Checkpoint {
+        root: genesis_root,
+        slot: Slot(0),
+    };
+
+    let block_1_root = produce_and_apply(&mut store, &mut cache, Slot(1), &keys);
+    let block_2_root = produce_and_apply(&mut store, &mut cache, Slot(2), &keys);
+    let block_3_root = produce_and_apply(&mut store, &mut cache, Slot(3), &keys);
+
+    let block_1_ckpt = Checkpoint {
+        root: block_1_root,
+        slot: Slot(1),
+    };
+    let block_2_ckpt = Checkpoint {
+        root: block_2_root,
+        slot: Slot(2),
+    };
+    let block_3_ckpt = Checkpoint {
+        root: block_3_root,
+        slot: Slot(3),
+    };
+
+    let att_target_block_1 = AttestationData {
+        slot: Slot(4),
+        head: block_3_ckpt.clone(),
+        target: block_1_ckpt.clone(),
+        source: genesis_ckpt.clone(),
+    };
+    publish_aggregated_payload(
+        &mut store,
+        &att_target_block_1,
+        &[0, 1, 2, 3, 4, 5, 6],
+        &keys,
+    );
+
+    let block_4_root = produce_and_apply(&mut store, &mut cache, Slot(4), &keys);
+    let block_4_ckpt = Checkpoint {
+        root: block_4_root,
+        slot: Slot(4),
+    };
+    assert_eq!(store.latest_justified, block_1_ckpt);
+
+    let att_target_block_4 = AttestationData {
+        slot: Slot(5),
+        head: block_4_ckpt.clone(),
+        target: block_4_ckpt.clone(),
+        source: block_1_ckpt.clone(),
+    };
+    publish_aggregated_payload(&mut store, &att_target_block_4, &[7, 8], &keys);
+
+    let block_5_root = produce_and_apply(&mut store, &mut cache, Slot(5), &keys);
+    assert_eq!(store.latest_justified, block_1_ckpt);
+    assert_eq!(store.head, block_5_root);
+
+    let att_target_block_2 = AttestationData {
+        slot: Slot(6),
+        head: block_3_ckpt.clone(),
+        target: block_2_ckpt.clone(),
+        source: genesis_ckpt.clone(),
+    };
+    publish_aggregated_payload(
+        &mut store,
+        &att_target_block_2,
+        &[0, 1, 2, 3, 4, 5, 6],
+        &keys,
+    );
+
+    let block_3_state = store
+        .states
+        .get(&block_3_root)
+        .expect("block_3 state missing")
+        .clone();
+    let known_block_roots: HashSet<H256> = store.blocks.keys().copied().collect();
+    let aggregated_payloads: HashMap<H256, (AttestationData, Vec<AggregatedSignatureProof>)> =
+        store
+            .latest_known_aggregated_payloads
+            .iter()
+            .filter_map(|(root, proofs)| {
+                store
+                    .attestation_data_by_root
+                    .get(root)
+                    .map(|data| (*root, (data.clone(), proofs.clone())))
+            })
+            .collect();
+    let proposer_6 = Slot(6).0 % num_validators;
+    let (block_6, _post_state_6, _atts_6, _sigs_6) = block_3_state
+        .build_block(
+            Slot(6),
+            proposer_6,
+            block_3_root,
+            &known_block_roots,
+            &aggregated_payloads,
+            1,
+        )
+        .expect("build_block for sibling block_6 failed");
+    let signed_block_6 = SignedBlock {
+        block: block_6,
+        signature: BlockSignatures::default(),
+    };
+    let block_6_root = signed_block_6.block.hash_tree_root();
+    on_block(&mut store, &mut cache, signed_block_6, false).expect("on_block for block_6 failed");
+
+    assert_eq!(store.latest_justified, block_2_ckpt);
+    assert_eq!(store.head, block_5_root);
+
+    let gap_closers: Vec<&AttestationData> = store
+        .latest_known_aggregated_payloads
+        .keys()
+        .filter_map(|root| store.attestation_data_by_root.get(root))
+        .filter(|d| d.target == block_2_ckpt)
+        .collect();
+    assert_eq!(gap_closers.len(), 1);
+    assert_eq!(gap_closers[0].source, genesis_ckpt);
+    assert_eq!(gap_closers[0].slot, Slot(6));
+
+    let proposer_7 = Slot(7).0 % num_validators;
+    let (_block_7_root, block_7, _sigs_7) =
+        produce_block_with_signatures(&mut store, Slot(7), proposer_7, 1)
+            .expect("block production for block_7 failed");
+
+    assert_eq!(block_7.parent_root, block_5_root);
+
+    let body_targets: Vec<Checkpoint> = (0..block_7.body.attestations.len_usize())
+        .map(|i| {
+            block_7
+                .body
+                .attestations
+                .get(i as u64)
+                .expect("missing attestation")
+                .data
+                .target
+                .clone()
+        })
+        .collect();
+    assert!(body_targets.contains(&block_2_ckpt));
+
+    let signed_block_7 = SignedBlock {
+        block: block_7,
+        signature: BlockSignatures::default(),
+    };
+    on_block(&mut store, &mut cache, signed_block_7, false).expect("on_block for block_7 failed");
+    assert_eq!(store.latest_justified, block_2_ckpt);
+
+    let _ = block_6_root;
 }

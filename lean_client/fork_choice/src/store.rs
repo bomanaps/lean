@@ -695,12 +695,16 @@ pub fn execute_block_production(
         "proposer block built"
     );
 
-    ensure!(
-        final_post_state.latest_justified.slot >= store_latest_justified.slot,
-        "Produced block justified={} < store justified={}. Fixed-point attestation loop did not converge.",
-        final_post_state.latest_justified.slot.0,
-        store_latest_justified.slot.0,
-    );
+    if final_post_state.latest_justified.slot < store_latest_justified.slot {
+        warn!(
+            produced = final_post_state.latest_justified.slot.0,
+            store = store_latest_justified.slot.0,
+            "Produced block justified < store justified. Fixed-point did not converge."
+        );
+        METRICS
+            .get()
+            .map(|m| m.lean_build_block_fixed_point_no_converge_total.inc());
+    }
 
     let block_root = final_block.hash_tree_root();
 

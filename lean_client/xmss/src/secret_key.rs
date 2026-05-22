@@ -3,7 +3,7 @@ use derive_more::Debug;
 use leansig::serialization::Serializable;
 use leansig::signature::SignatureScheme;
 use leansig::signature::generalized_xmss::instantiations_aborting::lifetime_2_to_the_32::{
-    SchemeAbortingTargetSumLifetime32Dim46Base8 as XmssScheme,
+    SIGAbortingTargetSumLifetime32Dim46Base8 as XmssScheme,
     SecretKeyAbortingTargetSumLifetime32Dim46Base8 as XmssSecretKey,
 };
 use rand::CryptoRng;

@@ -22,5 +22,5 @@ pub fn create_test_store() -> Store {
         signature: Default::default(),
     };
 
-    get_forkchoice_store(state, signed_block, config)
+    get_forkchoice_store(state, signed_block, config, true)
 }
