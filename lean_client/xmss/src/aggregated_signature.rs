@@ -35,7 +35,7 @@ impl SszSize for AggregatedSignature {
 impl<C> SszRead<C> for AggregatedSignature {
     fn from_ssz_unchecked(context: &C, bytes: &[u8]) -> Result<Self, ReadError> {
         let inner = ByteList::<AggregatedSignatureSizeLimit>::from_ssz_unchecked(context, bytes)?;
-        AggregatedXMSS::deserialize(inner.as_bytes()).ok_or(ReadError::Custom {
+        AggregatedXMSS::decompress(inner.as_bytes()).ok_or(ReadError::Custom {
             message: "invalid aggregated XMSS signature",
         })?;
         Ok(Self(inner))
@@ -56,7 +56,7 @@ impl SszHash for AggregatedSignature {
     }
 }
 
-fn setup_aggregation() {
+pub fn setup_aggregation() {
     static SETUP: Once = Once::new();
     SETUP.call_once(init_aggregation_bytecode);
 }
@@ -66,7 +66,7 @@ impl AggregatedSignature {
         let bytes = ByteList::try_from(bytes.to_vec())
             .context("signature too large - currently max 1MiB signatures allowed")?;
 
-        AggregatedXMSS::deserialize(bytes.as_bytes())
+        AggregatedXMSS::decompress(bytes.as_bytes())
             .ok_or_else(|| anyhow!("invalid aggregated signature"))?;
 
         Ok(Self(bytes))
@@ -154,7 +154,7 @@ impl AggregatedSignature {
             message.as_fixed_bytes(),
             slot,
             log_inv_rate,
-        );
+        )?;
 
         METRICS.get().map(|metrics| {
             metrics
@@ -162,7 +162,7 @@ impl AggregatedSignature {
                 .inc_by(sig_count as u64)
         });
 
-        let bytes = agg.serialize();
+        let bytes = agg.compress();
         Ok(Self(ByteList::try_from(bytes).context(
             "aggregated proof too large - exceeds 1MiB limit",
         )?))
@@ -207,7 +207,7 @@ impl AggregatedSignature {
     }
 
     fn as_lean(&self) -> Result<AggregatedXMSS> {
-        AggregatedXMSS::deserialize(self.0.as_bytes())
+        AggregatedXMSS::decompress(self.0.as_bytes())
             .ok_or_else(|| anyhow!("invalid aggregated XMSS signature"))
     }
 

@@ -398,6 +398,8 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    xmss::setup_aggregation();
+
     tracing_subscriber::fmt()
         .with_ansi(std::io::stdout().is_terminal())
         .with_env_filter(
