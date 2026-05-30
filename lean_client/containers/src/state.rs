@@ -567,14 +567,17 @@ impl State {
 
             if 3 * count >= 2 * self.validators.len_u64() {
                 info!("justifying slot {target:?}");
-                latest_justified = target.clone();
+                if target.slot > latest_justified.slot {
+                    latest_justified = target.clone();
+                }
                 justified_slots =
                     justified_slots.with_justified(finalized_slot, target.slot, true)?;
 
                 justifications.remove(&target.root);
 
-                if !(source.slot.0 + 1..target.slot.0)
-                    .any(|slot| Slot(slot).is_justifiable_after(finalized_slot))
+                if source.slot > finalized_slot
+                    && !(source.slot.0 + 1..target.slot.0)
+                        .any(|slot| Slot(slot).is_justifiable_after(finalized_slot))
                 {
                     info!("finalizing {source:?}");
                     let old_finalized_slot = finalized_slot;
@@ -971,4 +974,101 @@ impl State {
 
 fn is_proposer_for(validator_index: u64, slot: Slot, num_validators: u64) -> bool {
     slot.0 % num_validators == validator_index
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        AggregatedAttestation, AggregationBits, AttestationData, Block, BlockBody, Checkpoint,
+    };
+    use ssz::SszHash;
+
+    #[test]
+    fn test_same_block_multi_target_attestations_advance_to_highest_slot() -> Result<()> {
+        let mut state = State::generate_genesis(0, 4);
+
+        let mut source_root = H256::zero();
+        let mut block_4_root = H256::zero();
+        let mut block_6_root = H256::zero();
+
+        for slot in 1u64..=9 {
+            state = state.process_slots(Slot(slot))?;
+            let parent_root = state.latest_block_header.hash_tree_root();
+
+            match slot {
+                1 => source_root = parent_root,
+                5 => block_4_root = parent_root,
+                7 => block_6_root = parent_root,
+                _ => {}
+            }
+
+            let block = Block {
+                slot: Slot(slot),
+                proposer_index: slot % 4,
+                parent_root,
+                state_root: H256::zero(),
+                body: BlockBody {
+                    attestations: PersistentList::default(),
+                },
+            };
+            state = state.process_block(&block)?;
+        }
+
+        state = state.process_slots(Slot(10))?;
+        let block_9_root = state.latest_block_header.hash_tree_root();
+
+        let bits = AggregationBits::from_validator_indices(&[0, 1, 2]);
+
+        let make = |target_slot: u64, target_root: H256| AggregatedAttestation {
+            aggregation_bits: bits.clone(),
+            data: AttestationData {
+                slot: Slot(10),
+                head: Checkpoint {
+                    slot: Slot(9),
+                    root: block_9_root,
+                },
+                target: Checkpoint {
+                    slot: Slot(target_slot),
+                    root: target_root,
+                },
+                source: Checkpoint {
+                    slot: Slot(0),
+                    root: source_root,
+                },
+            },
+        };
+
+        let mut attestations: AggregatedAttestations = PersistentList::default();
+        attestations.push(make(4, block_4_root))?;
+        attestations.push(make(9, block_9_root))?;
+        attestations.push(make(6, block_6_root))?;
+
+        let block_10 = Block {
+            slot: Slot(10),
+            proposer_index: 10 % 4,
+            parent_root: block_9_root,
+            state_root: H256::zero(),
+            body: BlockBody { attestations },
+        };
+
+        state = state.process_block(&block_10)?;
+
+        assert_eq!(state.latest_justified.slot, Slot(9));
+        assert_eq!(state.latest_finalized.slot, Slot(0));
+        assert!(
+            state.justified_slots.0.get(3).map(|v| *v).unwrap_or(false),
+            "slot 4 (index 3) should be justified"
+        );
+        assert!(
+            state.justified_slots.0.get(5).map(|v| *v).unwrap_or(false),
+            "slot 6 (index 5) should be justified"
+        );
+        assert!(
+            state.justified_slots.0.get(8).map(|v| *v).unwrap_or(false),
+            "slot 9 (index 8) should be justified"
+        );
+
+        Ok(())
+    }
 }

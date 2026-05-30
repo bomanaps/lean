@@ -133,6 +133,9 @@ pub struct Metrics {
     /// Number of gossip signatures in fork-choice store
     pub lean_gossip_signatures: IntGauge,
 
+    /// Inbound gossipsub messages that failed snappy decompression, by topic kind
+    pub lean_gossip_decompress_failures_total: IntCounterVec,
+
     /// Number of new aggregated payload items
     pub lean_latest_new_aggregated_payloads: IntGauge,
 
@@ -452,6 +455,13 @@ impl Metrics {
             lean_gossip_signatures: IntGauge::new(
                 "lean_gossip_signatures",
                 "Number of gossip signatures in fork-choice store",
+            )?,
+            lean_gossip_decompress_failures_total: IntCounterVec::new(
+                opts!(
+                    "lean_gossip_decompress_failures_total",
+                    "Inbound gossipsub messages that failed snappy decompression, by topic kind",
+                ),
+                &["topic_kind"],
             )?,
             lean_latest_new_aggregated_payloads: IntGauge::new(
                 "lean_latest_new_aggregated_payloads",
@@ -785,6 +795,7 @@ impl Metrics {
 
         // Additional Fork-Choice Metrics
         default_registry.register(Box::new(self.lean_gossip_signatures.clone()))?;
+        default_registry.register(Box::new(self.lean_gossip_decompress_failures_total.clone()))?;
         default_registry.register(Box::new(self.lean_latest_new_aggregated_payloads.clone()))?;
         default_registry.register(Box::new(self.lean_latest_known_aggregated_payloads.clone()))?;
         default_registry.register(Box::new(
