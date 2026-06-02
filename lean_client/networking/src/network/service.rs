@@ -586,7 +586,11 @@ where
                 info!(peer = %peer_id, topic = %topic, "A peer unsubscribed from topic");
             }
 
-            Event::Message { message, .. } => {
+            Event::Message {
+                message,
+                propagation_source,
+                ..
+            } => {
                 let data_len = message.data.len();
                 match GossipsubMessage::decode(&message.topic, &message.data) {
                     Ok(GossipsubMessage::Block(signed_block)) => {
@@ -665,7 +669,7 @@ where
                         }
                     }
                     Err(err) => {
-                        warn!(%err, topic = %message.topic, "gossip decode failed");
+                        warn!(%err, topic = %message.topic, peer = %propagation_source, "gossip decode failed");
                     }
                 }
             }
