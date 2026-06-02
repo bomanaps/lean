@@ -28,6 +28,7 @@ use metrics::{DisconnectReason, METRICS};
 use parking_lot::Mutex;
 use rand::seq::IndexedRandom;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use ssz::{H256, SszHash, SszWrite as _};
 use tokio::select;
 use tokio::sync::Notify;
@@ -669,7 +670,15 @@ where
                         }
                     }
                     Err(err) => {
-                        warn!(%err, topic = %message.topic, peer = %propagation_source, "gossip decode failed");
+                        let sha = hex::encode(Sha256::digest(&message.data));
+                        warn!(
+                            %err,
+                            topic = %message.topic,
+                            peer = %propagation_source,
+                            len = message.data.len(),
+                            sha256_inbound = %&sha[..16],
+                            "gossip decode failed"
+                        );
                     }
                 }
             }
