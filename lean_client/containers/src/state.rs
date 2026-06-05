@@ -648,8 +648,7 @@ impl State {
     /// advances. Caps distinct AttestationData entries at MAX_ATTESTATIONS_DATA.
     ///
     /// Aggregator-published proofs are the sole input — no gossip-time
-    /// re-aggregation at proposal. Matches leanSpec build_block, ethlambda's
-    /// blockchain::store::build_block, and zeam's getProposalAttestations.
+    /// re-aggregation at proposal.
     pub fn build_block(
         &self,
         slot: Slot,
