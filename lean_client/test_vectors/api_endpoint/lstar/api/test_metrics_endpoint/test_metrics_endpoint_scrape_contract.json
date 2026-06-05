@@ -1,0 +1,42 @@
+{
+    "tests/consensus/lstar/api/test_metrics_endpoint.py::test_metrics_endpoint_scrape_contract[fork_Lstar][fork_Lstar-api_endpoint]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "endpoint": "/metrics",
+        "method": "GET",
+        "genesisParams": {
+            "numValidators": 4,
+            "genesisTime": 0
+        },
+        "initialIsAggregator": false,
+        "expectedStatusCode": 200,
+        "expectedContentType": "text/plain; version=0.0.4; charset=utf-8",
+        "expectedBody": {
+            "required_metric_names": [
+                "lean_node_info",
+                "lean_node_start_time_seconds",
+                "lean_head_slot",
+                "lean_current_slot",
+                "lean_safe_target_slot",
+                "lean_fork_choice_block_processing_time_seconds",
+                "lean_attestations_valid_total",
+                "lean_attestations_invalid_total",
+                "lean_attestation_validation_time_seconds",
+                "lean_fork_choice_reorgs_total",
+                "lean_fork_choice_reorg_depth",
+                "lean_latest_justified_slot",
+                "lean_latest_finalized_slot",
+                "lean_state_transition_time_seconds",
+                "lean_validators_count",
+                "lean_connected_peers"
+            ]
+        },
+        "_info": {
+            "hash": "0xc9787e7b7cf0ec2b312b636b6a9ae154456c950e663141f375af29d36ba3340f",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/api/test_metrics_endpoint.py::test_metrics_endpoint_scrape_contract[fork_Lstar]",
+            "description": "GET /metrics returns the Prometheus-format scrape with the required metric names.\n\n    The endpoint body is dynamic (counters accumulate, timestamps shift),\n    so the vector pins only the stable contract: status 200, the\n    Prometheus text-exposition content type, and the full list of\n    metric names a compliant node must expose. Clients replay the\n    fixture and confirm every listed metric appears in their scrape.",
+            "fixtureFormat": "api_endpoint"
+        }
+    }
+}

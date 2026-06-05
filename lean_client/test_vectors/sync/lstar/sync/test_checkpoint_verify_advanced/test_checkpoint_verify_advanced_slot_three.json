@@ -1,0 +1,24 @@
+{
+    "tests/consensus/lstar/sync/test_checkpoint_verify_advanced.py::test_checkpoint_verify_advanced_slot_three[fork_Lstar][fork_Lstar-sync]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "operation": "verify_checkpoint",
+        "input": {
+            "numValidators": 4,
+            "anchorSlot": 3
+        },
+        "output": {
+            "valid": true,
+            "stateBytes": "0x0000000000000000030000000000000003000000000000000300000000000000e2508fd0866ebc6a338f995b5b8e233a1ec0d4177edaae5e77c6d9b847ba64430000000000000000000000000000000000000000000000000000000000000000dba9671bac9513c9482f1416a53aabd2c6ce90d5a5f865ce5a55c775325c91367abe554da998339edfd2ac2b86874b1eeb200f91f11a65701bfbbadc65e1f86200000000000000007abe554da998339edfd2ac2b86874b1eeb200f91f11a65701bfbbadc65e1f8620000000000000000e4000000440100004501000005030000050300007abe554da998339edfd2ac2b86874b1eeb200f91f11a65701bfbbadc65e1f86223838434468b5aad473aae9918dbf7c0e7069ea27ee835e41ec6fd9f04322618e2508fd0866ebc6a338f995b5b8e233a1ec0d4177edaae5e77c6d9b847ba6443046c9dc94cb124fd7eac91680ca6f7c131d7b02f1629ca842b0e714d557da1276b2e5f3d110aab9d6eb8c10c7d1ba0f93cd849c82e4f0098552e05e766afeb0d021742f626de106215bd0c5a5d2516fc75dc3ffc121159b63b6664354dc4eb353631b54a5ad0cc7b140000000000000000adc304243eb9f60ad1016e6610f11420dba97e450171971dda35bf50d4f14117ad3b9f06083c9d05f73d5e12f9e9ce1e7aa65866e2508c4edcc47c50505281470653e6555fe9785380e97c427e99b677f949b125d17f2c58a45c1b5349f20c27db10ea78d2fceb37010000000000000044095a46c1dd521b2e37c626b3401045f2a41713b034d95e9888fb34a15c280a8045b7043b6cca1c3353a6089ae5aa027c548d4bd72b9b4bf39f805d637c855bb3266b373aa97e262cea76359b84e70805268b520cbe62284be2f81da2069b0c5298912169fa935f0200000000000000c6ce413056aff1787a8d01575b11781c08ab595fea7cb46372fd8376e054f829da06c251d8e13643e751d9737d52e4474fddab5cd763f750d84c1840a6e2fb16b9f5e13f372e1f4646588a0d0ab96e483b42161f47858d5acb6d3a6bdae7e65a672cd2233fe77c16030000000000000001",
+            "validatorCount": 4,
+            "anchorSlot": 3
+        },
+        "_info": {
+            "hash": "0x74561bb8ef0256080e491d20ad9034a708aa160bf8586462c748213c0cbb3a81",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/sync/test_checkpoint_verify_advanced.py::test_checkpoint_verify_advanced_slot_three[fork_Lstar]",
+            "description": "Advanced anchor state at slot 3 with four validators is accepted.\n\n    The chain walks through three empty blocks. The resulting state\n    carries non-empty historical_block_hashes and a non-zero latest\n    block header. Pins the accepted verdict plus the exact SSZ bytes.",
+            "fixtureFormat": "sync"
+        }
+    }
+}

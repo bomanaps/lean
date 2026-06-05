@@ -1,14 +1,12 @@
-use serde::{Deserialize, Serialize};
 use ssz::{PersistentList, Ssz};
 use typenum::U4096;
 use xmss::PublicKey;
 
 // todo(containers): default implementation doesn't make sense here
-#[derive(Clone, Debug, Ssz, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Ssz, Default)]
 pub struct Validator {
     pub attestation_pubkey: PublicKey,
     pub proposal_pubkey: PublicKey,
-    #[serde(default)]
     pub index: u64,
 }
 

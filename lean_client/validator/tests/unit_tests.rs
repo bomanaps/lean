@@ -1,5 +1,8 @@
 // AI Generated tests
+use std::sync::Arc;
+
 use containers::Slot;
+use dedicated_executor::DedicatedExecutor;
 use validator::{ValidatorConfig, ValidatorService};
 
 #[test]
@@ -9,7 +12,7 @@ fn test_proposer_selection() {
         validator_indices: vec![2],
         key_files: Default::default(),
     };
-    let service = ValidatorService::new(config, 4);
+    let service = ValidatorService::new(config, 4, Arc::new(DedicatedExecutor::new_testing()));
 
     // Validator 2 should propose at slots 2, 6, 10, ...
     assert!(service.get_proposer_for_slot(Slot(2)).is_some());

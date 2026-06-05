@@ -1,0 +1,24 @@
+{
+    "tests/consensus/lstar/networking/test_enr_rejections.py::test_enr_decode_rejects_oversize_payload[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "expectException": "ValueError",
+        "codecName": "decode_failure",
+        "input": {
+            "decoder": "enr",
+            "bytes": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        "output": {
+            "decoder": "enr",
+            "errorType": "ValueError",
+            "errorMessage": "ENR exceeds max size: 301 > 300"
+        },
+        "_info": {
+            "hash": "0xf5be66251cfb49b26e3c97ce341c9ebfd86cf33ec13887743086bccb1608b8ae",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_enr_rejections.py::test_enr_decode_rejects_oversize_payload[fork_Lstar]",
+            "description": "An ENR RLP payload above the 300-byte cap is rejected.\n\n    EIP-778 caps the encoded ENR at 300 bytes so records can travel\n    comfortably through DNS TXT records. A 301-byte input must be\n    rejected before any RLP parsing runs.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

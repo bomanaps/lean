@@ -1,0 +1,26 @@
+{
+    "tests/consensus/lstar/api/test_api_endpoints.py::test_justified_checkpoint_4v[fork_Lstar][fork_Lstar-api_endpoint]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "endpoint": "/lean/v0/checkpoints/justified",
+        "method": "GET",
+        "genesisParams": {
+            "numValidators": 4,
+            "genesisTime": 0
+        },
+        "initialIsAggregator": false,
+        "expectedStatusCode": 200,
+        "expectedContentType": "application/json",
+        "expectedBody": {
+            "slot": 0,
+            "root": "0x7abe554da998339edfd2ac2b86874b1eeb200f91f11a65701bfbbadc65e1f862"
+        },
+        "_info": {
+            "hash": "0xe679e089f742ff8db8baf65b76f96916f38961fe3da1fbc73ac22462573cc08a",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/api/test_api_endpoints.py::test_justified_checkpoint_4v[fork_Lstar]",
+            "description": "Justified checkpoint at genesis with 4 validators.",
+            "fixtureFormat": "api_endpoint"
+        }
+    }
+}

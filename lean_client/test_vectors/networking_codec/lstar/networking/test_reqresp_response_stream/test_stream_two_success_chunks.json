@@ -1,0 +1,30 @@
+{
+    "tests/consensus/lstar/networking/test_reqresp_response_stream.py::test_stream_two_success_chunks[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "codecName": "reqresp_response_stream",
+        "input": {
+            "chunks": [
+                {
+                    "responseCode": 0,
+                    "sszData": "0xdeadbeef"
+                },
+                {
+                    "responseCode": 0,
+                    "sszData": "0xcafebabe"
+                }
+            ]
+        },
+        "output": {
+            "encoded": "0x0004ff060000734e615070590108000090cea091deadbeef0004ff060000734e615070590108000047925c87cafebabe",
+            "chunkCount": 2
+        },
+        "_info": {
+            "hash": "0x4f28f7385aacb69e1c7627bde12ead4b0689436babcf4d7c2b4d3aa9d2da2419",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_reqresp_response_stream.py::test_stream_two_success_chunks[fork_Lstar]",
+            "description": "Stream with two SUCCESS chunks carrying distinct payload bytes.\n\n    Pins the concatenation of two independent response frames. Clients\n    must read both records before signalling EOF, so a receiver that\n    stops after the first chunk drops half the response.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

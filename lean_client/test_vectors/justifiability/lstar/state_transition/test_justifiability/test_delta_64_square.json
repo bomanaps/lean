@@ -1,0 +1,19 @@
+{
+    "tests/consensus/lstar/state_transition/test_justifiability.py::test_delta_64_square[fork_Lstar][fork_Lstar-justifiability]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "slot": 64,
+        "finalizedSlot": 0,
+        "output": {
+            "delta": 64,
+            "isJustifiable": true
+        },
+        "_info": {
+            "hash": "0xe837b599ea70085b9d310f979dc2f0abd05dc832b297c5c553cc855da58ab5b8",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/state_transition/test_justifiability.py::test_delta_64_square[fork_Lstar]",
+            "description": "Delta 64: perfect square (8^2).",
+            "fixtureFormat": "justifiability"
+        }
+    }
+}

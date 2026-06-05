@@ -1,0 +1,29 @@
+{
+    "tests/consensus/lstar/networking/test_gossipsub_rpc.py::test_prune_with_backoff[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "codecName": "gossipsub_rpc",
+        "input": {
+            "subscriptions": [],
+            "publish": [],
+            "control": {
+                "prune": [
+                    {
+                        "topicId": "/leanconsensus/0x12345678/block/ssz_snappy",
+                        "backoff": 60
+                    }
+                ]
+            }
+        },
+        "output": {
+            "encoded": "0x1a30222e0a2a2f6c65616e636f6e73656e7375732f307831323334353637382f626c6f636b2f73737a5f736e61707079183c"
+        },
+        "_info": {
+            "hash": "0x0320c96023b6d675ef19382d757720cde9b2ab9981da65face5ca7242ecb9b64",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_gossipsub_rpc.py::test_prune_with_backoff[fork_Lstar]",
+            "description": "PRUNE with a 60-second backoff duration.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

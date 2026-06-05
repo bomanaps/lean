@@ -1,0 +1,33 @@
+{
+    "tests/consensus/lstar/networking/test_gossipsub_rpc.py::test_ihave_multiple_ids[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "codecName": "gossipsub_rpc",
+        "input": {
+            "subscriptions": [],
+            "publish": [],
+            "control": {
+                "ihave": [
+                    {
+                        "topicId": "/leanconsensus/0x12345678/block/ssz_snappy",
+                        "messageIds": [
+                            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                            "0xcccccccccccccccccccccccccccccccccccccccc"
+                        ]
+                    }
+                ]
+            }
+        },
+        "output": {
+            "encoded": "0x1a700a6e0a2a2f6c65616e636f6e73656e7375732f307831323334353637382f626c6f636b2f73737a5f736e617070791214aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1214bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb1214cccccccccccccccccccccccccccccccccccccccc"
+        },
+        "_info": {
+            "hash": "0xf98717f329f2210fcb6fa0b839cc5f2b443c494691b1b6ab0f026f314549dac3",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_gossipsub_rpc.py::test_ihave_multiple_ids[fork_Lstar]",
+            "description": "IHAVE advertising three cached message IDs.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

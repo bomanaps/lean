@@ -1,0 +1,21 @@
+{
+    "tests/consensus/lstar/networking/test_gossipsub_rpc.py::test_rpc_empty[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "codecName": "gossipsub_rpc",
+        "input": {
+            "subscriptions": [],
+            "publish": []
+        },
+        "output": {
+            "encoded": "0x"
+        },
+        "_info": {
+            "hash": "0x1bcc8c57850f47b08bfb418b10faf2db58f22c4824cbdbaf94595a03cc4d3002",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_gossipsub_rpc.py::test_rpc_empty[fork_Lstar]",
+            "description": "Empty RPC. No subscriptions, messages, or control.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

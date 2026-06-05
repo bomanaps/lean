@@ -1,0 +1,19 @@
+{
+    "tests/consensus/lstar/state_transition/test_justifiability.py::test_delta_17_not_justifiable[fork_Lstar][fork_Lstar-justifiability]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "slot": 17,
+        "finalizedSlot": 0,
+        "output": {
+            "delta": 17,
+            "isJustifiable": false
+        },
+        "_info": {
+            "hash": "0x9a78614212b5af74b8f7b845c9bb2c6476115bc1f902ca613210b2e76cd0c3c6",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/state_transition/test_justifiability.py::test_delta_17_not_justifiable[fork_Lstar]",
+            "description": "Delta 17: between square 16 and pronic 20.",
+            "fixtureFormat": "justifiability"
+        }
+    }
+}

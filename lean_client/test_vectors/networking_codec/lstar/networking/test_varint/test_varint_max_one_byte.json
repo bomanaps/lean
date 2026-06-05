@@ -1,0 +1,21 @@
+{
+    "tests/consensus/lstar/networking/test_varint.py::test_varint_max_one_byte[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "codecName": "varint",
+        "input": {
+            "value": 127
+        },
+        "output": {
+            "encoded": "0x7f",
+            "byteLength": 1
+        },
+        "_info": {
+            "hash": "0x06f8777f2bd4be1eb29279c4d5f9b1a491863d9c151503135392d094a14f7af4",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_varint.py::test_varint_max_one_byte[fork_Lstar]",
+            "description": "Varint 127 is the largest value fitting in a single byte.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

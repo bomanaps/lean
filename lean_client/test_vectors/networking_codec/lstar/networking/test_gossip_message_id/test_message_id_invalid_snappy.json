@@ -1,0 +1,22 @@
+{
+    "tests/consensus/lstar/networking/test_gossip_message_id.py::test_message_id_invalid_snappy[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "codecName": "gossip_message_id",
+        "input": {
+            "topic": "0x2f6c65616e636f6e73656e7375732f31323334353637382f626c6f636b2f73737a5f736e61707079",
+            "data": "0xdeadbeef",
+            "domain": "0x00000000"
+        },
+        "output": {
+            "messageId": "0x2aff5124db8064dd9ddcdd7fc251397ab02527c7"
+        },
+        "_info": {
+            "hash": "0x6f01fa39cc9d7af2b38c8551d74c4df3e159ee15749a174970e71a6e6037d1bd",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_gossip_message_id.py::test_message_id_invalid_snappy[fork_Lstar]",
+            "description": "Message ID with invalid-snappy domain and same data as the valid test.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

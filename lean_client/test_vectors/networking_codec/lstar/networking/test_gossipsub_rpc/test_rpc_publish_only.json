@@ -1,0 +1,30 @@
+{
+    "tests/consensus/lstar/networking/test_gossipsub_rpc.py::test_rpc_publish_only[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "codecName": "gossipsub_rpc",
+        "input": {
+            "subscriptions": [],
+            "publish": [
+                {
+                    "topic": "/leanconsensus/0x12345678/block/ssz_snappy",
+                    "data": "0xdeadbeef"
+                },
+                {
+                    "topic": "/leanconsensus/0x12345678/aggregation/ssz_snappy",
+                    "data": "0xcafebabe"
+                }
+            ]
+        },
+        "output": {
+            "encoded": "0x12321204deadbeef222a2f6c65616e636f6e73656e7375732f307831323334353637382f626c6f636b2f73737a5f736e6170707912381204cafebabe22302f6c65616e636f6e73656e7375732f307831323334353637382f6167677265676174696f6e2f73737a5f736e61707079"
+        },
+        "_info": {
+            "hash": "0x6655f940693d10e083ba7f31ac1240b67cfbdd6cdd9cd4c449359c166e9c77a7",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_gossipsub_rpc.py::test_rpc_publish_only[fork_Lstar]",
+            "description": "RPC with only published messages.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

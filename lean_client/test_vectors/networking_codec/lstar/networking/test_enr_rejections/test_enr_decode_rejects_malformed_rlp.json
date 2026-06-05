@@ -1,0 +1,24 @@
+{
+    "tests/consensus/lstar/networking/test_enr_rejections.py::test_enr_decode_rejects_malformed_rlp[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "expectException": "ValueError",
+        "codecName": "decode_failure",
+        "input": {
+            "decoder": "enr",
+            "bytes": "0x00"
+        },
+        "output": {
+            "decoder": "enr",
+            "errorType": "ValueError",
+            "errorMessage": "Invalid RLP encoding: Expected RLP list"
+        },
+        "_info": {
+            "hash": "0xac242f71c7afa1c58a681948517587baeb1104e91d0e8e6130c5f285d51245c7",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_enr_rejections.py::test_enr_decode_rejects_malformed_rlp[fork_Lstar]",
+            "description": "An input that cannot be parsed as an RLP list is rejected.\n\n    The byte 0x00 is valid RLP for the single byte value 0x00, not for a\n    list structure. The ENR decoder requires a list header, so the parse\n    fails and the error surfaces as a ValueError on the ENR API.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

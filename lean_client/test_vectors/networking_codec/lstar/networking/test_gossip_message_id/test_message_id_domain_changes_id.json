@@ -1,0 +1,22 @@
+{
+    "tests/consensus/lstar/networking/test_gossip_message_id.py::test_message_id_domain_changes_id[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "codecName": "gossip_message_id",
+        "input": {
+            "topic": "0x746573742d746f706963",
+            "data": "0x68656c6c6f20776f726c64",
+            "domain": "0x00000000"
+        },
+        "output": {
+            "messageId": "0x144f143f82dbaf88cf586116efe027443750b97c"
+        },
+        "_info": {
+            "hash": "0x72deb21f5d69bc6b9dbf89b9831119d9c97bd321919b27df4efb5cb700a41722",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_gossip_message_id.py::test_message_id_domain_changes_id[fork_Lstar]",
+            "description": "Same topic and data with invalid-snappy domain produces a different ID.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

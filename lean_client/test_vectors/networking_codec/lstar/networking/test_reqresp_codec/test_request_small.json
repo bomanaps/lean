@@ -1,0 +1,20 @@
+{
+    "tests/consensus/lstar/networking/test_reqresp_codec.py::test_request_small[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "codecName": "reqresp_request",
+        "input": {
+            "sszData": "0x01020304"
+        },
+        "output": {
+            "encoded": "0x04ff060000734e6150705901080000393d6bbc01020304"
+        },
+        "_info": {
+            "hash": "0xc322a8b4ca5558333278520fd9ce000da34e6c47a70342f6fcabe6275910a4cb",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_reqresp_codec.py::test_request_small[fork_Lstar]",
+            "description": "Request with 4-byte SSZ payload.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

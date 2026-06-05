@@ -1,0 +1,30 @@
+{
+    "tests/consensus/lstar/networking/test_reqresp_response_stream.py::test_stream_success_then_resource_unavailable[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "codecName": "reqresp_response_stream",
+        "input": {
+            "chunks": [
+                {
+                    "responseCode": 0,
+                    "sszData": "0x11111111111111111111111111111111"
+                },
+                {
+                    "responseCode": 3,
+                    "sszData": "0x6e6f7420666f756e64"
+                }
+            ]
+        },
+        "output": {
+            "encoded": "0x0010ff060000734e61507059011400008d6107fd111111111111111111111111111111110309ff060000734e61507059010d0000dc89c0096e6f7420666f756e64",
+            "chunkCount": 2
+        },
+        "_info": {
+            "hash": "0xa6b37e04892b873a1b242ed5a2cff329fa9f0b7a0033b012396a5d9bfe1a0532",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_reqresp_response_stream.py::test_stream_success_then_resource_unavailable[fork_Lstar]",
+            "description": "A SUCCESS chunk followed by a RESOURCE_UNAVAILABLE terminator.\n\n    Real servers end a multi-chunk response early when the peer asked\n    for more items than the server holds. The vector pins the exact\n    concatenation so clients surface both the delivered payload and\n    the error terminator.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

@@ -1,0 +1,22 @@
+{
+    "tests/consensus/lstar/networking/test_enr_and_peer_id.py::test_peer_id_secp256k1[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "codecName": "peer_id",
+        "input": {
+            "keyType": "secp256k1",
+            "publicKey": "0x037777e994e452c21604f91de093ce415f5432f701dd8cd1a7a6fea0e630bfca99"
+        },
+        "output": {
+            "protobufEncoded": "0x08021221037777e994e452c21604f91de093ce415f5432f701dd8cd1a7a6fea0e630bfca99",
+            "peerId": "16Uiu2HAmLhLvBoYaoZfaMUKuibM6ac163GwKY74c5kiSLg5KvLpY"
+        },
+        "_info": {
+            "hash": "0x04d3eeec975921ab448a945fb3521bf2dd793b2510ca31148d6457b53937522b",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_enr_and_peer_id.py::test_peer_id_secp256k1[fork_Lstar]",
+            "description": "secp256k1 PeerId from libp2p spec. 33-byte key, identity multihash.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

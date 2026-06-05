@@ -1,0 +1,26 @@
+{
+    "tests/consensus/lstar/chain/test_slot_clock.py::test_total_intervals_before_genesis[fork_Lstar][fork_Lstar-slot_clock]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "operation": "total_intervals",
+        "input": {
+            "genesisTime": 1700000000,
+            "currentTimeMs": 1699999999000
+        },
+        "output": {
+            "config": {
+                "secondsPerSlot": 4,
+                "intervalsPerSlot": 5,
+                "millisecondsPerInterval": 800
+            },
+            "totalIntervals": 0
+        },
+        "_info": {
+            "hash": "0x2048bb8e72b45b7f6a4b82214393dc3f0332f8610a2894d1ad5c823fd23711ed",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/chain/test_slot_clock.py::test_total_intervals_before_genesis[fork_Lstar]",
+            "description": "Before genesis: 0 intervals.",
+            "fixtureFormat": "slot_clock"
+        }
+    }
+}

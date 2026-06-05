@@ -10,15 +10,16 @@ fn default_attestation_committee_count() -> u64 {
     1
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Ssz, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq, Eq, Ssz, Default)]
 pub struct Config {
     pub genesis_time: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GenesisValidatorEntry {
+    #[serde(alias = "attestationPubkey")]
     pub attestation_pubkey: String,
+    #[serde(alias = "proposalPubkey")]
     pub proposal_pubkey: String,
 }
 

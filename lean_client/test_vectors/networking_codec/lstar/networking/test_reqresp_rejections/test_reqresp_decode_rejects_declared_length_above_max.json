@@ -1,0 +1,24 @@
+{
+    "tests/consensus/lstar/networking/test_reqresp_rejections.py::test_reqresp_decode_rejects_declared_length_above_max[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "expectException": "CodecError",
+        "codecName": "decode_failure",
+        "input": {
+            "decoder": "reqresp_request",
+            "bytes": "0x81808005"
+        },
+        "output": {
+            "decoder": "reqresp_request",
+            "errorType": "CodecError",
+            "errorMessage": "Declared length too large: 10485761 > 10485760"
+        },
+        "_info": {
+            "hash": "0x8ec44b5083a369e19d0320ae0d1f0d10bab4ac77ec5220f4540cfa8547a18477",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_reqresp_rejections.py::test_reqresp_decode_rejects_declared_length_above_max[fork_Lstar]",
+            "description": "A request whose declared length exceeds the ten-mebibyte cap is rejected.\n\n    The varint 0x81 0x80 0x80 0x05 declares 10,485,761 bytes, one over the\n    ten-mebibyte protocol cap. Refusing before decompression prevents a\n    sender from forcing resource allocation proportional to a claimed size.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}
