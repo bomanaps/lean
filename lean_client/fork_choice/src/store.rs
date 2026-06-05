@@ -613,8 +613,7 @@ pub fn prepare_block_production(
     // with `attestation_data_by_root` (the secondary index storing the
     // AttestationData itself) into the spec-shaped pool unit consumed by
     // build_block. Entries whose secondary-index lookup misses are dropped and
-    // counted; this keeps the proposer aligned with leanSpec/zeam/ethlambda
-    // which carry att_data inside the pool value.
+    // counted; the proposer expects att_data inside the pool value.
     let mut aggregated_payloads: HashMap<H256, (AttestationData, Vec<AggregatedSignatureProof>)> =
         HashMap::with_capacity(store.latest_known_aggregated_payloads.len());
     let mut missing_att_data: u64 = 0;

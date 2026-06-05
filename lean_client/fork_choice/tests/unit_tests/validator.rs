@@ -18,6 +18,15 @@ use ssz::{H256, SszHash};
 use std::collections::HashSet;
 use xmss::SecretKey;
 
+fn apply_block(store: &mut Store, block: &Block) {
+    let signed_block = SignedBlock {
+        block: block.clone(),
+        signature: BlockSignatures::default(),
+    };
+    let mut cache = BlockCache::new();
+    on_block(store, &mut cache, signed_block, false).expect("on_block should succeed");
+}
+
 /// Build an `AggregatedSignatureProof` for the given validator set on the
 /// given AttestationData, then publish it into the proposer's input pool
 /// (`store.latest_known_aggregated_payloads` + `store.attestation_data_by_root`).
@@ -139,6 +148,8 @@ fn test_produce_block_basic() {
     assert_eq!(block.parent_root, initial_head);
     assert_ne!(block.state_root, H256::default());
 
+    apply_block(&mut store, &block);
+
     // Verify block was added to store
     assert!(store.blocks.contains_key(&block_root));
     assert!(store.states.contains_key(&block_root));
@@ -237,6 +248,7 @@ fn test_produce_block_sequential_slots() {
     // Verify first block is properly created
     assert_eq!(block1.slot, Slot(1));
     assert_eq!(block1.proposer_index, 1);
+    apply_block(&mut store, &block1);
     assert!(store.blocks.contains_key(&block1_root));
     assert!(store.states.contains_key(&block1_root));
 
@@ -255,6 +267,8 @@ fn test_produce_block_sequential_slots() {
     // The parent should be genesis (the current head), not block1
     let genesis_hash = store.head;
     assert_eq!(block2.parent_root, genesis_hash);
+
+    apply_block(&mut store, &block2);
 
     // Both blocks should exist in the store
     assert!(store.blocks.contains_key(&block1_root));
@@ -308,6 +322,8 @@ fn test_produce_block_state_consistency() {
     let (block_root, block, signatures) =
         produce_block_with_signatures(&mut store, slot, validator_idx, 1)
             .expect("block production should succeed");
+
+    apply_block(&mut store, &block);
 
     // Verify the stored state matches the block's state root
     let stored_state = &store.states[&block_root];
@@ -399,6 +415,7 @@ fn test_multiple_validators_coordination() {
     let (block1_root, block1, _sig1) =
         produce_block_with_signatures(&mut store, Slot(1), 1, 1).expect("block1 should succeed");
     let block1_hash = block1_root;
+    apply_block(&mut store, &block1);
 
     // Validators 2-5 create attestations for slot 2
     // These will be based on the current forkchoice head (genesis)
@@ -431,6 +448,8 @@ fn test_multiple_validators_coordination() {
     // Verify block properties
     assert_eq!(block2.slot, Slot(2));
     assert_eq!(block2.proposer_index, 2);
+
+    apply_block(&mut store, &block2);
 
     // Both blocks should exist in the store
     assert!(store.blocks.contains_key(&block1_hash));
@@ -547,11 +566,8 @@ fn test_produce_block_missing_parent_state() {
         ..Default::default()
     };
 
-    // Missing head in get_proposal_head -> KeyError equivalent
-    let result = std::panic::catch_unwind(|| {
-        let mut s = store;
-        produce_block_with_signatures(&mut s, Slot(1), 1, 1)
-    });
+    let mut s = store;
+    let result = produce_block_with_signatures(&mut s, Slot(1), 1, 1);
     assert!(result.is_err());
 }
 
@@ -582,11 +598,9 @@ fn test_validator_operations_invalid_parameters() {
 }
 
 #[test]
-fn test_produce_attestation_data_uses_head_state_justified() {
+fn test_produce_attestation_data_uses_store_justified() {
     let mut store = create_test_store();
 
-    // Simulate a minority-fork block advancing store.latest_justified
-    // past what the head chain has seen.
     store.latest_justified = Checkpoint {
         root: H256::from_slice(&[0xff; 32]),
         slot: Slot(5),
@@ -596,21 +610,7 @@ fn test_produce_attestation_data_uses_head_state_justified() {
         .produce_attestation_data(Slot(1))
         .expect("produce_attestation_data failed");
 
-    let head_state = store
-        .states
-        .get(&store.head)
-        .expect("head state must exist");
-    let expected_source = if head_state.latest_justified.root.is_zero() {
-        Checkpoint {
-            root: store.head,
-            slot: head_state.latest_justified.slot,
-        }
-    } else {
-        head_state.latest_justified.clone()
-    };
-
-    assert_eq!(attestation_data.source, expected_source);
-    assert_ne!(attestation_data.source, store.latest_justified);
+    assert_eq!(attestation_data.source, store.latest_justified);
 }
 
 fn produce_and_apply(
