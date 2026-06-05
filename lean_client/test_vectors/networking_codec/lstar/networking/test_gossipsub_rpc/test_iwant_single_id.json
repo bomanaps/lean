@@ -1,0 +1,30 @@
+{
+    "tests/consensus/lstar/networking/test_gossipsub_rpc.py::test_iwant_single_id[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "codecName": "gossipsub_rpc",
+        "input": {
+            "subscriptions": [],
+            "publish": [],
+            "control": {
+                "iwant": [
+                    {
+                        "messageIds": [
+                            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        ]
+                    }
+                ]
+            }
+        },
+        "output": {
+            "encoded": "0x1a1812160a14aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "_info": {
+            "hash": "0xb24ee817184b78725d7414d12a90d95760f1ee81ccb9d94deecd79dbcdc97c2c",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_gossipsub_rpc.py::test_iwant_single_id[fork_Lstar]",
+            "description": "IWANT requesting one message by ID.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

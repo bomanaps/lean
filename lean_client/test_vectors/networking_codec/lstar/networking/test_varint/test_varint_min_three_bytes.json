@@ -1,0 +1,21 @@
+{
+    "tests/consensus/lstar/networking/test_varint.py::test_varint_min_three_bytes[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "codecName": "varint",
+        "input": {
+            "value": 16384
+        },
+        "output": {
+            "encoded": "0x808001",
+            "byteLength": 3
+        },
+        "_info": {
+            "hash": "0x9ce5bfb317f02e2006187d87f6a0e5b4750c42215526fc12a1fe069932280c66",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_varint.py::test_varint_min_three_bytes[fork_Lstar]",
+            "description": "Varint 16384 is the smallest value requiring three bytes.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

@@ -1,0 +1,23 @@
+{
+    "tests/consensus/lstar/networking/test_discovery_crypto.py::test_aes_gcm_encrypt_empty_plaintext[fork_Lstar][fork_Lstar-discovery_crypto]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "operation": "aes_gcm_encrypt",
+        "input": {
+            "key": "0x9f2d77db7004bf8a1a85107ac686990b",
+            "nonce": "0x27b5af763c446acd2749fe8e",
+            "plaintext": "0x",
+            "aad": "0x"
+        },
+        "output": {
+            "ciphertext": "0x812c5815fc6486d33478ab51e25c9d02"
+        },
+        "_info": {
+            "hash": "0x2297d071e29576f519b2b054f120cf457f3ad75068bd36e5f3af4e82d5e23518",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_discovery_crypto.py::test_aes_gcm_encrypt_empty_plaintext[fork_Lstar]",
+            "description": "AES-GCM with empty plaintext. Output is just the 16-byte auth tag.",
+            "fixtureFormat": "discovery_crypto"
+        }
+    }
+}

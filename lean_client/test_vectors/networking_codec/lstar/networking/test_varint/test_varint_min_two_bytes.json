@@ -1,0 +1,21 @@
+{
+    "tests/consensus/lstar/networking/test_varint.py::test_varint_min_two_bytes[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "codecName": "varint",
+        "input": {
+            "value": 128
+        },
+        "output": {
+            "encoded": "0x8001",
+            "byteLength": 2
+        },
+        "_info": {
+            "hash": "0xf4ba74f0e3cbcdf51b72075a9e5521d5fe1439c97cbe7f09759a0ccdc6f7e926",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_varint.py::test_varint_min_two_bytes[fork_Lstar]",
+            "description": "Varint 128 is the smallest value requiring two bytes.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

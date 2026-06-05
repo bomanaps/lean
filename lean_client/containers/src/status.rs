@@ -1,8 +1,7 @@
 use crate::Checkpoint;
-use serde::{Deserialize, Serialize};
 use ssz::Ssz;
 
-#[derive(Clone, Debug, PartialEq, Eq, Ssz, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Ssz, Default)]
 pub struct Status {
     pub finalized: Checkpoint,
     pub head: Checkpoint,

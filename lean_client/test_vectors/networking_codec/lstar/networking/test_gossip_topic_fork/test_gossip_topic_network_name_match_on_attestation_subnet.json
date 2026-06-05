@@ -1,0 +1,24 @@
+{
+    "tests/consensus/lstar/networking/test_gossip_topic_fork.py::test_gossip_topic_network_name_match_on_attestation_subnet[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "codecName": "gossip_topic",
+        "input": {
+            "kind": "attestation",
+            "forkDigest": "0xabcdef01",
+            "subnetId": 7,
+            "expectedForkDigest": "0xabcdef01"
+        },
+        "output": {
+            "topicString": "/leanconsensus/0xabcdef01/attestation_7/ssz_snappy",
+            "forkValid": true
+        },
+        "_info": {
+            "hash": "0x8bfef911fdf5410c1c2aa6356e0dc09322df575907f7f857787d46c80ac91287",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_gossip_topic_fork.py::test_gossip_topic_network_name_match_on_attestation_subnet[fork_Lstar]",
+            "description": "Attestation-subnet topic carries the subnet id and still validates its network name.\n\n    Mixes a non-default kind and subnet id with the network-name check\n    to confirm the validator reads network_name independent of other\n    topic components.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

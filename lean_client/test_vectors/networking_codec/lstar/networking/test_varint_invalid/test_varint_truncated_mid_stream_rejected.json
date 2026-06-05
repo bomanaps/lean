@@ -1,0 +1,24 @@
+{
+    "tests/consensus/lstar/networking/test_varint_invalid.py::test_varint_truncated_mid_stream_rejected[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "expectException": "VarintError",
+        "codecName": "decode_failure",
+        "input": {
+            "decoder": "varint",
+            "bytes": "0x8080"
+        },
+        "output": {
+            "decoder": "varint",
+            "errorType": "VarintError",
+            "errorMessage": "Truncated varint"
+        },
+        "_info": {
+            "hash": "0x25dba8934843225f67379e03a1f45599174382678b94a1dc33c3ce7f58aa495d",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_varint_invalid.py::test_varint_truncated_mid_stream_rejected[fork_Lstar]",
+            "description": "A varint whose final byte still has the continuation bit set is rejected.\n\n    Two bytes (`0x80 0x80`) each carry the continuation bit but there are no\n    further bytes to complete the value. The decoder must raise\n    `VarintError(\"Truncated varint\")`.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

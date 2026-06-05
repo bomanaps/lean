@@ -1,0 +1,21 @@
+{
+    "tests/consensus/lstar/networking/test_reqresp_error_utf8.py::test_reqresp_error_with_multi_byte_utf8[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "codecName": "reqresp_response",
+        "input": {
+            "responseCode": 2,
+            "sszData": "0x657272c3bc72f09f98806661696c"
+        },
+        "output": {
+            "encoded": "0x020eff060000734e6150705901120000e7fe7d11657272c3bc72f09f98806661696c"
+        },
+        "_info": {
+            "hash": "0x46383f78652c04d5b3e2a43c076f79482884e01552fea56056f144ea1a01dd63",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_reqresp_error_utf8.py::test_reqresp_error_with_multi_byte_utf8[fork_Lstar]",
+            "description": "Error response carrying multi-byte UTF-8 text roundtrips byte-for-byte.\n\n    The codec treats the payload as opaque bytes. A multi-byte UTF-8\n    payload verifies that compression, length framing, and decode\n    preserve the original bytes even when they are not ASCII-only.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

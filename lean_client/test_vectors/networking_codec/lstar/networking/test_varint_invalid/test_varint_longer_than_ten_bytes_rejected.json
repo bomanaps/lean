@@ -1,0 +1,24 @@
+{
+    "tests/consensus/lstar/networking/test_varint_invalid.py::test_varint_longer_than_ten_bytes_rejected[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "expectException": "VarintError",
+        "codecName": "decode_failure",
+        "input": {
+            "decoder": "varint",
+            "bytes": "0x8080808080808080808080"
+        },
+        "output": {
+            "decoder": "varint",
+            "errorType": "VarintError",
+            "errorMessage": "Varint too long"
+        },
+        "_info": {
+            "hash": "0xb1456826091cc4141f5edecd3661711ff18fe4914a9c9fcb9bd075e0dc042226",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_varint_invalid.py::test_varint_longer_than_ten_bytes_rejected[fork_Lstar]",
+            "description": "A varint running eleven continuation bytes exceeds the 64-bit cap and is rejected.\n\n    A uint64 fits in at most ten varint bytes (70 bits with 6 unused). Eleven\n    continuation bytes means the decoder cannot represent the value and must\n    raise `VarintError(\"Varint too long\")`.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

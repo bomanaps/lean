@@ -1,0 +1,19 @@
+{
+    "tests/consensus/lstar/state_transition/test_justifiability.py::test_delta_0_finalized_slot_itself[fork_Lstar][fork_Lstar-justifiability]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "slot": 10,
+        "finalizedSlot": 10,
+        "output": {
+            "delta": 0,
+            "isJustifiable": true
+        },
+        "_info": {
+            "hash": "0x2541385dd92071bc4862c353705294c77e748d161d6c9f167dd1b04af9af99ce",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/state_transition/test_justifiability.py::test_delta_0_finalized_slot_itself[fork_Lstar]",
+            "description": "Delta 0: the finalized slot itself is always justifiable.",
+            "fixtureFormat": "justifiability"
+        }
+    }
+}

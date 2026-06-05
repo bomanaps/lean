@@ -1,0 +1,88 @@
+{
+    "tests/consensus/lstar/networking/test_gossipsub_handlers.py::test_message_forward_to_mesh[fork_Lstar][fork_Lstar-gossipsub_handler]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "handlerName": "message",
+        "params": {
+            "d": 4,
+            "dLow": 3,
+            "dHigh": 6,
+            "dLazy": 3
+        },
+        "initialState": {
+            "subscriptions": [
+                "test_topic"
+            ],
+            "meshes": {
+                "test_topic": [
+                    "senderX",
+                    "peerAx",
+                    "peerBx"
+                ]
+            },
+            "peers": {
+                "senderX": {
+                    "subscriptions": [
+                        "test_topic"
+                    ]
+                },
+                "peerAx": {
+                    "subscriptions": [
+                        "test_topic"
+                    ]
+                },
+                "peerBx": {
+                    "subscriptions": [
+                        "test_topic"
+                    ]
+                }
+            }
+        },
+        "event": {
+            "fromPeer": "senderX",
+            "publish": [
+                {
+                    "topic": "test_topic",
+                    "data": "0xdeadbeef"
+                }
+            ]
+        },
+        "now": 1000.0,
+        "expected": {
+            "sentRpcs": [
+                {
+                    "toPeer": "peerBx",
+                    "publish": [
+                        {
+                            "topic": "test_topic",
+                            "data": "0xdeadbeef"
+                        }
+                    ]
+                },
+                {
+                    "toPeer": "peerAx",
+                    "publish": [
+                        {
+                            "topic": "test_topic",
+                            "data": "0xdeadbeef"
+                        }
+                    ]
+                }
+            ],
+            "meshAfter": {
+                "test_topic": [
+                    "peerAx",
+                    "peerBx",
+                    "senderX"
+                ]
+            }
+        },
+        "_info": {
+            "hash": "0x9df642e627fb54d6c334315a4472d0d600154e26de23592d6c8b16fa5a390055",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_gossipsub_handlers.py::test_message_forward_to_mesh[fork_Lstar]",
+            "description": "New message forwarded to mesh peers except the sender.",
+            "fixtureFormat": "gossipsub_handler"
+        }
+    }
+}

@@ -1,0 +1,25 @@
+{
+    "tests/consensus/lstar/chain/test_slot_clock.py::test_from_slot_hundred[fork_Lstar][fork_Lstar-slot_clock]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "operation": "from_slot",
+        "input": {
+            "slot": 100
+        },
+        "output": {
+            "config": {
+                "secondsPerSlot": 4,
+                "intervalsPerSlot": 5,
+                "millisecondsPerInterval": 800
+            },
+            "interval": 500
+        },
+        "_info": {
+            "hash": "0x0225dd0302f1e5935afa4bca2381b804de4a3a3ed33d825e66fcb5e20c50a7b0",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/chain/test_slot_clock.py::test_from_slot_hundred[fork_Lstar]",
+            "description": "Slot 100 starts at interval 500.",
+            "fixtureFormat": "slot_clock"
+        }
+    }
+}

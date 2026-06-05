@@ -1,0 +1,24 @@
+{
+    "tests/consensus/lstar/networking/test_decode_failure_smoke.py::test_decode_failure_varint_truncated[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "expectException": "Exception",
+        "codecName": "decode_failure",
+        "input": {
+            "decoder": "varint",
+            "bytes": "0x80"
+        },
+        "output": {
+            "decoder": "varint",
+            "errorType": "VarintError",
+            "errorMessage": "Truncated varint"
+        },
+        "_info": {
+            "hash": "0x64a1d231d26ccfb9eee92652b57f3e8e560ee5e336ae3a99c02902cd5215620a",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_decode_failure_smoke.py::test_decode_failure_varint_truncated[fork_Lstar]",
+            "description": "A truncated varint (continuation bit set on the final byte) must fail to decode.\n\n    Pins the new `decode_failure` codec dispatch path on the\n    networking_codec fixture.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

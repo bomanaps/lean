@@ -1,0 +1,65 @@
+{
+    "tests/consensus/lstar/networking/test_gossipsub_handlers.py::test_message_duplicate_not_forwarded[fork_Lstar][fork_Lstar-gossipsub_handler]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "handlerName": "message",
+        "params": {
+            "d": 4,
+            "dLow": 3,
+            "dHigh": 6,
+            "dLazy": 3
+        },
+        "initialState": {
+            "subscriptions": [
+                "test_topic"
+            ],
+            "meshes": {
+                "test_topic": [
+                    "senderX",
+                    "peerAx"
+                ]
+            },
+            "peers": {
+                "senderX": {
+                    "subscriptions": [
+                        "test_topic"
+                    ]
+                },
+                "peerAx": {
+                    "subscriptions": [
+                        "test_topic"
+                    ]
+                }
+            },
+            "seenMessageIds": [
+                "0x8dc6bba09a9550cdccb1b1b432bb04919901ce1e"
+            ]
+        },
+        "event": {
+            "fromPeer": "senderX",
+            "publish": [
+                {
+                    "topic": "test_topic",
+                    "data": "0xdeadbeef"
+                }
+            ]
+        },
+        "now": 1000.0,
+        "expected": {
+            "sentRpcs": [],
+            "meshAfter": {
+                "test_topic": [
+                    "peerAx",
+                    "senderX"
+                ]
+            }
+        },
+        "_info": {
+            "hash": "0xfa6604e8d0e7c3776f7710783e859b9fc58f8f53e24ddf7c191ae872daa7c9ec",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_gossipsub_handlers.py::test_message_duplicate_not_forwarded[fork_Lstar]",
+            "description": "Duplicate message (already in seen cache) is not forwarded.",
+            "fixtureFormat": "gossipsub_handler"
+        }
+    }
+}

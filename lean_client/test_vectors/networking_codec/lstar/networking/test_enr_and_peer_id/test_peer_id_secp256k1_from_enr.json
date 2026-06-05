@@ -1,0 +1,22 @@
+{
+    "tests/consensus/lstar/networking/test_enr_and_peer_id.py::test_peer_id_secp256k1_from_enr[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "codecName": "peer_id",
+        "input": {
+            "keyType": "secp256k1",
+            "publicKey": "0x03ca634cae0d49acb401d8a4c6b6fe8c55b70d115bf400769cc1400f3258cd3138"
+        },
+        "output": {
+            "protobufEncoded": "0x0802122103ca634cae0d49acb401d8a4c6b6fe8c55b70d115bf400769cc1400f3258cd3138",
+            "peerId": "16Uiu2HAmSH2XVgZqYHWucap5kuPzLnt2TsNQkoppVxB5eJGvaXwm"
+        },
+        "_info": {
+            "hash": "0x7f96eeabf5b77cd8e419e25843940eb64a71de92570d654f02cacb38e5d4ec2b",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_enr_and_peer_id.py::test_peer_id_secp256k1_from_enr[fork_Lstar]",
+            "description": "secp256k1 PeerId using the public key from the official EIP-778 ENR.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

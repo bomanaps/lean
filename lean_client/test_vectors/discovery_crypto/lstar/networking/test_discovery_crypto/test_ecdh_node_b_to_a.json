@@ -1,0 +1,21 @@
+{
+    "tests/consensus/lstar/networking/test_discovery_crypto.py::test_ecdh_node_b_to_a[fork_Lstar][fork_Lstar-discovery_crypto]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "operation": "ecdh",
+        "input": {
+            "privateKey": "0x66fb62bfbd66b9177a138c1e5cddbe4f7c30c343e94e68df8769459cb1cde628",
+            "publicKey": "0x0313d14211e0287b2361a1615890a9b5212080546d0a257ae4cff96cf534992cb9"
+        },
+        "output": {
+            "sharedSecret": "0x03022df677b53f62850b7d838ac3f3d705a5ae9827342080acc9dec6640fb6d752"
+        },
+        "_info": {
+            "hash": "0x4dc694b5130c284a1f0b449e064b0ad209eae2a44bc6aa120970ee502daee753",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_discovery_crypto.py::test_ecdh_node_b_to_a[fork_Lstar]",
+            "description": "ECDH(B_priv, A_pub) must equal ECDH(A_priv, B_pub) (symmetry).",
+            "fixtureFormat": "discovery_crypto"
+        }
+    }
+}

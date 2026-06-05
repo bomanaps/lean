@@ -1,0 +1,26 @@
+{
+    "tests/consensus/lstar/chain/test_slot_clock.py::test_total_intervals_multi_slot[fork_Lstar][fork_Lstar-slot_clock]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "operation": "total_intervals",
+        "input": {
+            "genesisTime": 1700000000,
+            "currentTimeMs": 1700000014400
+        },
+        "output": {
+            "config": {
+                "secondsPerSlot": 4,
+                "intervalsPerSlot": 5,
+                "millisecondsPerInterval": 800
+            },
+            "totalIntervals": 18
+        },
+        "_info": {
+            "hash": "0x54e61ced58fc38538ceb6618ecf785add7f72c3bb58bfd693041803837ff9351",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/chain/test_slot_clock.py::test_total_intervals_multi_slot[fork_Lstar]",
+            "description": "14.4 seconds = 18 intervals (14400 ms / 800 ms).",
+            "fixtureFormat": "slot_clock"
+        }
+    }
+}

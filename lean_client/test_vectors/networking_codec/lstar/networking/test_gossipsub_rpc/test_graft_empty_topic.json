@@ -1,0 +1,28 @@
+{
+    "tests/consensus/lstar/networking/test_gossipsub_rpc.py::test_graft_empty_topic[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "codecName": "gossipsub_rpc",
+        "input": {
+            "subscriptions": [],
+            "publish": [],
+            "control": {
+                "graft": [
+                    {
+                        "topicId": ""
+                    }
+                ]
+            }
+        },
+        "output": {
+            "encoded": "0x1a021a00"
+        },
+        "_info": {
+            "hash": "0x9d8c5b05eeb90662d022c94e0875d1a0859e90c45eb5ee4a4d9e374c8d3855af",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_gossipsub_rpc.py::test_graft_empty_topic[fork_Lstar]",
+            "description": "GRAFT with an empty topic string.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

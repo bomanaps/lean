@@ -1,7 +1,6 @@
 use anyhow::{Result, anyhow, ensure};
 use bitvec::{bitvec, order::Lsb0, vec::BitVec};
 use metrics::METRICS;
-use serde::{Deserialize, Serialize};
 use ssz::{BitList, H256, PersistentList, Ssz, SszHash};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use tracing::{info, trace, warn};
@@ -29,11 +28,9 @@ pub type HistoricalBlockHashes = PersistentList<H256, U262144>;
 pub type JustificationValidators = BitList<JustificationValidatorsLimit>;
 pub type JustificationRoots = PersistentList<H256, HistoricalRootsLimit>;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Ssz, Default)]
+#[derive(Debug, Clone, Ssz, Default)]
 #[ssz(transparent)]
-pub struct JustifiedSlots(
-    #[serde(with = "crate::serde_helpers::bitlist")] pub BitList<HistoricalRootsLimit>,
-);
+pub struct JustifiedSlots(pub BitList<HistoricalRootsLimit>);
 
 impl JustifiedSlots {
     fn is_slot_justified(&self, finalized_slot: Slot, target_slot: Slot) -> Result<bool> {
@@ -125,8 +122,7 @@ fn attestation_data_matches_chain(
         && historical_block_hashes[target_slot] == attestation_data.target.root
 }
 
-#[derive(Clone, Debug, Ssz, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Ssz)]
 pub struct State {
     // --- configuration (spec-local) ---
     pub config: Config,
@@ -140,19 +136,15 @@ pub struct State {
     pub latest_finalized: Checkpoint,
 
     // --- historical data ---
-    #[serde(with = "crate::serde_helpers")]
     pub historical_block_hashes: HistoricalBlockHashes,
 
     // --- flattened justification tracking ---
     pub justified_slots: JustifiedSlots,
 
     // Validators registry
-    #[serde(with = "crate::serde_helpers")]
     pub validators: Validators,
 
-    #[serde(with = "crate::serde_helpers")]
     pub justifications_roots: JustificationRoots,
-    #[serde(with = "crate::serde_helpers::bitlist")]
     pub justifications_validators: JustificationValidators,
 }
 

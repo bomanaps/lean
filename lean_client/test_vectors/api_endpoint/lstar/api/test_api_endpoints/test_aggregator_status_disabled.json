@@ -1,0 +1,25 @@
+{
+    "tests/consensus/lstar/api/test_api_endpoints.py::test_aggregator_status_disabled[fork_Lstar][fork_Lstar-api_endpoint]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "endpoint": "/lean/v0/admin/aggregator",
+        "method": "GET",
+        "genesisParams": {
+            "numValidators": 4,
+            "genesisTime": 0
+        },
+        "initialIsAggregator": false,
+        "expectedStatusCode": 200,
+        "expectedContentType": "application/json",
+        "expectedBody": {
+            "is_aggregator": false
+        },
+        "_info": {
+            "hash": "0x3b98b021603b378eb62491911c54d587507891b267c9b824687041d0234e8a54",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/api/test_api_endpoints.py::test_aggregator_status_disabled[fork_Lstar]",
+            "description": "GET aggregator status on a node started with aggregator disabled.",
+            "fixtureFormat": "api_endpoint"
+        }
+    }
+}

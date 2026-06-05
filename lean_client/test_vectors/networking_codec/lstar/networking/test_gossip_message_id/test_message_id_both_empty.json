@@ -1,0 +1,22 @@
+{
+    "tests/consensus/lstar/networking/test_gossip_message_id.py::test_message_id_both_empty[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "codecName": "gossip_message_id",
+        "input": {
+            "topic": "0x",
+            "data": "0x",
+            "domain": "0x01000000"
+        },
+        "output": {
+            "messageId": "0xca888f40c3caca805b37a5434c75de5550616e07"
+        },
+        "_info": {
+            "hash": "0x50b59d34c00a3871ecd9cbf7648593aee2c42040d56413cffd44702b12d1e398",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_gossip_message_id.py::test_message_id_both_empty[fork_Lstar]",
+            "description": "Message ID with both topic and data empty.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

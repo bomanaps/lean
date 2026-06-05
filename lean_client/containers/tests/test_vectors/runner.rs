@@ -1,8 +1,63 @@
 use ssz::SszHash;
 
 use super::*;
+use containers::{Block, SignedBlock, State};
 use std::fs;
 use std::path::Path;
+
+/// Adapter that converts `spec_test_fixtures::TestCase` (with wrapper-shaped
+/// fields like `TestAnchorState`/`Vec<TestBlock>`) into the production-typed
+/// shape this runner was originally written against. Lets the runner bodies
+/// stay close to the pre-migration form.
+struct PracticalCase {
+    pre: State,
+    blocks: Option<Vec<Block>>,
+    post: Option<PostState>,
+    expect_exception: Option<String>,
+    info: Info,
+}
+
+impl From<TestCase> for PracticalCase {
+    fn from(case: TestCase) -> Self {
+        Self {
+            pre: case.pre.into(),
+            blocks: case.blocks.map(|v| v.into_iter().map(Into::into).collect()),
+            post: case.post,
+            expect_exception: case.expect_exception,
+            info: case.info.unwrap_or_else(default_info),
+        }
+    }
+}
+
+fn default_info() -> Info {
+    Info {
+        hash: String::new(),
+        comment: String::new(),
+        test_id: String::new(),
+        description: String::new(),
+        fixture_format: String::new(),
+    }
+}
+
+struct PracticalVerifyCase {
+    anchor_state: State,
+    signed_block: SignedBlock,
+    expect_exception: Option<String>,
+    info: Info,
+}
+
+impl TryFrom<VerifySignaturesTestCase> for PracticalVerifyCase {
+    type Error = String;
+
+    fn try_from(case: VerifySignaturesTestCase) -> Result<Self, Self::Error> {
+        Ok(Self {
+            anchor_state: case.anchor_state.into(),
+            signed_block: case.signed_block.try_into()?,
+            expect_exception: case.expect_exception,
+            info: case.info.unwrap_or_else(default_info),
+        })
+    }
+}
 
 pub struct TestRunner;
 
@@ -21,6 +76,7 @@ impl TestRunner {
             .into_iter()
             .next()
             .ok_or("No test case found in JSON")?;
+        let test_case: PracticalCase = test_case.into();
 
         println!("Running test: {}", test_name);
         println!("Description: {}", test_case.info.description);
@@ -129,6 +185,7 @@ impl TestRunner {
             .into_iter()
             .next()
             .ok_or("No test case found in JSON")?;
+        let test_case: PracticalCase = test_case.into();
 
         println!("Running test: {}", test_name);
         println!("Description: {}", test_case.info.description);
@@ -229,6 +286,7 @@ impl TestRunner {
             .into_iter()
             .next()
             .ok_or("No test case found in JSON")?;
+        let test_case: PracticalCase = test_case.into();
 
         println!("Running test: {}", test_name);
         println!("Description: {}", test_case.info.description);
@@ -345,6 +403,7 @@ impl TestRunner {
             .into_iter()
             .next()
             .ok_or("No test case found in JSON")?;
+        let test_case: PracticalCase = test_case.into();
 
         println!("\n{}: {}", test_name, test_case.info.description);
 
@@ -466,6 +525,7 @@ impl TestRunner {
             .into_iter()
             .next()
             .ok_or("No test case found in JSON")?;
+        let test_case: PracticalCase = test_case.into();
 
         println!("\n{}: {}", test_name, test_case.info.description);
 
@@ -518,7 +578,7 @@ impl TestRunner {
     }
 
     /// Helper: Run invalid block test (expecting exception)
-    fn run_invalid_block_test(test_case: TestCase) -> Result<(), Box<dyn std::error::Error>> {
+    fn run_invalid_block_test(test_case: PracticalCase) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(ref blocks) = test_case.blocks {
             if blocks.is_empty() {
                 println!("  WARNING: Empty blocks array - cannot test invalid block");
@@ -572,7 +632,7 @@ impl TestRunner {
     }
 
     /// Helper: Verify genesis state only (no blocks)
-    fn verify_genesis_state(test_case: TestCase) -> Result<(), Box<dyn std::error::Error>> {
+    fn verify_genesis_state(test_case: PracticalCase) -> Result<(), Box<dyn std::error::Error>> {
         let state = &test_case.pre;
 
         // Verify post-state if present
@@ -584,7 +644,7 @@ impl TestRunner {
     /// Helper: Verify post-state conditions
     fn verify_post_state(
         state: &State,
-        test_case: &TestCase,
+        test_case: &PracticalCase,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(ref post) = test_case.post {
             // Verify slot
@@ -638,6 +698,9 @@ impl TestRunner {
             .next()
             .ok_or("No test case found in JSON")
             .unwrap();
+        let test_case: PracticalVerifyCase = test_case
+            .try_into()
+            .expect("failed to convert VerifySignaturesTestCase to production types");
 
         println!("\n{}: {}", test_name, test_case.info.description);
 

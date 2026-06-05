@@ -1,8 +1,8 @@
 ### Variables
 
 # Commit of lean specification. Allows to specify which spec version to use,
-#   when generating test vectors. Pinned to leanSpec PR #682 merge commit.
-LEAN_SPEC_COMMIT ?= 62eff6e7e6041a283877a546a07cb3b83f4f7d5b
+#   when generating test vectors.
+LEAN_SPEC_COMMIT ?= f12000bd68a9640cffdfbd9a07503c9112d32bee
 # Docker image name. Used for both release (with publish) and local builds.
 DOCKER_REPO ?= sifrai/lean
 # Image tag.
@@ -56,9 +56,22 @@ generate-test-vectors:
 		git remote add origin https://github.com/leanEthereum/leanSpec.git && \
 		git fetch --depth 1 origin $(LEAN_SPEC_COMMIT) && \
 		git switch --detach FETCH_HEAD
-	cd spec && uv run fill --clean --fork=devnet --scheme prod || echo "run failed"
-	rm -rf ./test_vectors && mkdir -p ./test_vectors
-	cp -r ./spec/fixtures/consensus/* ./test_vectors/
+	# Pre-download prod keys. The pinned leanSpec commit predates leanSpec PR #745,
+	# whose `download_keys` reads the still-open release URL. Remove once the pin
+	# moves past PR #745.
+	cd spec && \
+		KEYS_URL=$$(uv run python -c "from consensus_testing.keys import KEY_DOWNLOAD_URLS; print(KEY_DOWNLOAD_URLS['prod'])") && \
+		KEYS_DIR=packages/testing/src/consensus_testing/test_keys && \
+		mkdir -p $$KEYS_DIR && \
+		curl -sSL "$$KEYS_URL" -o /tmp/prod_scheme.tar.gz && \
+		tar -xzf /tmp/prod_scheme.tar.gz -C $$KEYS_DIR
+	cd spec && uv run fill --clean --fork=Lstar --scheme prod || echo "run failed"
+	@for d in ./spec/fixtures/consensus/*/; do \
+		f=$$(basename $$d); \
+		rm -rf ./test_vectors/$$f/devnet ./test_vectors/$$f/lstar; \
+		mkdir -p ./test_vectors/$$f/lstar; \
+		cp -R $$d/lstar/. ./test_vectors/$$f/lstar/; \
+	done
 
 .PHONY: build
 build:

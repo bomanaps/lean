@@ -1,5 +1,4 @@
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use ssz::{BitList, H256, PersistentList, Ssz, SszHash};
 use std::collections::HashSet;
 use typenum::{U4096, Unsigned as _};
@@ -19,8 +18,7 @@ pub type AttestationSignatures = PersistentList<AggregatedSignatureProof, Valida
 ///
 /// Combines the participant bitfield with the proof bytes.
 /// Used in `aggregated_payloads` to track which validators are covered by each proof.
-#[derive(Clone, Debug, Ssz, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Ssz)]
 pub struct AggregatedSignatureProof {
     /// Bitfield indicating which validators' signatures are included.
     pub participants: AggregationBits,
@@ -136,11 +134,9 @@ impl AggregatedSignatureProof {
 
 /// Bitlist representing validator participation in an attestation.
 /// Limit is VALIDATOR_REGISTRY_LIMIT (4096).
-#[derive(Clone, Debug, Ssz, Serialize, Deserialize)]
+#[derive(Clone, Debug, Ssz)]
 #[ssz(transparent)]
-pub struct AggregationBits(
-    #[serde(with = "crate::serde_helpers::bitlist")] pub BitList<ValidatorRegistryLimit>,
-);
+pub struct AggregationBits(pub BitList<ValidatorRegistryLimit>);
 
 impl AggregationBits {
     pub const LIMIT: u64 = ValidatorRegistryLimit::U64;
@@ -190,7 +186,7 @@ pub type AggregatedSignatures = ssz::PersistentList<Signature, U4096>;
 /// Attestation content describing the validator's observed chain view.
 ///
 /// todo(containers): default implementation doesn't make sense here
-#[derive(Clone, Debug, Ssz, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Ssz, PartialEq, Eq, Default)]
 pub struct AttestationData {
     /// The slot for which the attestation is made.
     pub slot: Slot,
@@ -225,8 +221,7 @@ impl SignatureKey {
 /// Validator specific attestation wrapping shared attestation data.
 ///
 /// todo(containers): default implementation doesn't make sense here
-#[derive(Clone, Debug, Ssz, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Ssz, Default, PartialEq, Eq)]
 pub struct Attestation {
     /// The index of the validator making the attestation.
     pub validator_id: u64,
@@ -243,8 +238,7 @@ pub struct SignedAttestation {
 }
 
 /// Aggregated attestation consisting of participation bits and message.
-#[derive(Clone, Debug, Ssz, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Ssz)]
 pub struct AggregatedAttestation {
     /// Bitfield indicating which validators participated in the aggregation.
     pub aggregation_bits: AggregationBits,

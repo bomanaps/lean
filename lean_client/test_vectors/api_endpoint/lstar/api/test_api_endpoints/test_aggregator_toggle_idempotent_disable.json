@@ -1,0 +1,29 @@
+{
+    "tests/consensus/lstar/api/test_api_endpoints.py::test_aggregator_toggle_idempotent_disable[fork_Lstar][fork_Lstar-api_endpoint]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "endpoint": "/lean/v0/admin/aggregator",
+        "method": "POST",
+        "genesisParams": {
+            "numValidators": 4,
+            "genesisTime": 0
+        },
+        "requestBody": {
+            "enabled": false
+        },
+        "initialIsAggregator": false,
+        "expectedStatusCode": 200,
+        "expectedContentType": "application/json",
+        "expectedBody": {
+            "is_aggregator": false,
+            "previous": false
+        },
+        "_info": {
+            "hash": "0xa362c80dd61cb27136726592f8640406b2b1ae788154fc67c8ccd14811b427af",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/api/test_api_endpoints.py::test_aggregator_toggle_idempotent_disable[fork_Lstar]",
+            "description": "POST enable=false on an already-disabled node returns previous=false and is a no-op.",
+            "fixtureFormat": "api_endpoint"
+        }
+    }
+}

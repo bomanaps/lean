@@ -1,0 +1,55 @@
+{
+    "tests/consensus/lstar/networking/test_gossipsub_handlers.py::test_ihave_seen_no_iwant[fork_Lstar][fork_Lstar-gossipsub_handler]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "handlerName": "ihave",
+        "params": {
+            "d": 4,
+            "dLow": 3,
+            "dHigh": 6,
+            "dLazy": 3
+        },
+        "initialState": {
+            "subscriptions": [
+                "test_topic"
+            ],
+            "meshes": {},
+            "peers": {
+                "peerAx": {
+                    "subscriptions": [
+                        "test_topic"
+                    ]
+                }
+            },
+            "seenMessageIds": [
+                "0x8dc6bba09a9550cdccb1b1b432bb04919901ce1e"
+            ],
+            "cachedMessages": []
+        },
+        "event": {
+            "fromPeer": "peerAx",
+            "ihave": [
+                {
+                    "topicId": "test_topic",
+                    "messageIds": [
+                        "0x8dc6bba09a9550cdccb1b1b432bb04919901ce1e"
+                    ]
+                }
+            ]
+        },
+        "now": 1000.0,
+        "expected": {
+            "sentRpcs": [],
+            "meshAfter": {
+                "test_topic": []
+            }
+        },
+        "_info": {
+            "hash": "0xdf76265aaf0f1bdc36bb1ceabf6b2039ced7d8336272756d63ccb4b42fdc0d36",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_gossipsub_handlers.py::test_ihave_seen_no_iwant[fork_Lstar]",
+            "description": "IHAVE for an already-seen message produces no IWANT.",
+            "fixtureFormat": "gossipsub_handler"
+        }
+    }
+}

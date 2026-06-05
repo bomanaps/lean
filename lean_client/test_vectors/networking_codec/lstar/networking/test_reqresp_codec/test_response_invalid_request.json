@@ -1,0 +1,21 @@
+{
+    "tests/consensus/lstar/networking/test_reqresp_codec.py::test_response_invalid_request[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "codecName": "reqresp_response",
+        "input": {
+            "responseCode": 1,
+            "sszData": "0x6261642072657175657374"
+        },
+        "output": {
+            "encoded": "0x010bff060000734e61507059010f00008a23d9c16261642072657175657374"
+        },
+        "_info": {
+            "hash": "0xd19b695144ff519396fea81ee97e63c46ad6791dc77580fef1e77611b9841e47",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_reqresp_codec.py::test_response_invalid_request[fork_Lstar]",
+            "description": "INVALID_REQUEST response with UTF-8 error message.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}

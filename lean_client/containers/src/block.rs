@@ -2,7 +2,6 @@ use crate::{Slot, State};
 use anyhow::{Context, Result, ensure};
 use metrics::METRICS;
 use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
 use ssz::{H256, Ssz, SszHash};
 use xmss::Signature;
 
@@ -13,14 +12,12 @@ use crate::attestation::{AggregatedAttestations, AttestationSignatures};
 /// Attestations are stored WITHOUT signatures. Signatures are aggregated
 /// separately in BlockSignatures to match the spec architecture.
 // todo(containers): default implementation doesn't make sense here.
-#[derive(Clone, Debug, Ssz, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Ssz, Default)]
 pub struct BlockBody {
-    #[serde(with = "crate::serde_helpers::aggregated_attestations")]
     pub attestations: AggregatedAttestations,
 }
 
-#[derive(Clone, Debug, Ssz, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Ssz)]
 pub struct BlockHeader {
     pub slot: Slot,
     pub proposer_index: u64,
@@ -29,8 +26,7 @@ pub struct BlockHeader {
     pub body_root: H256,
 }
 
-#[derive(Clone, Debug, Ssz, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Ssz)]
 pub struct Block {
     pub slot: Slot,
     pub proposer_index: u64,
@@ -40,23 +36,19 @@ pub struct Block {
 }
 
 // todo(containers): default implementation doesn't make sense here
-#[derive(Debug, Clone, Ssz, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Ssz, Default)]
 pub struct BlockSignatures {
-    #[serde(with = "crate::serde_helpers::attestation_signatures")]
     pub attestation_signatures: AttestationSignatures,
     pub proposer_signature: Signature,
 }
 
 /// Signed block for devnet4: block body + aggregated signatures.
 /// Proposer attestation is no longer embedded in the block message.
-#[derive(Clone, Debug, Ssz, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Ssz)]
 pub struct SignedBlock {
     /// The proposed block.
     pub block: Block,
     /// Aggregated signature payload (attestation proofs + proposer signature).
-    #[serde(alias = "signatures")]
     pub signature: BlockSignatures,
 }
 

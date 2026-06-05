@@ -1,5 +1,4 @@
 use crate::Slot;
-use serde::{Deserialize, Serialize};
 use ssz::{H256, Ssz};
 
 /// Represents a checkpoint in the chain's history.
@@ -7,7 +6,7 @@ use ssz::{H256, Ssz};
 /// A checkpoint marks a specific moment in the chain. It combines a block
 /// identifier with a slot number. Checkpoints are used for justification and
 /// finalization.
-#[derive(Clone, Debug, PartialEq, Eq, Ssz, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Ssz, Default)]
 pub struct Checkpoint {
     /// The root hash of the checkpoint's block.
     pub root: H256,

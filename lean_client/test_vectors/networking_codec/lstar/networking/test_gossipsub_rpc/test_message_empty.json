@@ -1,0 +1,23 @@
+{
+    "tests/consensus/lstar/networking/test_gossipsub_rpc.py::test_message_empty[fork_Lstar][fork_Lstar-networking_codec]": {
+        "network": "Lstar",
+        "leanEnv": "prod",
+        "codecName": "gossipsub_rpc",
+        "input": {
+            "subscriptions": [],
+            "publish": [
+                {}
+            ]
+        },
+        "output": {
+            "encoded": "0x1200"
+        },
+        "_info": {
+            "hash": "0x98136f7a30aaebe64f508a2d4ca69de0e44d54dc5353dce302bb65ffcee07f1e",
+            "comment": "`leanSpec` generated test",
+            "testId": "tests/consensus/lstar/networking/test_gossipsub_rpc.py::test_message_empty[fork_Lstar]",
+            "description": "Published message with no fields set. Encodes as zero bytes.",
+            "fixtureFormat": "networking_codec"
+        }
+    }
+}
