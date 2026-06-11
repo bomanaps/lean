@@ -197,6 +197,12 @@ where
     blocks_by_range_provider: CanonicalBlocksProvider,
     /// Pending BlocksByRoot requests for retry on empty response
     pending_blocks_by_root: HashMap<OutboundRequestId, PendingBlocksRequest>,
+    /// In-flight BlocksByRange requests, deduplicated by (peer, start_slot, count).
+    /// `inflight_range_keys` is the O(1) dedup check; `inflight_blocks_by_range`
+    /// maps the libp2p request id to its key so we can drop both entries when
+    /// a Response, OutboundFailure, or peer disconnect arrives.
+    inflight_blocks_by_range: HashMap<OutboundRequestId, (PeerId, u64, u64)>,
+    inflight_range_keys: HashSet<(PeerId, u64, u64)>,
     /// Depth tracking per block root for limiting backward chain walking
     pending_block_depths: HashMap<H256, u32>,
     /// Roots currently in-flight to deduplicate network-layer pipelining vs chain-side requests
@@ -331,6 +337,8 @@ where
             status_provider,
             blocks_by_range_provider,
             pending_blocks_by_root: HashMap::new(),
+            inflight_blocks_by_range: HashMap::new(),
+            inflight_range_keys: HashSet::new(),
             pending_block_depths: HashMap::new(),
             in_flight_roots: HashSet::new(),
             network_finalized_slot,
@@ -511,6 +519,9 @@ where
 
                 self.peer_finalized_slots.remove(&peer_id);
                 self.peer_head_slots.remove(&peer_id);
+                self.inflight_blocks_by_range
+                    .retain(|_, (p, _, _)| *p != peer_id);
+                self.inflight_range_keys.retain(|(p, _, _)| *p != peer_id);
                 self.recompute_network_finalized_slot();
 
                 info!(peer = %peer_id, ?cause, "Disconnected from peer (total: {})", connected);
@@ -1497,6 +1508,18 @@ where
             );
             return;
         }
+
+        let key = (peer_id, start_slot, count);
+        if self.inflight_range_keys.contains(&key) {
+            trace!(
+                peer = %peer_id,
+                start_slot,
+                count,
+                "Skipping duplicate BlocksByRange request"
+            );
+            return;
+        }
+
         info!(
             peer = %peer_id,
             start_slot,
@@ -1504,11 +1527,13 @@ where
             "Sending BlocksByRange request"
         );
         let request = LeanRequest::BlocksByRange { start_slot, count };
-        let _request_id = self
+        let request_id = self
             .swarm
             .behaviour_mut()
             .blocks_by_range_req_resp
             .send_request(&peer_id, request);
+        self.inflight_range_keys.insert(key);
+        self.inflight_blocks_by_range.insert(request_id, key);
     }
 
     pub fn send_blocks_by_root_request_with_depth(
@@ -1627,61 +1652,78 @@ where
                         warn!(peer = %peer, ?e, "Failed to send BlocksByRange response");
                     }
                 }
-                Message::Response { response, .. } => match response {
-                    LeanResponse::BlocksByRange(blocks) => {
-                        info!(
-                            peer = %peer,
-                            num_blocks = blocks.len(),
-                            "Received BlocksByRange response"
-                        );
+                Message::Response {
+                    request_id,
+                    response,
+                    ..
+                } => {
+                    if let Some(key) = self.inflight_blocks_by_range.remove(&request_id) {
+                        self.inflight_range_keys.remove(&key);
+                    }
+                    match response {
+                        LeanResponse::BlocksByRange(blocks) => {
+                            info!(
+                                peer = %peer,
+                                num_blocks = blocks.len(),
+                                "Received BlocksByRange response"
+                            );
 
-                        {
-                            let mut provider = self.signed_block_provider.write();
-                            for block in &blocks {
-                                let root = block.block.hash_tree_root();
-                                provider.insert(root, block.clone());
-                            }
-                            if provider.len() > MAX_BLOCK_CACHE_SIZE {
-                                let to_remove = provider.len() - MAX_BLOCK_CACHE_SIZE;
-                                let mut slots: Vec<(H256, u64)> = provider
-                                    .iter()
-                                    .map(|(root, b)| (*root, b.block.slot.0))
-                                    .collect();
-                                slots.sort_by_key(|(_, slot)| *slot);
-                                for (root, _) in slots.into_iter().take(to_remove) {
-                                    provider.remove(&root);
+                            {
+                                let mut provider = self.signed_block_provider.write();
+                                for block in &blocks {
+                                    let root = block.block.hash_tree_root();
+                                    provider.insert(root, block.clone());
                                 }
+                                if provider.len() > MAX_BLOCK_CACHE_SIZE {
+                                    let to_remove = provider.len() - MAX_BLOCK_CACHE_SIZE;
+                                    let mut slots: Vec<(H256, u64)> = provider
+                                        .iter()
+                                        .map(|(root, b)| (*root, b.block.slot.0))
+                                        .collect();
+                                    slots.sort_by_key(|(_, slot)| *slot);
+                                    for (root, _) in slots.into_iter().take(to_remove) {
+                                        provider.remove(&root);
+                                    }
+                                }
+                                METRICS.get().map(|m| {
+                                    m.grandine_signed_block_provider_size
+                                        .set(provider.len() as i64)
+                                });
                             }
-                            METRICS.get().map(|m| {
-                                m.grandine_signed_block_provider_size
-                                    .set(provider.len() as i64)
+
+                            let chain_sink = self.chain_message_sink.clone();
+                            tokio::spawn(async move {
+                                for block in blocks {
+                                    let slot = block.block.slot.0;
+                                    if let Err(e) = chain_sink
+                                        .send(ChainMessage::ProcessBlock {
+                                            signed_block: block,
+                                            is_trusted: false,
+                                            should_gossip: false,
+                                            cached_post_state: None,
+                                        })
+                                        .await
+                                    {
+                                        warn!(slot, ?e, "Failed to forward range block to chain");
+                                    }
+                                }
                             });
                         }
-
-                        let chain_sink = self.chain_message_sink.clone();
-                        tokio::spawn(async move {
-                            for block in blocks {
-                                let slot = block.block.slot.0;
-                                if let Err(e) = chain_sink
-                                    .send(ChainMessage::ProcessBlock {
-                                        signed_block: block,
-                                        is_trusted: false,
-                                        should_gossip: false,
-                                        cached_post_state: None,
-                                    })
-                                    .await
-                                {
-                                    warn!(slot, ?e, "Failed to forward range block to chain");
-                                }
-                            }
-                        });
+                        _ => {
+                            warn!(peer = %peer, "Unexpected response type on BlocksByRange protocol");
+                        }
                     }
-                    _ => {
-                        warn!(peer = %peer, "Unexpected response type on BlocksByRange protocol");
-                    }
-                },
+                }
             },
-            Event::OutboundFailure { peer, error, .. } => {
+            Event::OutboundFailure {
+                peer,
+                request_id,
+                error,
+                ..
+            } => {
+                if let Some(key) = self.inflight_blocks_by_range.remove(&request_id) {
+                    self.inflight_range_keys.remove(&key);
+                }
                 warn!(peer = %peer, ?error, "BlocksByRange outbound request failed");
             }
             Event::InboundFailure { peer, error, .. } => {

@@ -505,6 +505,8 @@ async fn main() -> Result<()> {
     ));
     let cpu_snark_executor = Arc::new(DedicatedExecutor::new("lean-snark", 1, None, None));
     let cpu_verify_executor = Arc::new(DedicatedExecutor::new("lean-verify", 1, None, None));
+    let cpu_aggregation_executor =
+        Arc::new(DedicatedExecutor::new("lean-aggregation", 1, None, None));
 
     // Verified blocks travel back from the executor to the chain task on this channel.
     // Tuple: (block_root, signed_block, should_gossip, verify outcome).
@@ -1131,7 +1133,7 @@ async fn main() -> Result<()> {
             vs,
             store.clone(),
             chain_log_inv_rate,
-            cpu_snark_executor.clone(),
+            cpu_aggregation_executor.clone(),
         )
     });
     // Whether this node has any validator service at all. Used for sync-state
@@ -1201,13 +1203,16 @@ async fn main() -> Result<()> {
                             .is_some();
                     on_tick(&mut *store.write(), now_millis, has_proposal);
 
-                    // Sample the cpu_normal executor's queue depth once per tick.
-                    // Counts both XMSS block verify and attestation signing tasks.
+                    // Sample executor queue depths once per tick.
                     METRICS.get().map(|m| {
                         m.grandine_cpu_normal_executor_tasks_in_flight
                             .set(cpu_normal_executor.tasks() as i64);
-                        m.grandine_cpu_low_executor_tasks_in_flight
-                            .set(cpu_snark_executor.tasks() as i64)
+                        m.grandine_cpu_snark_executor_tasks_in_flight
+                            .set(cpu_snark_executor.tasks() as i64);
+                        m.grandine_cpu_verify_executor_tasks_in_flight
+                            .set(cpu_verify_executor.tasks() as i64);
+                        m.grandine_cpu_aggregation_executor_tasks_in_flight
+                            .set(cpu_aggregation_executor.tasks() as i64)
                     });
 
                     let (current_slot, current_interval) = {
@@ -1255,17 +1260,26 @@ async fn main() -> Result<()> {
                     // AggregationService::is_aggregator_for_slot routes through the
                     // ValidatorService AtomicBool flag, so admin-API runtime toggles
                     // are still honored.
-                    if let Some(ref agg) = aggregator {
-                        if agg.is_aggregator_for_slot(Slot(current_slot))
-                            && current_interval >= 2
-                            && current_slot > last_agg_slot
-                        {
-                            last_agg_slot = current_slot;
+                    if current_interval >= 2 && current_slot > last_agg_slot {
+                        last_agg_slot = current_slot;
+                        let is_agg = aggregator
+                            .as_ref()
+                            .map(|a| a.is_aggregator_for_slot(Slot(current_slot)))
+                            .unwrap_or(false);
+                        if is_agg {
                             METRICS.get().map(|m| {
                                 m.lean_aggregation_snapshots_triggered_total.inc()
                             });
-                            agg.trigger(current_slot);
+                            if let Some(ref agg) = aggregator {
+                                agg.trigger(current_slot);
+                            }
                             info!(slot = current_slot, "Aggregation phase - triggered");
+                        } else {
+                            METRICS.get().map(|m| {
+                                m.lean_aggregator_skipped_total
+                                    .with_label_values(&["not_aggregator"])
+                                    .inc()
+                            });
                         }
                     }
 

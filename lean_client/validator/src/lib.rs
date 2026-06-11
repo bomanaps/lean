@@ -490,12 +490,18 @@ impl ValidatorService {
 
         for job in &snapshot.jobs {
             if cancel.load(Ordering::Relaxed) {
+                let remaining = snapshot.jobs.len() - aggregated_attestations.len();
                 warn!(
                     slot = slot.0,
                     completed = aggregated_attestations.len(),
-                    remaining = snapshot.jobs.len() - aggregated_attestations.len(),
+                    remaining,
                     "Aggregation cancelled after deadline; surfacing partial results"
                 );
+                METRICS.get().map(|m| {
+                    m.lean_aggregator_skipped_total
+                        .with_label_values(&["other"])
+                        .inc_by(remaining as u64)
+                });
                 break;
             }
 
