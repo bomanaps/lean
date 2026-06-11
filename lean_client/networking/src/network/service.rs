@@ -44,9 +44,9 @@ use crate::{
     network::behaviour::{LeanNetworkBehaviour, LeanNetworkBehaviourEvent},
     req_resp::{self, LeanRequest, ReqRespMessage},
     types::{
-        ChainMessage, ChainMessageSink, ConnectionState, MAX_BLOCK_CACHE_SIZE,
-        NetworkFinalizedSlot, OutboundP2pRequest, P2pRequestSource, SignedBlockProvider,
-        StatusProvider,
+        CanonicalBlocksProvider, ChainMessage, ChainMessageSink, ConnectionState,
+        MAX_BLOCK_CACHE_SIZE, NetworkFinalizedSlot, OutboundP2pRequest, P2pRequestSource,
+        SignedBlockProvider, StatusProvider,
     },
 };
 
@@ -193,6 +193,8 @@ where
     signed_block_provider: SignedBlockProvider,
     /// Shared status provider for Status req/resp protocol
     status_provider: StatusProvider,
+    /// Canonical-blocks-by-range provider for serving BlocksByRange requests
+    blocks_by_range_provider: CanonicalBlocksProvider,
     /// Pending BlocksByRoot requests for retry on empty response
     pending_blocks_by_root: HashMap<OutboundRequestId, PendingBlocksRequest>,
     /// Depth tracking per block root for limiting backward chain walking
@@ -201,6 +203,9 @@ where
     in_flight_roots: HashSet<H256>,
     network_finalized_slot: NetworkFinalizedSlot,
     peer_finalized_slots: HashMap<PeerId, u64>,
+    /// Peer head slots reported via Status; used by the caller to decide
+    /// when a backfill should switch from per-root BlocksByRoot to batched BlocksByRange.
+    peer_head_slots: HashMap<PeerId, u64>,
     status_notify: Arc<Notify>,
 }
 
@@ -215,6 +220,7 @@ where
         chain_message_sink: S,
         signed_block_provider: SignedBlockProvider,
         status_provider: StatusProvider,
+        blocks_by_range_provider: CanonicalBlocksProvider,
         network_finalized_slot: NetworkFinalizedSlot,
         status_notify: Arc<Notify>,
     ) -> Result<Self> {
@@ -225,6 +231,7 @@ where
             Arc::new(AtomicU64::new(0)),
             signed_block_provider,
             status_provider,
+            blocks_by_range_provider,
             network_finalized_slot,
             status_notify,
         )
@@ -238,6 +245,7 @@ where
         peer_count: Arc<AtomicU64>,
         signed_block_provider: SignedBlockProvider,
         status_provider: StatusProvider,
+        blocks_by_range_provider: CanonicalBlocksProvider,
         network_finalized_slot: NetworkFinalizedSlot,
         status_notify: Arc<Notify>,
     ) -> Result<Self> {
@@ -250,6 +258,7 @@ where
             local_key,
             signed_block_provider,
             status_provider,
+            blocks_by_range_provider,
             network_finalized_slot,
             status_notify,
         )
@@ -264,6 +273,7 @@ where
         local_key: Keypair,
         signed_block_provider: SignedBlockProvider,
         status_provider: StatusProvider,
+        blocks_by_range_provider: CanonicalBlocksProvider,
         network_finalized_slot: NetworkFinalizedSlot,
         status_notify: Arc<Notify>,
     ) -> Result<Self> {
@@ -272,7 +282,8 @@ where
         let config = Config::with_tokio_executor()
             .with_notify_handler_buffer_size(NonZeroUsize::new(7).unwrap())
             .with_per_connection_event_buffer_size(4)
-            .with_dial_concurrency_factor(NonZeroU8::new(1).unwrap());
+            .with_dial_concurrency_factor(NonZeroU8::new(1).unwrap())
+            .with_idle_connection_timeout(Duration::from_secs(u64::MAX));
 
         let multiaddr = Self::multiaddr(&network_config)?;
         let swarm = SwarmBuilder::with_existing_identity(local_key.clone())
@@ -318,11 +329,13 @@ where
             chain_message_sink,
             signed_block_provider,
             status_provider,
+            blocks_by_range_provider,
             pending_blocks_by_root: HashMap::new(),
             pending_block_depths: HashMap::new(),
             in_flight_roots: HashSet::new(),
             network_finalized_slot,
             peer_finalized_slots: HashMap::new(),
+            peer_head_slots: HashMap::new(),
             status_notify,
         };
 
@@ -437,6 +450,9 @@ where
                     LeanNetworkBehaviourEvent::BlocksByRootReqResp(event) => {
                         self.handle_blocks_by_root_req_resp_event(event)
                     }
+                    LeanNetworkBehaviourEvent::BlocksByRangeReqResp(event) => {
+                        self.handle_blocks_by_range_req_resp_event(event)
+                    }
                     LeanNetworkBehaviourEvent::Identify(event) => self.handle_identify_event(event),
                     LeanNetworkBehaviourEvent::ConnectionLimits(_) => {
                         // ConnectionLimits behaviour has no events
@@ -494,6 +510,7 @@ where
                 self.peer_count.store(connected, Ordering::Relaxed);
 
                 self.peer_finalized_slots.remove(&peer_id);
+                self.peer_head_slots.remove(&peer_id);
                 self.recompute_network_finalized_slot();
 
                 info!(peer = %peer_id, ?cause, "Disconnected from peer (total: {})", connected);
@@ -608,6 +625,7 @@ where
                                 signed_block,
                                 is_trusted: false,
                                 should_gossip: true,
+                                cached_post_state: None,
                             })
                             .await
                         {
@@ -854,6 +872,10 @@ where
                                         provider.remove(&root);
                                     }
                                 }
+                                METRICS.get().map(|m| {
+                                    m.grandine_signed_block_provider_size
+                                        .set(provider.len() as i64)
+                                });
                             }
 
                             // Step 2: Collect unique parent roots that are not yet received.
@@ -891,23 +913,56 @@ where
                                 };
 
                                 if !unknown_parents.is_empty() {
-                                    info!(
-                                        num_parents = unknown_parents.len(),
-                                        depth = next_depth,
-                                        "Pipelining parent fetch before chain processing"
-                                    );
-                                    for &root in &unknown_parents {
-                                        self.pending_block_depths.insert(root, next_depth);
-                                    }
-                                    // Chunk and send; each chunk goes to a random peer.
-                                    for chunk in unknown_parents.chunks(MAX_BLOCKS_PER_REQUEST) {
-                                        if let Some(peer_id) = self.get_random_connected_peer() {
-                                            self.send_blocks_by_root_request_internal(
-                                                peer_id,
-                                                chunk.to_vec(),
-                                                0,
-                                                next_depth,
+                                    const RANGE_CASCADE_TRIGGER: usize = 3;
+                                    const RANGE_CASCADE_COUNT: u64 = 256;
+
+                                    if unknown_parents.len() >= RANGE_CASCADE_TRIGGER {
+                                        let min_received_slot = blocks
+                                            .iter()
+                                            .map(|b| b.block.slot.0)
+                                            .min()
+                                            .unwrap_or(0);
+                                        let start_slot =
+                                            min_received_slot.saturating_sub(RANGE_CASCADE_COUNT);
+                                        let chosen = self
+                                            .peer_head_slots
+                                            .iter()
+                                            .find(|(_, head)| **head >= min_received_slot)
+                                            .map(|(p, _)| *p)
+                                            .or_else(|| self.get_random_connected_peer());
+                                        if let Some(peer_id) = chosen {
+                                            info!(
+                                                num_parents = unknown_parents.len(),
+                                                start_slot,
+                                                count = RANGE_CASCADE_COUNT,
+                                                "Pipelining backfill via BlocksByRange"
                                             );
+                                            self.send_blocks_by_range_request(
+                                                peer_id,
+                                                start_slot,
+                                                RANGE_CASCADE_COUNT,
+                                            );
+                                        }
+                                    } else {
+                                        info!(
+                                            num_parents = unknown_parents.len(),
+                                            depth = next_depth,
+                                            "Pipelining parent fetch before chain processing"
+                                        );
+                                        for &root in &unknown_parents {
+                                            self.pending_block_depths.insert(root, next_depth);
+                                        }
+                                        for chunk in unknown_parents.chunks(MAX_BLOCKS_PER_REQUEST)
+                                        {
+                                            if let Some(peer_id) = self.get_random_connected_peer()
+                                            {
+                                                self.send_blocks_by_root_request_internal(
+                                                    peer_id,
+                                                    chunk.to_vec(),
+                                                    0,
+                                                    next_depth,
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -924,6 +979,7 @@ where
                                             signed_block: block,
                                             is_trusted: false,
                                             should_gossip: false,
+                                            cached_post_state: None,
                                         })
                                         .await
                                     {
@@ -1202,6 +1258,7 @@ where
         our_head_slot: u64,
     ) {
         self.peer_finalized_slots.insert(peer, peer_finalized_slot);
+        self.peer_head_slots.insert(peer, peer_head_slot);
         self.recompute_network_finalized_slot();
 
         if (peer_finalized_slot > our_finalized_slot || peer_head_slot > our_head_slot)
@@ -1301,6 +1358,22 @@ where
                     Err(err) => {
                         warn!(slot = slot, ?err, "Serialize aggregation failed");
                     }
+                }
+            }
+            OutboundP2pRequest::RequestBlocksByRange { start_slot, count } => {
+                let mut chosen: Option<PeerId> = None;
+                let target = start_slot.saturating_add(count.saturating_sub(1));
+                for (peer, head) in &self.peer_head_slots {
+                    if *head >= target {
+                        chosen = Some(*peer);
+                        break;
+                    }
+                }
+                let peer_id = chosen.or_else(|| self.get_random_connected_peer());
+                if let Some(peer_id) = peer_id {
+                    self.send_blocks_by_range_request(peer_id, start_slot, count);
+                } else {
+                    debug!("BlocksByRange: no connected peer to dispatch to");
                 }
             }
             OutboundP2pRequest::RequestBlocksByRoot(roots) => {
@@ -1411,6 +1484,33 @@ where
         self.send_blocks_by_root_request_with_depth(peer_id, roots, 0);
     }
 
+    pub fn send_blocks_by_range_request(&mut self, peer_id: PeerId, start_slot: u64, count: u64) {
+        if count == 0 {
+            return;
+        }
+        if count > req_resp::MAX_REQUEST_BLOCKS as u64 {
+            warn!(
+                peer = %peer_id,
+                count,
+                max = req_resp::MAX_REQUEST_BLOCKS,
+                "BlocksByRange request exceeds MAX_REQUEST_BLOCKS"
+            );
+            return;
+        }
+        info!(
+            peer = %peer_id,
+            start_slot,
+            count,
+            "Sending BlocksByRange request"
+        );
+        let request = LeanRequest::BlocksByRange { start_slot, count };
+        let _request_id = self
+            .swarm
+            .behaviour_mut()
+            .blocks_by_range_req_resp
+            .send_request(&peer_id, request);
+    }
+
     pub fn send_blocks_by_root_request_with_depth(
         &mut self,
         peer_id: PeerId,
@@ -1470,6 +1570,130 @@ where
         });
     }
 
+    fn handle_blocks_by_range_req_resp_event(
+        &mut self,
+        event: ReqRespMessage,
+    ) -> Option<NetworkEvent> {
+        use crate::req_resp::{LeanRequest, LeanResponse};
+        use libp2p::request_response::{Event, Message};
+
+        match event {
+            Event::Message { peer, message, .. } => match message {
+                Message::Request {
+                    request, channel, ..
+                } => {
+                    let (start_slot, count) = match request {
+                        LeanRequest::BlocksByRange { start_slot, count } => (start_slot, count),
+                        _ => {
+                            warn!(peer = %peer, "Unexpected request type on BlocksByRange protocol");
+                            return None;
+                        }
+                    };
+
+                    if count == 0 || count > req_resp::MAX_REQUEST_BLOCKS as u64 {
+                        info!(peer = %peer, start_slot, count, "Rejecting BlocksByRange: invalid count");
+                        // Send an empty response — peer will treat as no data.
+                        let response = LeanResponse::BlocksByRange(Vec::new());
+                        if let Err(e) = self
+                            .swarm
+                            .behaviour_mut()
+                            .blocks_by_range_req_resp
+                            .send_response(channel, response)
+                        {
+                            warn!(peer = %peer, ?e, "Failed to send BlocksByRange error response");
+                        }
+                        return None;
+                    }
+
+                    info!(peer = %peer, start_slot, count, "Received BlocksByRange request");
+
+                    let blocks = (self.blocks_by_range_provider)(start_slot, count);
+
+                    info!(
+                        peer = %peer,
+                        start_slot,
+                        count,
+                        found = blocks.len(),
+                        "Serving BlocksByRange response"
+                    );
+
+                    let response = LeanResponse::BlocksByRange(blocks);
+                    if let Err(e) = self
+                        .swarm
+                        .behaviour_mut()
+                        .blocks_by_range_req_resp
+                        .send_response(channel, response)
+                    {
+                        warn!(peer = %peer, ?e, "Failed to send BlocksByRange response");
+                    }
+                }
+                Message::Response { response, .. } => match response {
+                    LeanResponse::BlocksByRange(blocks) => {
+                        info!(
+                            peer = %peer,
+                            num_blocks = blocks.len(),
+                            "Received BlocksByRange response"
+                        );
+
+                        {
+                            let mut provider = self.signed_block_provider.write();
+                            for block in &blocks {
+                                let root = block.block.hash_tree_root();
+                                provider.insert(root, block.clone());
+                            }
+                            if provider.len() > MAX_BLOCK_CACHE_SIZE {
+                                let to_remove = provider.len() - MAX_BLOCK_CACHE_SIZE;
+                                let mut slots: Vec<(H256, u64)> = provider
+                                    .iter()
+                                    .map(|(root, b)| (*root, b.block.slot.0))
+                                    .collect();
+                                slots.sort_by_key(|(_, slot)| *slot);
+                                for (root, _) in slots.into_iter().take(to_remove) {
+                                    provider.remove(&root);
+                                }
+                            }
+                            METRICS.get().map(|m| {
+                                m.grandine_signed_block_provider_size
+                                    .set(provider.len() as i64)
+                            });
+                        }
+
+                        let chain_sink = self.chain_message_sink.clone();
+                        tokio::spawn(async move {
+                            for block in blocks {
+                                let slot = block.block.slot.0;
+                                if let Err(e) = chain_sink
+                                    .send(ChainMessage::ProcessBlock {
+                                        signed_block: block,
+                                        is_trusted: false,
+                                        should_gossip: false,
+                                        cached_post_state: None,
+                                    })
+                                    .await
+                                {
+                                    warn!(slot, ?e, "Failed to forward range block to chain");
+                                }
+                            }
+                        });
+                    }
+                    _ => {
+                        warn!(peer = %peer, "Unexpected response type on BlocksByRange protocol");
+                    }
+                },
+            },
+            Event::OutboundFailure { peer, error, .. } => {
+                warn!(peer = %peer, ?error, "BlocksByRange outbound request failed");
+            }
+            Event::InboundFailure { peer, error, .. } => {
+                warn!(peer = %peer, ?error, "BlocksByRange inbound request failed");
+            }
+            Event::ResponseSent { peer, .. } => {
+                trace!(peer = %peer, "BlocksByRange response sent");
+            }
+        }
+        None
+    }
+
     fn build_behaviour(
         local_key: &Keypair,
         cfg: &NetworkServiceConfig,
@@ -1484,6 +1708,7 @@ where
 
         let status_req_resp = req_resp::build_status();
         let blocks_by_root_req_resp = req_resp::build_blocks_by_root();
+        let blocks_by_range_req_resp = req_resp::build_blocks_by_range();
 
         let connection_limits = connection_limits::Behaviour::new(
             ConnectionLimits::default()
@@ -1496,6 +1721,7 @@ where
             identify,
             status_req_resp,
             blocks_by_root_req_resp,
+            blocks_by_range_req_resp,
             gossipsub,
             connection_limits,
         })

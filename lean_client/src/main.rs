@@ -5,8 +5,8 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use containers::{
-    Block, BlockBody, BlockHeader, BlockSignatures, Checkpoint, Config, SignedBlock, Slot, State,
-    Status, Validator,
+    Block, BlockBody, BlockHeader, Checkpoint, Config, MultiMessageAggregate, SignedBlock, Slot,
+    State, Status, Validator,
 };
 use dedicated_executor::DedicatedExecutor;
 use ethereum_types::H256;
@@ -14,8 +14,8 @@ use features::Feature;
 use fork_choice::{
     block_cache::BlockCache,
     handlers::{
-        apply_verified_block, on_aggregated_attestation, on_attestation, on_gossip_attestation,
-        on_tick, verify_and_transition,
+        apply_verified_block, on_aggregated_attestation_async, on_attestation,
+        on_gossip_attestation, on_tick, verify_and_transition,
     },
     store::{
         INTERVALS_PER_SLOT, MILLIS_PER_INTERVAL, Store, execute_block_production,
@@ -30,8 +30,8 @@ use networking::gossipsub::config::GossipsubConfig;
 use networking::gossipsub::topic::{compute_subnet_id, get_subscription_topics};
 use networking::network::{NetworkService, NetworkServiceConfig};
 use networking::types::{
-    ChainMessage, MAX_BLOCK_CACHE_SIZE, NetworkFinalizedSlot, OutboundP2pRequest,
-    SignedBlockProvider, StatusProvider, ValidatorChainMessage,
+    CanonicalBlocksProvider, ChainMessage, MAX_BLOCK_CACHE_SIZE, NetworkFinalizedSlot,
+    OutboundP2pRequest, SignedBlockProvider, StatusProvider, ValidatorChainMessage,
 };
 use parking_lot::{Mutex, RwLock};
 use ssz::{PersistentList, SszHash, SszReadDefault as _};
@@ -43,7 +43,7 @@ use std::{io::IsTerminal, net::IpAddr};
 use tokio::{
     sync::{Notify, mpsc, oneshot, watch},
     task,
-    time::{Duration, Instant, interval, interval_at},
+    time::{Duration, Instant, MissedTickBehavior, interval, interval_at},
 };
 use tracing::level_filters::LevelFilter;
 use tracing::{debug, error, info, warn};
@@ -51,6 +51,30 @@ use validator::{ValidatorConfig, ValidatorService};
 use xmss::{PublicKey, Signature};
 
 mod aggregation;
+
+const BACKFILL_ORPHAN_TRIGGER: usize = 5;
+const BACKFILL_RANGE_COUNT: u64 = 256;
+
+fn dispatch_backfill(
+    missing: Vec<H256>,
+    local_head_slot: u64,
+    orphan_count: usize,
+    outbound_p2p_sender: &mpsc::UnboundedSender<OutboundP2pRequest>,
+) {
+    if orphan_count >= BACKFILL_ORPHAN_TRIGGER {
+        let request = OutboundP2pRequest::RequestBlocksByRange {
+            start_slot: local_head_slot.saturating_add(1),
+            count: BACKFILL_RANGE_COUNT,
+        };
+        if let Err(e) = outbound_p2p_sender.send(request) {
+            warn!("Failed to dispatch BlocksByRange backfill: {}", e);
+        }
+    } else if !missing.is_empty() {
+        if let Err(e) = outbound_p2p_sender.send(OutboundP2pRequest::RequestBlocksByRoot(missing)) {
+            warn!("Failed to dispatch BlocksByRoot backfill: {}", e);
+        }
+    }
+}
 
 fn load_node_key(path: &str) -> Result<Keypair, Box<dyn std::error::Error>> {
     let hex_str = std::fs::read_to_string(path)?.trim().to_string();
@@ -398,6 +422,22 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let available = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2);
+    let rayon_threads = available.saturating_sub(2).max(1);
+    match rayon::ThreadPoolBuilder::new()
+        .num_threads(rayon_threads)
+        .build_global()
+    {
+        Ok(()) => eprintln!(
+            "configured global rayon pool: available={available} rayon_threads={rayon_threads}"
+        ),
+        Err(e) => eprintln!(
+            "global rayon pool already initialized; rayon_threads cap NOT applied: available={available} err={e}"
+        ),
+    }
+
     xmss::setup_aggregation();
 
     tracing_subscriber::fmt()
@@ -463,12 +503,8 @@ async fn main() -> Result<()> {
         None,
         None,
     ));
-    let cpu_low_executor = Arc::new(DedicatedExecutor::new(
-        "lean-cpu-low",
-        (num_cpus / 4).max(1),
-        Some(19),
-        None,
-    ));
+    let cpu_snark_executor = Arc::new(DedicatedExecutor::new("lean-snark", 1, None, None));
+    let cpu_verify_executor = Arc::new(DedicatedExecutor::new("lean-verify", 1, None, None));
 
     // Verified blocks travel back from the executor to the chain task on this channel.
     // Tuple: (block_root, signed_block, should_gossip, verify outcome).
@@ -553,10 +589,7 @@ async fn main() -> Result<()> {
 
     let genesis_signed_block = SignedBlock {
         block: genesis_block,
-        signature: BlockSignatures {
-            attestation_signatures: PersistentList::default(),
-            proposer_signature: Signature::default(),
-        },
+        proof: MultiMessageAggregate::default(),
     };
 
     let config = Config { genesis_time };
@@ -637,6 +670,8 @@ async fn main() -> Result<()> {
                             num_validators,
                             keys_path,
                             cpu_normal_executor.clone(),
+                            cpu_verify_executor.clone(),
+                            cpu_snark_executor.clone(),
                             args.is_aggregator,
                         ) {
                             Ok(service) => {
@@ -658,6 +693,8 @@ async fn main() -> Result<()> {
                                     config,
                                     num_validators,
                                     cpu_normal_executor.clone(),
+                                    cpu_verify_executor.clone(),
+                                    cpu_snark_executor.clone(),
                                     args.is_aggregator,
                                 ))
                             }
@@ -671,6 +708,8 @@ async fn main() -> Result<()> {
                             config,
                             num_validators,
                             cpu_normal_executor.clone(),
+                            cpu_verify_executor.clone(),
+                            cpu_snark_executor.clone(),
                             args.is_aggregator,
                         ))
                     }
@@ -685,6 +724,8 @@ async fn main() -> Result<()> {
                         config,
                         num_validators,
                         cpu_normal_executor.clone(),
+                        cpu_verify_executor.clone(),
+                        cpu_snark_executor.clone(),
                         args.is_aggregator,
                     ))
                 }
@@ -704,6 +745,7 @@ async fn main() -> Result<()> {
     let validator_service: Option<Arc<ValidatorService>> = validator_service.map(Arc::new);
     // Chain task clone: used only for tick-2 aggregation (maybe_aggregate takes &self)
     let vs_for_chain = validator_service.clone();
+    let vs_for_chain_proposer = validator_service.clone();
     // Validator task: takes ownership for proposal and attestation duties
     let vs_for_validator = validator_service.clone();
     // Admin API controller: toggles is_aggregator at runtime on both store and validator service
@@ -785,6 +827,39 @@ async fn main() -> Result<()> {
     let network_finalized_slot: NetworkFinalizedSlot = Arc::new(Mutex::new(None));
     let network_finalized_slot_for_network = network_finalized_slot.clone();
 
+    let canonical_blocks_provider: CanonicalBlocksProvider = {
+        let block_provider = signed_block_provider.clone();
+        let status = status_provider.clone();
+        Arc::new(move |start_slot: u64, count: u64| -> Vec<SignedBlock> {
+            if count == 0 {
+                return Vec::new();
+            }
+            let end_slot = start_slot.saturating_add(count.saturating_sub(1));
+            let head_root = status.read().head.root;
+            let mut by_slot: HashMap<u64, SignedBlock> = HashMap::new();
+            {
+                let blocks = block_provider.read();
+                let mut current_root = head_root;
+                while !current_root.is_zero() {
+                    let Some(block) = blocks.get(&current_root) else {
+                        break;
+                    };
+                    let slot = block.block.slot.0;
+                    if slot < start_slot {
+                        break;
+                    }
+                    if slot <= end_slot {
+                        by_slot.insert(slot, block.clone());
+                    }
+                    current_root = block.block.parent_root;
+                }
+            }
+            let mut result: Vec<(u64, SignedBlock)> = by_slot.into_iter().collect();
+            result.sort_by_key(|(s, _)| *s);
+            result.into_iter().map(|(_, b)| b).collect()
+        })
+    };
+
     let status_notify = Arc::new(Notify::new());
 
     // LOAD NODE KEY
@@ -801,6 +876,7 @@ async fn main() -> Result<()> {
                     keypair,
                     signed_block_provider_for_network,
                     status_provider_for_network,
+                    canonical_blocks_provider.clone(),
                     network_finalized_slot_for_network,
                     status_notify.clone(),
                 )
@@ -816,6 +892,7 @@ async fn main() -> Result<()> {
                     peer_count,
                     signed_block_provider_for_network,
                     status_provider_for_network,
+                    canonical_blocks_provider.clone(),
                     network_finalized_slot_for_network,
                     status_notify.clone(),
                 )
@@ -831,6 +908,7 @@ async fn main() -> Result<()> {
             peer_count,
             signed_block_provider_for_network,
             status_provider_for_network,
+            canonical_blocks_provider.clone(),
             network_finalized_slot_for_network,
             status_notify.clone(),
         )
@@ -952,6 +1030,7 @@ async fn main() -> Result<()> {
         anchor_block,
         config.clone(),
         args.is_aggregator,
+        genesis_log_inv_rate as usize,
     )));
 
     // Seed the block provider so we can serve the anchor block to peers via BlocksByRoot.
@@ -1047,8 +1126,14 @@ async fn main() -> Result<()> {
     // watch channel = lossless latest-value semantics: send() always overwrites so
     // the aggregation task always sees the most recent trigger even if XMSS was
     // still running when a newer slot arrived. No trigger is ever silently dropped.
-    let mut aggregator = vs_for_chain
-        .map(|vs| aggregation::AggregationService::new(vs, store.clone(), chain_log_inv_rate));
+    let mut aggregator = vs_for_chain.map(|vs| {
+        aggregation::AggregationService::new(
+            vs,
+            store.clone(),
+            chain_log_inv_rate,
+            cpu_snark_executor.clone(),
+        )
+    });
     // Whether this node has any validator service at all. Used for sync-state
     // coloring; NOT a per-slot aggregator gate. The per-slot aggregator check
     // lives at the snapshot trigger site below and goes through
@@ -1063,6 +1148,7 @@ async fn main() -> Result<()> {
             Instant::now() + genesis_tick_delay,
             Duration::from_millis(MILLIS_PER_INTERVAL),
         );
+        tick_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut last_logged_slot = 0u64;
         // Track the last slot for which aggregation was triggered so the catch-up
         // guard never fires twice for the same slot.
@@ -1091,8 +1177,9 @@ async fn main() -> Result<()> {
                     // processing. The first tick after startup has nothing to
                     // measure against and is skipped.
                     let tick_instant = Instant::now();
-                    if let Some(prev) = last_tick_instant {
-                        let elapsed = tick_instant.duration_since(prev).as_secs_f64();
+                    let tick_elapsed = last_tick_instant
+                        .map(|prev| tick_instant.duration_since(prev).as_secs_f64());
+                    if let Some(elapsed) = tick_elapsed {
                         METRICS.get().map(|m| {
                             m.lean_tick_interval_duration_seconds.observe(elapsed)
                         });
@@ -1104,20 +1191,38 @@ async fn main() -> Result<()> {
                         .unwrap()
                         .as_millis() as u64;
                     let target_interval = now_millis.saturating_sub(genesis_millis) / MILLIS_PER_INTERVAL;
-                    let has_proposal = target_interval % INTERVALS_PER_SLOT == 0;
+                    let target_slot = target_interval / INTERVALS_PER_SLOT;
+                    let next_is_interval_0 = target_interval % INTERVALS_PER_SLOT == 0;
+                    let has_proposal = next_is_interval_0
+                        && target_slot > 0
+                        && vs_for_chain_proposer
+                            .as_ref()
+                            .and_then(|vs| vs.get_proposer_for_slot(Slot(target_slot)))
+                            .is_some();
                     on_tick(&mut *store.write(), now_millis, has_proposal);
 
                     // Sample the cpu_normal executor's queue depth once per tick.
                     // Counts both XMSS block verify and attestation signing tasks.
                     METRICS.get().map(|m| {
                         m.grandine_cpu_normal_executor_tasks_in_flight
-                            .set(cpu_normal_executor.tasks() as i64)
+                            .set(cpu_normal_executor.tasks() as i64);
+                        m.grandine_cpu_low_executor_tasks_in_flight
+                            .set(cpu_snark_executor.tasks() as i64)
                     });
 
                     let (current_slot, current_interval) = {
                         let s = store.read();
                         (s.time / INTERVALS_PER_SLOT, s.time % INTERVALS_PER_SLOT)
                     };
+
+                    if let Some(elapsed) = tick_elapsed {
+                        info!(
+                            slot = current_slot,
+                            interval = current_interval,
+                            duration_s = elapsed,
+                            "tick"
+                        );
+                    }
 
                     if last_status_slot != Some(current_slot) {
                         let peers = peer_count.load(Ordering::Relaxed);
@@ -1129,29 +1234,11 @@ async fn main() -> Result<()> {
                         evaluate_sync_state(&mut sync_state, peers, head_slot, nf);
                     }
 
-                    // ── Drain completed aggregation results (non-blocking) ────────────
-                    // Results arrive here from the dedicated aggregation task.
-                    // Draining every tick (800 ms) is fast enough to stay within
-                    // the gossip broadcast window.
-                    while let Some((agg_slot, maybe_agg)) = aggregator.as_mut().and_then(|a| a.poll()) {
-                        if let Some((aggregations, consumed_data_roots)) = maybe_agg {
-                            for aggregation in aggregations {
-                                if let Err(e) = chain_outbound_sender.send(
-                                    OutboundP2pRequest::GossipAggregation(aggregation)
-                                ) {
-                                    warn!("Failed to gossip aggregation: {}", e);
-                                }
-                            }
-                            // Remove consumed raw gossip signatures so they are
-                            // not re-aggregated in future rounds.
-                            store.write().gossip_signatures.retain(|key, _| {
-                                !consumed_data_roots.contains(&key.data_root)
-                            });
-                            info!(slot = agg_slot, "Aggregation phase - broadcast aggregated attestations");
-                        } else {
-                            info!("Aggregation phase - no aggregation duty or no attestations");
-                        }
-                    }
+                    // Aggregation results no longer drained here; a dedicated
+                    // `select!` arm below wakes the chain task the moment the
+                    // worker finishes, removing the up-to-800 ms poll lag that
+                    // caused interval-3 `update_safe_target` to read an empty
+                    // `latest_new_aggregated_payloads`.
 
                     // ── Aggregation catch-up / interval-2 guard ───────────────────────
                     // Trigger aggregation whenever we reach OR pass interval 2 for a
@@ -1261,6 +1348,25 @@ async fn main() -> Result<()> {
                                     let _ = block_slot_tx.send(block_slot.0);
 
                                     {
+                                        let exec = cpu_verify_executor.clone();
+                                        let store_for_reagg = store.clone();
+                                        let signed_block_for_reagg = signed_block.clone();
+                                        let log_inv_rate = chain_log_inv_rate;
+                                        tokio::spawn(async move {
+                                            let job = exec.spawn(async move {
+                                                fork_choice::reaggregate::run_in_executor(
+                                                    store_for_reagg,
+                                                    signed_block_for_reagg,
+                                                    log_inv_rate,
+                                                );
+                                            });
+                                            if let Err(e) = job.await {
+                                                warn!("reaggregate executor failed: {e}");
+                                            }
+                                        });
+                                    }
+
+                                    {
                                         let s = store.read();
                                         let mut status = status_provider.write();
                                         status.finalized = s.latest_finalized.clone();
@@ -1305,7 +1411,7 @@ async fn main() -> Result<()> {
                                             store.read().states.get(&block_root).cloned()
                                         {
                                             for (child_root, child_block) in cascade_children {
-                                                let exec = cpu_normal_executor.clone();
+                                                let exec = cpu_verify_executor.clone();
                                                 let result_tx = verify_result_tx.clone();
                                                 let parent_state_for_child =
                                                     cascade_parent_state.clone();
@@ -1350,17 +1456,18 @@ async fn main() -> Result<()> {
                                         .get()
                                         .map(|m| m.grandine_block_cache_size.set(block_cache.len() as i64));
 
-                                    // Drain block roots queued by retried attestations inside
-                                    // apply_verified_block.
                                     let missing: Vec<H256> = store.write().pending_fetch_roots.drain().collect();
                                     METRICS.get().map(|m| m.grandine_pending_fetch_roots.set(0));
-                                    if !missing.is_empty() {
-                                        if let Err(e) = outbound_p2p_sender.send(
-                                            OutboundP2pRequest::RequestBlocksByRoot(missing)
-                                        ) {
-                                            warn!("Failed to request blocks missing from retried attestations: {}", e);
-                                        }
-                                    }
+                                    let local_head_slot = {
+                                        let s = store.read();
+                                        s.blocks.get(&s.head).map(|b| b.slot.0).unwrap_or(0)
+                                    };
+                                    dispatch_backfill(
+                                        missing,
+                                        local_head_slot,
+                                        block_cache.orphan_count(),
+                                        &outbound_p2p_sender,
+                                    );
                                 }
                                 Err(e) => warn!(
                                     block_root = %format!("0x{:x}", block_root),
@@ -1372,6 +1479,41 @@ async fn main() -> Result<()> {
                             block_root = %format!("0x{:x}", block_root),
                             "Block verify failed: {}", e
                         ),
+                    }
+                }
+                Some((agg_slot, maybe_agg)) = async {
+                    aggregator.as_mut().unwrap().recv().await
+                }, if aggregator.is_some() => {
+                    if let Some((aggregations, consumed_data_roots)) = maybe_agg {
+                        let mut to_publish = Vec::with_capacity(aggregations.len());
+                        {
+                            let mut s = store.write();
+                            for aggregation in aggregations {
+                                let data_root = aggregation.data.hash_tree_root();
+                                s.latest_new_aggregated_payloads
+                                    .entry(data_root)
+                                    .or_default()
+                                    .push(aggregation.proof.clone());
+                                to_publish.push(aggregation);
+                            }
+                            s.gossip_signatures.retain(|key, _| {
+                                !consumed_data_roots.contains(&key.data_root)
+                            });
+                            METRICS.get().map(|m| {
+                                m.lean_latest_new_aggregated_payloads
+                                    .set(s.latest_new_aggregated_payloads.len() as i64);
+                            });
+                        }
+                        for aggregation in to_publish {
+                            if let Err(e) = chain_outbound_sender.send(
+                                OutboundP2pRequest::GossipAggregation(aggregation)
+                            ) {
+                                warn!("Failed to gossip aggregation: {}", e);
+                            }
+                        }
+                        info!(slot = agg_slot, "Aggregation phase - broadcast aggregated attestations");
+                    } else {
+                        info!("Aggregation phase - no aggregation duty or no attestations");
                     }
                 }
                 message = chain_message_receiver.recv() => {
@@ -1387,6 +1529,7 @@ async fn main() -> Result<()> {
                             signed_block,
                             is_trusted,
                             should_gossip,
+                            cached_post_state,
                         } => {
                             if should_gossip && !is_trusted && !sync_state.accepts_gossip() {
                                 debug!(
@@ -1473,15 +1616,14 @@ async fn main() -> Result<()> {
 
                                 let missing: Vec<H256> = store.write().pending_fetch_roots.drain().collect();
                                 METRICS.get().map(|m| m.grandine_pending_fetch_roots.set(0));
-                                if !missing.is_empty() {
-                                    if let Err(req_err) = outbound_p2p_sender.send(
-                                        OutboundP2pRequest::RequestBlocksByRoot(missing)
-                                    ) {
-                                        warn!("Failed to request missing parent block: {}", req_err);
-                                    }
-                                }
-
                                 let head_slot = { let s = store.read(); s.blocks.get(&s.head).map(|b| b.slot.0).unwrap_or(0) };
+                                dispatch_backfill(
+                                    missing,
+                                    head_slot,
+                                    block_cache.orphan_count(),
+                                    &outbound_p2p_sender,
+                                );
+
                                 let nf = *network_finalized_slot.lock();
                                 check_sync_trigger(&mut sync_state, head_slot, nf);
                                 check_sync_complete(&mut sync_state, head_slot, block_cache.orphan_count(), nf);
@@ -1494,22 +1636,29 @@ async fn main() -> Result<()> {
                             // the verified outcome later via verify_result_rx (Phase 3).
                             // No store mutation happens here; gossip rebroadcast and post-apply
                             // bookkeeping are deferred to Phase 3 once we know the block applied.
-                            let exec = cpu_normal_executor.clone();
+                            // Self-built short-circuit: when this is our own freshly-produced block
+                            // (`is_trusted = true` + cached post-state), skip the redundant STF —
+                            // leanSpec's `build_block` already returned the post-state, no need to
+                            // recompute it. Mirrors zeam's planned fix per their devnet5 chat.
+                            let exec = cpu_verify_executor.clone();
                             let result_tx = verify_result_tx.clone();
                             let signed_block_for_verify = signed_block.clone();
+                            let verify_signatures = !is_trusted;
                             METRICS
                                 .get()
                                 .map(|m| m.grandine_verify_result_channel_depth.inc());
                             tokio::spawn(async move {
                                 let signed_block_for_send = signed_block_for_verify.clone();
-                                let job = exec.spawn(async move {
-                                    verify_and_transition(parent_state, signed_block_for_verify, true)
-                                });
-                                let outcome = job
-                                    .await
-                                    .unwrap_or_else(|e| {
-                                        Err(anyhow::anyhow!("executor: {e}"))
+                                let outcome = if is_trusted && cached_post_state.is_some() {
+                                    Ok(cached_post_state.unwrap())
+                                } else {
+                                    let job = exec.spawn(async move {
+                                        verify_and_transition(parent_state, signed_block_for_verify, verify_signatures)
                                     });
+                                    job.await.unwrap_or_else(|e| {
+                                        Err(anyhow::anyhow!("executor: {e}"))
+                                    })
+                                };
                                 if result_tx
                                     .send((block_root, signed_block_for_send, should_gossip, outcome))
                                     .await
@@ -1573,13 +1722,16 @@ async fn main() -> Result<()> {
 
                             let missing: Vec<H256> = store.write().pending_fetch_roots.drain().collect();
                             METRICS.get().map(|m| m.grandine_pending_fetch_roots.set(0));
-                            if !missing.is_empty() {
-                                if let Err(e) = outbound_p2p_sender.send(
-                                    OutboundP2pRequest::RequestBlocksByRoot(missing)
-                                ) {
-                                    warn!("Failed to request blocks missing from attestation: {}", e);
-                                }
-                            }
+                            let local_head_slot = {
+                                let s = store.read();
+                                s.blocks.get(&s.head).map(|b| b.slot.0).unwrap_or(0)
+                            };
+                            dispatch_backfill(
+                                missing,
+                                local_head_slot,
+                                block_cache.orphan_count(),
+                                &outbound_p2p_sender,
+                            );
                         }
                         ChainMessage::ProcessAggregation {
                             signed_aggregated_attestation,
@@ -1604,32 +1756,41 @@ async fn main() -> Result<()> {
                                 .filter(|b| **b)
                                 .count();
 
-                            match on_aggregated_attestation(&mut *store.write(), signed_aggregated_attestation.clone()) {
-                                Ok(_) => {
-                                    info!(
-                                        slot = agg_slot,
-                                        validators = validator_count,
-                                        "Processed aggregated attestation for safe target"
-                                    );
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        slot = agg_slot,
-                                        error = %e,
-                                        "Failed to process aggregated attestation"
-                                    );
-                                }
+                            {
+                                let exec = cpu_verify_executor.clone();
+                                let store_for_verify = store.clone();
+                                let signed_for_verify = signed_aggregated_attestation.clone();
+                                tokio::spawn(async move {
+                                    let job = exec.spawn(async move {
+                                        on_aggregated_attestation_async(store_for_verify, signed_for_verify)
+                                    });
+                                    match job.await.unwrap_or_else(|e| Err(anyhow::anyhow!("executor: {e}"))) {
+                                        Ok(_) => info!(
+                                            slot = agg_slot,
+                                            validators = validator_count,
+                                            "Processed aggregated attestation for safe target"
+                                        ),
+                                        Err(e) => warn!(
+                                            slot = agg_slot,
+                                            error = %e,
+                                            "Failed to process aggregated attestation"
+                                        ),
+                                    }
+                                });
                             }
 
                             let missing: Vec<H256> = store.write().pending_fetch_roots.drain().collect();
                             METRICS.get().map(|m| m.grandine_pending_fetch_roots.set(0));
-                            if !missing.is_empty() {
-                                if let Err(e) = outbound_p2p_sender.send(
-                                    OutboundP2pRequest::RequestBlocksByRoot(missing)
-                                ) {
-                                    warn!("Failed to request blocks missing from aggregated attestation: {}", e);
-                                }
-                            }
+                            let local_head_slot = {
+                                let s = store.read();
+                                s.blocks.get(&s.head).map(|b| b.slot.0).unwrap_or(0)
+                            };
+                            dispatch_backfill(
+                                missing,
+                                local_head_slot,
+                                block_cache.orphan_count(),
+                                &outbound_p2p_sender,
+                            );
 
                             // Gossip the aggregation if needed
                             if should_gossip {
@@ -1662,33 +1823,39 @@ async fn main() -> Result<()> {
                                 }
                                 Ok(inputs) => {
                                     let agg_payload_count = inputs.aggregated_payloads.len();
+                                    let validators = inputs.head_state.validators.clone();
+                                    let exec = cpu_snark_executor.clone();
                                     let exec_start = Instant::now();
-                                    let result = task::spawn_blocking(move || {
-                                        execute_block_production(inputs)
-                                            .map(|(_, block, sigs)| (block, sigs))
-                                    })
-                                    .await
-                                    .unwrap_or_else(|e| Err(anyhow::anyhow!("block production task panicked: {e}")));
+                                    tokio::spawn(async move {
+                                        let job = exec.spawn(async move {
+                                            execute_block_production(inputs)
+                                                .map(|(_, block, post_state, sigs)| (block, post_state, sigs))
+                                        });
+                                        let result = job
+                                            .await
+                                            .unwrap_or_else(|e| Err(anyhow::anyhow!("executor: {e}")))
+                                            .map(|(block, post_state, sigs)| (block, sigs, validators, post_state));
 
-                                    let exec_elapsed = exec_start.elapsed();
-                                    let total_elapsed = block_build_start.elapsed();
-                                    match &result {
-                                        Ok(_) => {
-                                            METRICS.get().map(|m| {
-                                                m.lean_block_building_success_total.inc();
-                                                m.lean_block_building_time_seconds
-                                                    .observe(total_elapsed.as_secs_f64());
-                                                m.lean_block_building_payload_aggregation_time_seconds
-                                                    .observe(exec_elapsed.as_secs_f64());
-                                                m.lean_block_aggregated_payloads
-                                                    .observe(agg_payload_count as f64);
-                                            });
+                                        let exec_elapsed = exec_start.elapsed();
+                                        let total_elapsed = block_build_start.elapsed();
+                                        match &result {
+                                            Ok(_) => {
+                                                METRICS.get().map(|m| {
+                                                    m.lean_block_building_success_total.inc();
+                                                    m.lean_block_building_time_seconds
+                                                        .observe(total_elapsed.as_secs_f64());
+                                                    m.lean_block_building_payload_aggregation_time_seconds
+                                                        .observe(exec_elapsed.as_secs_f64());
+                                                    m.lean_block_aggregated_payloads
+                                                        .observe(agg_payload_count as f64);
+                                                });
+                                            }
+                                            Err(_) => {
+                                                METRICS.get().map(|m| m.lean_block_building_failures_total.inc());
+                                            }
                                         }
-                                        Err(_) => {
-                                            METRICS.get().map(|m| m.lean_block_building_failures_total.inc());
-                                        }
-                                    }
-                                    let _ = sender.send(result);
+                                        let _ = sender.send(result);
+                                    });
                                 }
                             }
                         }
@@ -1724,8 +1891,10 @@ async fn main() -> Result<()> {
             Instant::now() + genesis_tick_delay,
             Duration::from_millis(MILLIS_PER_INTERVAL),
         );
+        v_tick_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut last_proposal_slot: Option<u64> = None;
         let mut last_attestation_slot: Option<u64> = None;
+        let mut propose_handle: Option<tokio::task::JoinHandle<()>> = None;
 
         loop {
             v_tick_interval.tick().await;
@@ -1745,6 +1914,16 @@ async fn main() -> Result<()> {
                         if current_slot > 0 {
                             if let Some(proposer_idx) = vs.get_proposer_for_slot(Slot(current_slot))
                             {
+                                if let Some(prev) = propose_handle.take() {
+                                    if !prev.is_finished() {
+                                        prev.abort();
+                                        info!(
+                                            slot = current_slot,
+                                            "Validator task: aborting prior in-flight propose"
+                                        );
+                                    }
+                                }
+
                                 info!(
                                     slot = current_slot,
                                     proposer = proposer_idx,
@@ -1769,54 +1948,89 @@ async fn main() -> Result<()> {
                                     break;
                                 }
 
-                                let (block, signatures) = match rx.await {
-                                    Ok(Ok(pair)) => pair,
-                                    Ok(Err(e)) => {
-                                        warn!(slot = current_slot, error = %e, "Validator task: chain failed to produce block");
-                                        last_proposal_slot = Some(current_slot);
-                                        continue;
-                                    }
-                                    Err(_) => {
-                                        warn!(
-                                            slot = current_slot,
-                                            "Validator task: no response to ProduceBlock"
-                                        );
-                                        last_proposal_slot = Some(current_slot);
-                                        continue;
-                                    }
-                                };
+                                let vs_for_spawn = vs.clone();
+                                let chain_sender_for_spawn = chain_msg_sender_for_validator.clone();
+                                let log_inv_rate = chain_log_inv_rate;
+                                let propose_slot = current_slot;
+                                let genesis_millis_for_spawn = genesis_millis;
 
-                                match vs.sign_block_with_data(block, proposer_idx, signatures) {
-                                    Ok(signed_block) => {
-                                        let block_root = signed_block.block.hash_tree_root();
-                                        info!(
-                                            slot = current_slot,
-                                            block_root = %format!("0x{:x}", block_root),
-                                            "Validator task: block signed, sending to chain"
+                                propose_handle = Some(tokio::spawn(async move {
+                                    let (block, signatures, validators, cached_post_state) =
+                                        match rx.await {
+                                            Ok(Ok(tuple)) => tuple,
+                                            Ok(Err(e)) => {
+                                                warn!(slot = propose_slot, error = %e, "Validator task: chain failed to produce block");
+                                                return;
+                                            }
+                                            Err(_) => {
+                                                warn!(
+                                                    slot = propose_slot,
+                                                    "Validator task: no response to ProduceBlock"
+                                                );
+                                                return;
+                                            }
+                                        };
+
+                                    let now_millis = SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_millis()
+                                        as u64;
+                                    let wall_slot = now_millis
+                                        .saturating_sub(genesis_millis_for_spawn)
+                                        / MILLIS_PER_INTERVAL
+                                        / INTERVALS_PER_SLOT;
+                                    if wall_slot > propose_slot {
+                                        warn!(
+                                            slot = propose_slot,
+                                            wall_slot,
+                                            lag_slots = wall_slot - propose_slot,
+                                            "Late propose — publishing anyway",
                                         );
-                                        let send_result = chain_msg_sender_for_validator
-                                            .send(ChainMessage::ProcessBlock {
-                                                signed_block,
-                                                is_trusted: true,
-                                                should_gossip: true,
-                                            })
-                                            .await;
-                                        if send_result.is_ok() {
-                                            METRICS.get().map(|m| {
-                                                m.grandine_chain_message_channel_depth.inc()
-                                            });
-                                        }
-                                        if send_result.is_err() {
-                                            warn!(
-                                                "Validator task: chain message channel closed, stopping"
+                                    }
+
+                                    match vs_for_spawn
+                                        .sign_block_with_data(
+                                            block,
+                                            proposer_idx,
+                                            signatures,
+                                            validators,
+                                            log_inv_rate,
+                                        )
+                                        .await
+                                    {
+                                        Ok(signed_block) => {
+                                            let block_root = signed_block.block.hash_tree_root();
+                                            info!(
+                                                slot = propose_slot,
+                                                block_root = %format!("0x{:x}", block_root),
+                                                "Validator task: block signed, sending to chain"
                                             );
-                                            break;
+                                            let send_result = chain_sender_for_spawn
+                                                .send(ChainMessage::ProcessBlock {
+                                                    signed_block,
+                                                    is_trusted: true,
+                                                    should_gossip: true,
+                                                    cached_post_state: Some(cached_post_state),
+                                                })
+                                                .await;
+                                            if send_result.is_ok() {
+                                                METRICS.get().map(|m| {
+                                                    m.grandine_chain_message_channel_depth.inc()
+                                                });
+                                            }
+                                            if send_result.is_err() {
+                                                warn!(
+                                                    slot = propose_slot,
+                                                    "Validator task: chain message channel closed"
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!(slot = propose_slot, error = %e, "Validator task: failed to sign block")
                                         }
                                     }
-                                    Err(e) => {
-                                        warn!(slot = current_slot, error = %e, "Validator task: failed to sign block")
-                                    }
-                                }
+                                }));
                             }
                         }
                         last_proposal_slot = Some(current_slot);

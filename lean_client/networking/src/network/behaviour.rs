@@ -8,6 +8,7 @@ pub struct LeanNetworkBehaviour {
     pub identify: identify::Behaviour,
     pub status_req_resp: ReqResp,
     pub blocks_by_root_req_resp: ReqResp,
+    pub blocks_by_range_req_resp: ReqResp,
     pub gossipsub: GossipsubBehaviour,
     pub connection_limits: connection_limits::Behaviour,
 }

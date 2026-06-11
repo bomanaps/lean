@@ -7,13 +7,13 @@
 
 use containers::{
     AggregatedAttestation, AggregatedSignatureProof, AggregationBits, Attestation, AttestationData,
-    AttestationSignatures, Block, BlockBody, BlockHeader, BlockSignatures, Checkpoint, Config,
-    HistoricalBlockHashes, JustificationRoots, JustificationValidators, JustifiedSlots,
-    SignedBlock, Slot, State, Validator, Validators,
+    Block, BlockBody, BlockHeader, Checkpoint, Config, HistoricalBlockHashes, JustificationRoots,
+    JustificationValidators, JustifiedSlots, MultiMessageAggregate, SignedBlock, Slot, State,
+    Validator, Validators,
 };
 use serde::Deserialize;
 use ssz::{BitList, H256, PersistentList};
-use xmss::{AggregatedSignature, PublicKey, Signature};
+use xmss::{AggregatedSignature, PublicKey};
 
 // === Primitive wrappers ====================================================
 
@@ -377,7 +377,7 @@ impl From<TestAnchorBlock> for SignedBlock {
 
         Self {
             block,
-            signature: BlockSignatures::default(),
+            proof: MultiMessageAggregate::default(),
         }
     }
 }
@@ -392,25 +392,19 @@ pub struct HexBytesJSON {
     pub data: String,
 }
 
-/// Fixture-shape signed block. Mirrors the JSON the simulator POSTs.
+/// Fixture-shape signed block (devnet5).
 ///
-/// `containers::SignedBlock` deserializes its `signature` field via
-/// `xmss::Signature`, whose JSON form is the structured XMSS object
-/// (`{path, rho, hashes}`). leanSpec fixtures, however, ship signatures as
-/// plain hex strings (`"0x24…"`) and aggregated proofs as
-/// `{participants:{data:[bool]}, proofData:{data:"0x…"}}`. This type matches
-/// the wire format and provides a `TryFrom` conversion to the consensus type.
+/// Mirrors leanSpec's `SignedBlock { block, proof: MultiMessageAggregate }`
+/// where `MultiMessageAggregate` is the container `{ proof: ByteList512KiB }`.
 #[derive(Debug, Deserialize)]
 pub struct TestSignedBlock {
     pub block: TestBlock,
-    pub signature: TestBlockSignaturesFixture,
+    pub proof: TestMultiMessageAggregateFixture,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TestBlockSignaturesFixture {
-    pub attestation_signatures: TestDataWrapper<TestAggregatedSignatureProofFixture>,
-    pub proposer_signature: String,
+pub struct TestMultiMessageAggregateFixture {
+    pub proof: HexBytesJSON,
 }
 
 /// One entry inside `signature.attestationSignatures.data`.
@@ -426,27 +420,10 @@ impl TryFrom<TestSignedBlock> for SignedBlock {
 
     fn try_from(value: TestSignedBlock) -> Result<Self, Self::Error> {
         let block = value.block.into();
-
-        let proposer_signature: Signature = value
-            .signature
-            .proposer_signature
-            .parse()
-            .map_err(|err| format!("invalid hex in proposer_signature: {err}"))?;
-
-        let mut attestation_signatures = AttestationSignatures::default();
-        for entry in value.signature.attestation_signatures.data {
-            let proof: AggregatedSignatureProof = entry.try_into()?;
-            PersistentList::push(&mut attestation_signatures, proof)
-                .map_err(|err| format!("attestation_signatures push: {err:?}"))?;
-        }
-
-        Ok(Self {
-            block,
-            signature: BlockSignatures {
-                attestation_signatures,
-                proposer_signature,
-            },
-        })
+        let bytes = decode_hex(&value.proof.proof.data)?;
+        let proof = MultiMessageAggregate::new(&bytes)
+            .map_err(|err| format!("multi-message aggregate decode: {err}"))?;
+        Ok(Self { block, proof })
     }
 }
 

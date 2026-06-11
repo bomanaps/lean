@@ -4,15 +4,14 @@
 //! using the devnet2 data structures.
 
 use containers::{
-    AggregatedAttestation, Attestation, Attestations, Block, BlockBody, BlockHeader,
-    BlockSignatures, Checkpoint, Config, SignedBlock, Slot, State, Validators,
+    AggregatedAttestation, Attestation, Attestations, Block, BlockBody, BlockHeader, Checkpoint,
+    Config, Slot, State, Validators,
 };
 use containers::{
     HistoricalBlockHashes, JustificationRoots, JustificationValidators, JustifiedSlots, Validator,
 };
 use ssz::{H256, PersistentList, SszHash};
 use typenum::U4096;
-use xmss::Signature;
 
 pub const DEVNET_CONFIG_VALIDATOR_REGISTRY_LIMIT: usize = 1 << 12; // 4096
 pub const TEST_VALIDATOR_COUNT: usize = 4; // Actual validator count used in tests
@@ -25,50 +24,36 @@ pub fn create_block(
     slot: u64,
     parent_header: &mut BlockHeader,
     attestations: Option<Attestations>,
-) -> SignedBlock {
+) -> Block {
     let body = BlockBody {
         attestations: {
-            let attestations_vec = attestations.unwrap_or_default();
-
-            // Convert PersistentList into a Vec
-            let attestations_vec: Vec<Attestation> =
-                attestations_vec.into_iter().cloned().collect();
+            let attestations_vec: Vec<Attestation> = attestations
+                .unwrap_or_default()
+                .into_iter()
+                .cloned()
+                .collect();
 
             let aggregated: Vec<AggregatedAttestation> =
                 AggregatedAttestation::aggregate_by_data(&attestations_vec);
 
-            // Create a new empty PersistentList
             let mut persistent_list: PersistentList<AggregatedAttestation, U4096> =
                 PersistentList::default();
-
-            // Push each aggregated attestation
             for agg in aggregated {
                 persistent_list
                     .push(agg)
                     .expect("PersistentList capacity exceeded");
             }
-
             persistent_list
         },
     };
 
-    let block_message = Block {
+    Block {
         slot: Slot(slot),
         proposer_index: slot % 10,
         parent_root: parent_header.hash_tree_root(),
         state_root: H256::zero(),
-        body: body,
-    };
-
-    let return_value = SignedBlock {
-        block: block_message,
-        signature: BlockSignatures {
-            attestation_signatures: PersistentList::default(),
-            proposer_signature: Signature::default(),
-        },
-    };
-
-    return_value
+        body,
+    }
 }
 
 pub fn create_attestations(indices: &[usize]) -> Vec<bool> {

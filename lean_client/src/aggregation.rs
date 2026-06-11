@@ -1,15 +1,18 @@
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use containers::{SignedAggregatedAttestation, Slot};
+use dedicated_executor::DedicatedExecutor;
 use fork_choice::store::Store;
 use metrics::METRICS;
 use parking_lot::RwLock;
 use ssz::H256;
 use tokio::sync::{mpsc, watch};
-use tokio::task;
-use validator::ValidatorService;
+use validator::{ValidatorService, snapshot_aggregation_inputs};
+
+const AGGREGATION_DEADLINE: Duration = Duration::from_millis(750);
 
 /// Aggregation service that decouples XMSS aggregation from the chain task.
 ///
@@ -37,7 +40,12 @@ impl AggregationService {
     /// The worker holds an `Arc<RwLock<Store>>` reference so it can read +
     /// clone the snapshot on its own thread instead of forcing the chain task
     /// to do the deep-clone.
-    pub fn new(vs: Arc<ValidatorService>, store: Arc<RwLock<Store>>, log_rate: usize) -> Self {
+    pub fn new(
+        vs: Arc<ValidatorService>,
+        store: Arc<RwLock<Store>>,
+        log_rate: usize,
+        cpu_snark_executor: Arc<DedicatedExecutor>,
+    ) -> Self {
         let (agg_tx, mut agg_rx) = watch::channel::<Option<u64>>(None);
         let (res_tx, res_rx) = mpsc::channel::<(
             u64,
@@ -46,7 +54,7 @@ impl AggregationService {
 
         let vs_for_worker = vs.clone();
 
-        task::spawn(async move {
+        tokio::spawn(async move {
             loop {
                 if agg_rx.changed().await.is_err() {
                     break; // sender dropped — chain task shut down
@@ -59,38 +67,58 @@ impl AggregationService {
                 METRICS
                     .get()
                     .map(|m| m.lean_aggregation_in_flight_snapshots.inc());
-                let result = task::spawn_blocking(move || {
-                    // Clone on this worker thread: brief read lock held only for
-                    // the duration of the clone, then released before XMSS work.
-                    let clone_start = Instant::now();
-                    let snapshot = {
-                        let guard = store.read();
-                        guard.clone()
-                    };
-                    let clone_elapsed = clone_start.elapsed();
 
-                    METRICS.get().map(|m| {
-                        m.lean_aggregation_snapshot_clone_seconds
-                            .observe(clone_elapsed.as_secs_f64());
-                        let entries = snapshot.blocks.len()
-                            + snapshot.states.len()
-                            + snapshot.gossip_signatures.len()
-                            + snapshot.latest_known_aggregated_payloads.len()
-                            + snapshot.latest_new_aggregated_payloads.len()
-                            + snapshot.attestation_data_by_root.len();
-                        m.lean_aggregation_snapshot_size_entries
-                            .observe(entries as f64);
-                    });
+                let snapshot_start = Instant::now();
+                let snapshot = {
+                    let guard = store.read();
+                    snapshot_aggregation_inputs(&guard)
+                };
+                let snapshot_elapsed = snapshot_start.elapsed();
 
-                    vs.maybe_aggregate(&snapshot, Slot(slot), log_rate)
-                })
-                .await
-                .unwrap_or(None);
+                let Some(snapshot) = snapshot else {
+                    METRICS
+                        .get()
+                        .map(|m| m.lean_aggregation_in_flight_snapshots.dec());
+                    if res_tx.send((slot, None)).await.is_err() {
+                        break;
+                    }
+                    continue;
+                };
+
+                METRICS.get().map(|m| {
+                    m.lean_aggregation_snapshot_clone_seconds
+                        .observe(snapshot_elapsed.as_secs_f64());
+                    let entries: usize = snapshot
+                        .jobs
+                        .iter()
+                        .map(|j| j.children.len() + j.raw_ids.len() + j.accepted_child_ids.len())
+                        .sum::<usize>()
+                        + snapshot.jobs.len();
+                    m.lean_aggregation_snapshot_size_entries
+                        .observe(entries as f64);
+                });
+
+                let cancel = Arc::new(AtomicBool::new(false));
+                let cancel_for_timer = cancel.clone();
+                let deadline_handle = tokio::spawn(async move {
+                    tokio::time::sleep(AGGREGATION_DEADLINE).await;
+                    cancel_for_timer.store(true, Ordering::Relaxed);
+                });
+
+                let cancel_for_worker = cancel.clone();
+                let snark_exec = cpu_snark_executor.clone();
+                let job = snark_exec.spawn(async move {
+                    vs.maybe_aggregate(&snapshot, Slot(slot), log_rate, &cancel_for_worker)
+                });
+                let result = job.await.unwrap_or(None);
+
+                deadline_handle.abort();
+
                 METRICS
                     .get()
                     .map(|m| m.lean_aggregation_in_flight_snapshots.dec());
                 if res_tx.send((slot, result)).await.is_err() {
-                    break; // chain task dropped — shut down
+                    break;
                 }
             }
         });
@@ -115,13 +143,16 @@ impl AggregationService {
         let _ = self.agg_tx.send(Some(slot));
     }
 
-    /// Returns the next completed aggregation result, or `None` if none is ready.
-    pub fn poll(
+    /// Awaits the next completed aggregation result. Returns `None` only when
+    /// the worker has shut down. Used as a `tokio::select!` arm on the chain
+    /// task so results land in `latest_new_aggregated_payloads` the moment the
+    /// SNARK finishes — not on the next 800 ms tick.
+    pub async fn recv(
         &mut self,
     ) -> Option<(
         u64,
         Option<(Vec<SignedAggregatedAttestation>, HashSet<H256>)>,
     )> {
-        self.res_rx.try_recv().ok()
+        self.res_rx.recv().await
     }
 }

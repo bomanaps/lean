@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use containers::{
     AggregatedSignatureProof, AttestationData, Block, SignedAggregatedAttestation,
-    SignedAttestation, SignedBlock, Slot, Status,
+    SignedAttestation, SignedBlock, Slot, State, Status, Validators,
 };
 use metrics::METRICS;
 use parking_lot::{Mutex, RwLock};
@@ -22,6 +22,12 @@ pub const MAX_BLOCK_CACHE_SIZE: usize = 1024;
 /// Shared block provider for serving BlocksByRoot requests.
 /// Allows NetworkService to look up signed blocks for checkpoint sync backfill.
 pub type SignedBlockProvider = Arc<RwLock<HashMap<H256, SignedBlock>>>;
+
+/// Provider for serving BlocksByRange requests.
+/// Returns canonical blocks in slot-ascending order within
+/// `[start_slot, start_slot + count - 1]`. Empty slots are skipped, so the
+/// resulting Vec may be shorter than `count`.
+pub type CanonicalBlocksProvider = Arc<dyn Fn(u64, u64) -> Vec<SignedBlock> + Send + Sync>;
 
 /// Shared status provider for Status req/resp protocol.
 /// Allows NetworkService to send accurate finalized/head checkpoints to peers.
@@ -148,6 +154,11 @@ pub enum ChainMessage {
         signed_block: SignedBlock,
         is_trusted: bool,
         should_gossip: bool,
+        /// Cached post-state from this node's own `execute_block_production`.
+        /// When `is_trusted = true` and this is `Some`, the chain task skips the
+        /// redundant `verify_and_transition` and applies the cached state directly.
+        /// Spec-aligned: leanSpec `build_block` returns the post-state for this reason.
+        cached_post_state: Option<State>,
     },
     ProcessAttestation {
         signed_attestation: SignedAttestation,
@@ -168,6 +179,7 @@ impl ChainMessage {
             signed_block,
             is_trusted: false,
             should_gossip: true,
+            cached_post_state: None,
         }
     }
 
@@ -222,7 +234,7 @@ pub enum ValidatorChainMessage {
     ProduceBlock {
         slot: Slot,
         proposer_index: u64,
-        sender: oneshot::Sender<Result<(Block, Vec<AggregatedSignatureProof>)>>,
+        sender: oneshot::Sender<Result<(Block, Vec<AggregatedSignatureProof>, Validators, State)>>,
     },
     /// Request attestation data for the given slot.
     /// Chain reads the current head/justified/target state and returns it via sender.
@@ -242,6 +254,10 @@ pub enum OutboundP2pRequest {
     /// Devnet-3: Gossip aggregated attestation to aggregation topic
     GossipAggregation(SignedAggregatedAttestation),
     RequestBlocksByRoot(Vec<H256>),
+    RequestBlocksByRange {
+        start_slot: u64,
+        count: u64,
+    },
 }
 
 #[async_trait]

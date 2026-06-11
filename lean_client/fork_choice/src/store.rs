@@ -103,6 +103,8 @@ pub struct Store {
     /// Block roots that were referenced by attestations but not found in the store.
     /// Drained by the caller (main.rs) to trigger blocks-by-root RPC fetches.
     pub pending_fetch_roots: HashSet<H256>,
+
+    pub log_inv_rate: usize,
 }
 
 const JUSTIFICATION_LOOKBACK_SLOTS: u64 = 3;
@@ -205,6 +207,7 @@ pub fn get_forkchoice_store(
     anchor_block: SignedBlock,
     config: Config,
     is_aggregator: bool,
+    log_inv_rate: usize,
 ) -> Store {
     // Extract the plain Block from the signed block
     let block = anchor_block.block.clone();
@@ -274,6 +277,7 @@ pub fn get_forkchoice_store(
         pending_attestations: HashMap::new(),
         pending_aggregated_attestations: HashMap::new(),
         pending_fetch_roots: HashSet::new(),
+        log_inv_rate,
     }
 }
 
@@ -647,7 +651,7 @@ pub fn prepare_block_production(
 
 pub fn execute_block_production(
     inputs: BlockProductionInputs,
-) -> Result<(H256, Block, Vec<AggregatedSignatureProof>)> {
+) -> Result<(H256, Block, State, Vec<AggregatedSignatureProof>)> {
     let BlockProductionInputs {
         slot,
         validator_index,
@@ -695,19 +699,20 @@ pub fn execute_block_production(
     );
 
     if final_post_state.latest_justified.slot < store_latest_justified.slot {
-        warn!(
-            produced = final_post_state.latest_justified.slot.0,
-            store = store_latest_justified.slot.0,
-            "Produced block justified < store justified. Fixed-point did not converge."
-        );
         METRICS
             .get()
             .map(|m| m.lean_build_block_fixed_point_no_converge_total.inc());
+        return Err(anyhow!(
+            "Produced block justified slot {} is behind store justified slot {}; \
+             fixed-point attestation loop did not converge",
+            final_post_state.latest_justified.slot.0,
+            store_latest_justified.slot.0,
+        ));
     }
 
     let block_root = final_block.hash_tree_root();
 
-    Ok((block_root, final_block, signatures))
+    Ok((block_root, final_block, final_post_state, signatures))
 }
 
 pub fn produce_block_with_signatures(
@@ -717,5 +722,5 @@ pub fn produce_block_with_signatures(
     log_inv_rate: usize,
 ) -> Result<(H256, Block, Vec<AggregatedSignatureProof>)> {
     let inputs = prepare_block_production(store, slot, validator_index, log_inv_rate)?;
-    execute_block_production(inputs)
+    execute_block_production(inputs).map(|(root, block, _post_state, sigs)| (root, block, sigs))
 }

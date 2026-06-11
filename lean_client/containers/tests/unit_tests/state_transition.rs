@@ -3,16 +3,14 @@
 //! Tests for full state transitions including signature validation
 //! and state root verification.
 
-// tests/state_transition.rs
-use containers::{Block, BlockSignatures, SignedBlock, Slot, State};
+use containers::{Block, Slot, State};
 use pretty_assertions::assert_eq;
 use rstest::fixture;
-use ssz::{H256, PersistentList, SszHash};
+use ssz::{H256, SszHash};
 
 #[path = "common.rs"]
 mod common;
 use common::{create_block, sample_config};
-use xmss::Signature;
 
 #[fixture]
 fn genesis_state() -> State {
@@ -23,14 +21,11 @@ fn genesis_state() -> State {
 #[test]
 fn test_state_transition_full() {
     let state = genesis_state();
-    let mut state_at_slot_1 = state.process_slots(Slot(1)).unwrap();
+    let state_at_slot_1 = state.process_slots(Slot(1)).unwrap();
 
-    let signed_block = create_block(1, &mut state_at_slot_1.latest_block_header, None);
-    let block = signed_block.block.clone();
+    let block = create_block(1, &mut state_at_slot_1.latest_block_header.clone(), None);
 
-    // Use process_block_header + process_operations to avoid state root validation during setup
     let state_after_header = state_at_slot_1.process_block_header(&block).unwrap();
-
     let expected_state = state_after_header
         .process_attestations(&block.body.attestations)
         .unwrap();
@@ -40,12 +35,7 @@ fn test_state_transition_full() {
         ..block
     };
 
-    let final_signed_block = SignedBlock {
-        block: block_with_correct_root,
-        signature: signed_block.signature,
-    };
-
-    let final_state = state.state_transition(final_signed_block, true).unwrap();
+    let final_state = state.state_transition(&block_with_correct_root).unwrap();
 
     assert_eq!(
         final_state.hash_tree_root(),
@@ -53,90 +43,14 @@ fn test_state_transition_full() {
     );
 }
 
-#[test]
-fn test_state_transition_invalid_signatures() {
-    let state = genesis_state();
-    let mut state_at_slot_1 = state.process_slots(Slot(1)).unwrap();
-
-    let signed_block = create_block(1, &mut state_at_slot_1.latest_block_header, None);
-    let block = signed_block.block.clone();
-
-    // Use process_block_header + process_operations to avoid state root validation during setup
-    let state_after_header = state_at_slot_1.process_block_header(&block).unwrap();
-
-    let expected_state = state_after_header
-        .process_attestations(&block.body.attestations)
-        .unwrap();
-
-    let block_with_correct_root = Block {
-        state_root: expected_state.hash_tree_root(),
-        ..block
-    };
-
-    let final_signed_block = SignedBlock {
-        block: block_with_correct_root,
-        signature: signed_block.signature,
-    };
-
-    let result = state.state_transition(final_signed_block, false);
-    assert!(result.is_err());
-}
-
-// Test with bad state root using devnet2 BlockSignatures structure
 #[test]
 fn test_state_transition_bad_state_root() {
     let state = genesis_state();
     let mut state_at_slot_1 = state.process_slots(Slot(1)).unwrap();
 
-    let signed_block = create_block(1, &mut state_at_slot_1.latest_block_header, None);
-    let mut block = signed_block.block.clone();
-
+    let mut block = create_block(1, &mut state_at_slot_1.latest_block_header, None);
     block.state_root = H256::zero();
 
-    let final_signed_block = SignedBlock {
-        block,
-        signature: BlockSignatures {
-            attestation_signatures: PersistentList::default(),
-            proposer_signature: Signature::default(),
-        },
-    };
-
-    let result = state.state_transition(final_signed_block, true);
+    let result = state.state_transition(&block);
     assert!(result.is_err());
-}
-
-#[test]
-fn test_state_transition_devnet2() {
-    let state = genesis_state();
-    let mut state_at_slot_1 = state.process_slots(Slot(1)).unwrap();
-
-    // Create a block with attestations for devnet2
-    let signed_block = create_block(1, &mut state_at_slot_1.latest_block_header, None);
-    let block = signed_block.block.clone();
-
-    // Process the block header and attestations
-    let state_after_header = state_at_slot_1.process_block_header(&block).unwrap();
-
-    let expected_state = state_after_header
-        .process_attestations(&block.body.attestations)
-        .unwrap();
-
-    // Ensure the state root matches the expected state
-    let block_with_correct_root = Block {
-        state_root: expected_state.hash_tree_root(),
-        ..block
-    };
-
-    let final_signed_block = SignedBlock {
-        block: block_with_correct_root,
-        signature: signed_block.signature,
-    };
-
-    // Perform the state transition and validate the result
-    let final_state = state.state_transition(final_signed_block, true).unwrap();
-
-    assert_eq!(
-        final_state.hash_tree_root(),
-        expected_state.hash_tree_root()
-    );
 }

@@ -12,8 +12,6 @@ pub type Attestations = PersistentList<Attestation, ValidatorRegistryLimit>;
 
 pub type AggregatedAttestations = PersistentList<AggregatedAttestation, ValidatorRegistryLimit>;
 
-pub type AttestationSignatures = PersistentList<AggregatedSignatureProof, ValidatorRegistryLimit>;
-
 /// Aggregated signature proof with participant tracking.
 ///
 /// Combines the participant bitfield with the proof bytes.

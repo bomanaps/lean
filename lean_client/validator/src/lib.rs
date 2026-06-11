@@ -8,14 +8,13 @@ use serde::Deserialize;
 
 use anyhow::{Context, Result, anyhow, bail};
 use containers::{
-    AggregatedSignatureProof, AggregationBits, AttestationData, AttestationSignatures, Block,
-    BlockSignatures, SignedAggregatedAttestation, SignedAttestation, SignedBlock, Slot,
+    AggregatedSignatureProof, AggregationBits, AttestationData, Block, MultiMessageAggregate,
+    SignatureKey, SignedAggregatedAttestation, SignedAttestation, SignedBlock, Slot, Validators,
 };
 use dedicated_executor::DedicatedExecutor;
-use fork_choice::store::Store;
+use fork_choice::store::{INTERVALS_PER_SLOT, Store};
 use futures::stream::{FuturesUnordered, StreamExt};
 use metrics::{METRICS, stop_and_discard, stop_and_record};
-use rayon::prelude::*;
 use ssz::H256;
 use ssz::SszHash;
 use tracing::{info, warn};
@@ -24,7 +23,142 @@ use try_from_iterator::TryFromIterator as _;
 pub mod keys;
 
 use keys::KeyManager;
-use xmss::{PublicKey, Signature};
+use xmss::{AggregatedSignature, PublicKey, Signature};
+
+pub struct AggregationJob {
+    pub data_root: H256,
+    pub attestation_data: AttestationData,
+    pub children: Vec<(Vec<PublicKey>, AggregatedSignatureProof)>,
+    pub accepted_child_ids: Vec<u64>,
+    pub raw_pubkeys: Vec<PublicKey>,
+    pub raw_sigs: Vec<Signature>,
+    pub raw_ids: Vec<u64>,
+}
+
+pub struct AggregationSnapshot {
+    pub jobs: Vec<AggregationJob>,
+}
+
+pub const AGGREGATION_SLOT_LOOKBACK: u64 = 1;
+
+pub fn snapshot_aggregation_inputs(store: &Store) -> Option<AggregationSnapshot> {
+    if store.gossip_signatures.is_empty() && store.latest_new_aggregated_payloads.is_empty() {
+        return None;
+    }
+
+    let head_state = store.states.get(&store.head)?;
+    let head_validators = &head_state.validators;
+
+    let current_slot = store.time / INTERVALS_PER_SLOT;
+    let min_eligible_slot = current_slot.saturating_sub(AGGREGATION_SLOT_LOOKBACK);
+
+    let mut gossip_groups: HashMap<H256, Vec<(u64, Signature)>> = HashMap::new();
+    for (sig_key, signature) in &store.gossip_signatures {
+        gossip_groups
+            .entry(sig_key.data_root)
+            .or_default()
+            .push((sig_key.validator_id, signature.clone()));
+    }
+
+    let mut all_data_roots: HashSet<H256> = gossip_groups.keys().copied().collect();
+    for data_root in store.latest_new_aggregated_payloads.keys() {
+        all_data_roots.insert(*data_root);
+    }
+
+    let mut jobs: Vec<AggregationJob> = Vec::with_capacity(all_data_roots.len());
+
+    for data_root in all_data_roots {
+        let Some(attestation_data) = store.attestation_data_by_root.get(&data_root) else {
+            continue;
+        };
+
+        if attestation_data.slot.0 < min_eligible_slot {
+            continue;
+        }
+
+        let mut children_refs: Vec<&AggregatedSignatureProof> = Vec::new();
+        let mut covered_by_children: HashSet<u64> = HashSet::new();
+        extend_children_greedily(
+            store
+                .latest_new_aggregated_payloads
+                .get(&data_root)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]),
+            &mut children_refs,
+            &mut covered_by_children,
+        );
+        extend_children_greedily(
+            store
+                .latest_known_aggregated_payloads
+                .get(&data_root)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]),
+            &mut children_refs,
+            &mut covered_by_children,
+        );
+
+        let mut entries: Vec<(u64, Signature)> = gossip_groups
+            .get(&data_root)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(vid, _)| {
+                !covered_by_children.contains(vid) && head_validators.get(*vid).is_ok()
+            })
+            .collect();
+        entries.sort_by_key(|(vid, _)| *vid);
+
+        let mut raw_ids: Vec<u64> = Vec::with_capacity(entries.len());
+        let mut raw_pubkeys: Vec<PublicKey> = Vec::with_capacity(entries.len());
+        let mut raw_sigs: Vec<Signature> = Vec::with_capacity(entries.len());
+        for (vid, sig) in entries {
+            let validator = head_validators.get(vid).unwrap();
+            raw_ids.push(vid);
+            raw_pubkeys.push(validator.attestation_pubkey.clone());
+            raw_sigs.push(sig);
+        }
+
+        if raw_ids.is_empty() && children_refs.len() < 2 {
+            continue;
+        }
+
+        let mut children: Vec<(Vec<PublicKey>, AggregatedSignatureProof)> =
+            Vec::with_capacity(children_refs.len());
+        for child in &children_refs {
+            let pks: Vec<PublicKey> = child
+                .participants
+                .to_validator_indices()
+                .into_iter()
+                .filter_map(|vid| {
+                    head_validators
+                        .get(vid)
+                        .ok()
+                        .map(|v| v.attestation_pubkey.clone())
+                })
+                .collect();
+            children.push((pks, (*child).clone()));
+        }
+
+        let mut accepted_child_ids: Vec<u64> = covered_by_children.into_iter().collect();
+        accepted_child_ids.sort();
+
+        jobs.push(AggregationJob {
+            data_root,
+            attestation_data: attestation_data.clone(),
+            children,
+            accepted_child_ids,
+            raw_pubkeys,
+            raw_sigs,
+            raw_ids,
+        });
+    }
+
+    if jobs.is_empty() {
+        return None;
+    }
+
+    Some(AggregationSnapshot { jobs })
+}
 
 /// Entry in an annotated_validators.yaml file.
 /// Each validator index has two entries: one for the attester key and one for the proposer key,
@@ -107,6 +241,15 @@ pub struct ValidatorService {
     /// Shared CPU pool used for offloading XMSS attestation signing off the
     /// validator task / chain task.
     cpu_normal_executor: Arc<DedicatedExecutor>,
+    /// Pool used for non-aggregation SNARK verify work (block-verify,
+    /// reaggregate, gossip-verify). Kept for symmetry with the main executor
+    /// split — not used by block-signing, which lives on `cpu_snark_executor`.
+    cpu_verify_executor: Arc<DedicatedExecutor>,
+    /// Pool used for the SNARK-heavy block-signing work
+    /// (Type-1 wrap + Type-2 merge inside `sign_block_with_data`). Same pool as
+    /// aggregation; the propose/aggregation timelines never overlap (interval 0
+    /// vs interval 2), so co-tenancy here doesn't queue.
+    cpu_snark_executor: Arc<DedicatedExecutor>,
     /// Whether this node performs aggregation duties (devnet-3).
     /// Uses `AtomicBool` for interior mutability so the admin API can toggle
     /// the flag at runtime without requiring `&mut self` or a write lock.
@@ -163,14 +306,25 @@ impl ValidatorService {
         config: ValidatorConfig,
         num_validators: u64,
         cpu_normal_executor: Arc<DedicatedExecutor>,
+        cpu_verify_executor: Arc<DedicatedExecutor>,
+        cpu_snark_executor: Arc<DedicatedExecutor>,
     ) -> Self {
-        Self::new_with_aggregator(config, num_validators, cpu_normal_executor, false)
+        Self::new_with_aggregator(
+            config,
+            num_validators,
+            cpu_normal_executor,
+            cpu_verify_executor,
+            cpu_snark_executor,
+            false,
+        )
     }
 
     pub fn new_with_aggregator(
         config: ValidatorConfig,
         num_validators: u64,
         cpu_normal_executor: Arc<DedicatedExecutor>,
+        cpu_verify_executor: Arc<DedicatedExecutor>,
+        cpu_snark_executor: Arc<DedicatedExecutor>,
         is_aggregator: bool,
     ) -> Self {
         info!(
@@ -192,6 +346,8 @@ impl ValidatorService {
             num_validators,
             key_manager: None,
             cpu_normal_executor,
+            cpu_verify_executor,
+            cpu_snark_executor,
             is_aggregator: AtomicBool::new(is_aggregator),
         }
     }
@@ -201,12 +357,16 @@ impl ValidatorService {
         num_validators: u64,
         keys_dir: impl AsRef<Path>,
         cpu_normal_executor: Arc<DedicatedExecutor>,
+        cpu_verify_executor: Arc<DedicatedExecutor>,
+        cpu_snark_executor: Arc<DedicatedExecutor>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Self::new_with_keys_and_aggregator(
             config,
             num_validators,
             keys_dir,
             cpu_normal_executor,
+            cpu_verify_executor,
+            cpu_snark_executor,
             false,
         )
     }
@@ -216,6 +376,8 @@ impl ValidatorService {
         num_validators: u64,
         keys_dir: impl AsRef<Path>,
         cpu_normal_executor: Arc<DedicatedExecutor>,
+        cpu_verify_executor: Arc<DedicatedExecutor>,
+        cpu_snark_executor: Arc<DedicatedExecutor>,
         is_aggregator: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut key_manager = KeyManager::new(&keys_dir)?;
@@ -253,6 +415,8 @@ impl ValidatorService {
             num_validators,
             key_manager: Some(Arc::new(key_manager)),
             cpu_normal_executor,
+            cpu_verify_executor,
+            cpu_snark_executor,
             is_aggregator: AtomicBool::new(is_aggregator),
         })
     }
@@ -307,240 +471,103 @@ impl ValidatorService {
     /// Returns `None` if this node has no aggregation duty or nothing to aggregate.
     pub fn maybe_aggregate(
         &self,
-        store: &Store,
+        snapshot: &AggregationSnapshot,
         slot: Slot,
         log_inv_rate: usize,
+        cancel: &std::sync::atomic::AtomicBool,
     ) -> Option<(Vec<SignedAggregatedAttestation>, HashSet<H256>)> {
         if !self.is_aggregator_for_slot(slot) {
             return None;
         }
 
-        // Get the head state to access validator public keys.
-        let head_state = store.states.get(&store.head)?;
-
-        // Group fresh individual gossip signatures by data_root.
-        let mut gossip_groups: HashMap<H256, Vec<(u64, Signature)>> = HashMap::new();
-        for (sig_key, signature) in &store.gossip_signatures {
-            gossip_groups
-                .entry(sig_key.data_root)
-                .or_default()
-                .push((sig_key.validator_id, signature.clone()));
-        }
-
-        // Spec: iterate over new.keys() | gossip_sigs.keys().
-        // Known payloads alone cannot trigger aggregation — they only help extend coverage.
-        let mut all_data_roots: HashSet<H256> = gossip_groups.keys().copied().collect();
-        for data_root in store.latest_new_aggregated_payloads.keys() {
-            all_data_roots.insert(*data_root);
-        }
-
-        if all_data_roots.is_empty() {
-            info!(slot = slot.0, "No signatures to aggregate");
+        if snapshot.jobs.is_empty() {
             return None;
         }
 
-        // Parallelise over data_roots: each XMSS prove_execution call is independent.
-        // gossip_groups/store/head_state are shared immutably across Rayon threads.
-        let all_data_roots_vec: Vec<H256> = all_data_roots.into_iter().collect();
+        let mut aggregated_attestations: Vec<SignedAggregatedAttestation> =
+            Vec::with_capacity(snapshot.jobs.len());
+        let mut consumed_data_roots: HashSet<H256> = HashSet::with_capacity(snapshot.jobs.len());
 
-        let results: Vec<(SignedAggregatedAttestation, H256)> = all_data_roots_vec
-            .into_par_iter()
-            .filter_map(|data_root| {
-                let Some(attestation_data) =
-                    store.attestation_data_by_root.get(&data_root).cloned()
-                else {
-                    warn!(
-                        data_root = %format!("0x{:x}", data_root),
-                        "Could not find attestation data for aggregation group"
-                    );
-                    return None;
-                };
-
-                // Only aggregate attestations for the current slot.
-                if attestation_data.slot != slot {
-                    return None;
-                }
-
-                // ── Phase 1: Select ──────────────────────────────────────────────────
-                // Two-pass greedy child selection matching spec `select_greedily(new, known)`.
-                // New payloads go first (uncommitted work); known payloads fill remaining gaps.
-                let mut children: Vec<&AggregatedSignatureProof> = Vec::new();
-                let mut covered_by_children: HashSet<u64> = HashSet::new();
-
-                extend_children_greedily(
-                    store
-                        .latest_new_aggregated_payloads
-                        .get(&data_root)
-                        .map(|v| v.as_slice())
-                        .unwrap_or(&[]),
-                    &mut children,
-                    &mut covered_by_children,
-                );
-                extend_children_greedily(
-                    store
-                        .latest_known_aggregated_payloads
-                        .get(&data_root)
-                        .map(|v| v.as_slice())
-                        .unwrap_or(&[]),
-                    &mut children,
-                    &mut covered_by_children,
-                );
-
-                // ── Phase 2: Fill ────────────────────────────────────────────────────
-                // Collect raw gossip sigs for validators not already covered by children,
-                // sorted ascending for deterministic bitfield construction.
-                let mut entries: Vec<(u64, Signature)> = gossip_groups
-                    .get(&data_root)
-                    .cloned()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|(vid, _)| {
-                        !covered_by_children.contains(vid)
-                            && head_state.validators.get(*vid).is_ok()
-                    })
-                    .collect();
-                entries.sort_by_key(|(vid, _)| *vid);
-
-                let mut fresh_validator_ids: Vec<u64> = Vec::new();
-                let mut fresh_public_keys: Vec<PublicKey> = Vec::new();
-                let mut fresh_signatures: Vec<Signature> = Vec::new();
-
-                for (vid, sig) in entries {
-                    let validator = head_state.validators.get(vid).unwrap();
-                    fresh_validator_ids.push(vid);
-                    fresh_public_keys.push(validator.attestation_pubkey.clone());
-                    fresh_signatures.push(sig);
-                }
-
-                if children.is_empty() && fresh_validator_ids.is_empty() {
-                    return None;
-                }
-
-                // ── Spec guard ───────────────────────────────────────────────────────
-                // A lone child proof with no fresh raw signatures is already a valid proof —
-                // skip re-aggregation. Matches spec rule:
-                //   `if not raw_entries and len(child_proofs) < 2: continue`
-                if fresh_validator_ids.is_empty() && children.len() < 2 {
-                    return None;
-                }
-
-                // ── Phase 3: Aggregate ───────────────────────────────────────────────
-                let timer = METRICS.get().map(|m| {
-                    m.lean_committee_signatures_aggregation_time_seconds
-                        .start_timer()
-                });
-
-                let proof = if children.is_empty() {
-                    // No child proofs: simple fresh aggregation from raw sigs only.
-                    let participants =
-                        AggregationBits::from_validator_indices(&fresh_validator_ids);
-                    match AggregatedSignatureProof::aggregate(
-                        participants,
-                        fresh_public_keys,
-                        fresh_signatures,
-                        data_root,
-                        attestation_data.slot.0 as u32,
-                        log_inv_rate,
-                    ) {
-                        Ok(p) => {
-                            stop_and_record(timer);
-                            p
-                        }
-                        Err(e) => {
-                            stop_and_discard(timer);
-                            warn!(error = %e, "Failed to create aggregated signature proof");
-                            return None;
-                        }
-                    }
-                } else {
-                    // Have child proofs: recursive aggregation — children compress prior rounds,
-                    // fresh raw sigs fill any remaining uncovered validators.
-                    let child_pk_vecs: Vec<Vec<PublicKey>> = children
-                        .iter()
-                        .map(|child| {
-                            child
-                                .participants
-                                .to_validator_indices()
-                                .into_iter()
-                                .filter_map(|vid| {
-                                    head_state
-                                        .validators
-                                        .get(vid)
-                                        .ok()
-                                        .map(|v| v.attestation_pubkey.clone())
-                                })
-                                .collect()
-                        })
-                        .collect();
-
-                    let children_arg: Vec<(&[PublicKey], &AggregatedSignatureProof)> =
-                        child_pk_vecs
-                            .iter()
-                            .zip(children.iter())
-                            .map(|(pks, proof)| (pks.as_slice(), *proof))
-                            .collect();
-
-                    let mut all_validator_ids: Vec<u64> =
-                        covered_by_children.iter().copied().collect();
-                    all_validator_ids.extend_from_slice(&fresh_validator_ids);
-                    all_validator_ids.sort();
-                    all_validator_ids.dedup();
-                    let all_participants =
-                        AggregationBits::from_validator_indices(&all_validator_ids);
-
-                    match AggregatedSignatureProof::aggregate_with_children(
-                        all_participants,
-                        &children_arg,
-                        fresh_public_keys,
-                        fresh_signatures,
-                        data_root,
-                        attestation_data.slot.0 as u32,
-                        log_inv_rate,
-                    ) {
-                        Ok(p) => {
-                            stop_and_record(timer);
-                            p
-                        }
-                        Err(e) => {
-                            stop_and_discard(timer);
-                            warn!(
-                                error = %e,
-                                "Failed to create recursive aggregated signature proof"
-                            );
-                            return None;
-                        }
-                    }
-                };
-
-                info!(
+        for job in &snapshot.jobs {
+            if cancel.load(Ordering::Relaxed) {
+                warn!(
                     slot = slot.0,
-                    validators = fresh_validator_ids.len() + covered_by_children.len(),
-                    children = children.len(),
-                    data_root = %format!("0x{:x}", data_root),
-                    "Created aggregated attestation"
+                    completed = aggregated_attestations.len(),
+                    remaining = snapshot.jobs.len() - aggregated_attestations.len(),
+                    "Aggregation cancelled after deadline; surfacing partial results"
                 );
+                break;
+            }
 
-                Some((
-                    SignedAggregatedAttestation {
-                        data: attestation_data,
-                        proof,
-                    },
-                    data_root,
-                ))
-            })
-            .collect();
+            let timer = METRICS.get().map(|m| {
+                m.lean_committee_signatures_aggregation_time_seconds
+                    .start_timer()
+            });
 
-        if results.is_empty() {
-            return None;
+            let children_arg: Vec<(&[PublicKey], &AggregatedSignatureProof)> = job
+                .children
+                .iter()
+                .map(|(pks, proof)| (pks.as_slice(), proof))
+                .collect();
+
+            let mut all_validator_ids: Vec<u64> = job.accepted_child_ids.clone();
+            all_validator_ids.extend_from_slice(&job.raw_ids);
+            all_validator_ids.sort();
+            all_validator_ids.dedup();
+            let all_participants = AggregationBits::from_validator_indices(&all_validator_ids);
+
+            let type1_start = std::time::Instant::now();
+            let proof = match AggregatedSignatureProof::aggregate_with_children(
+                all_participants,
+                &children_arg,
+                job.raw_pubkeys.clone(),
+                job.raw_sigs.clone(),
+                job.data_root,
+                job.attestation_data.slot.0 as u32,
+                log_inv_rate,
+            ) {
+                Ok(p) => {
+                    stop_and_record(timer);
+                    info!(
+                        slot = slot.0,
+                        raws = job.raw_ids.len(),
+                        children = job.children.len(),
+                        duration_ms = type1_start.elapsed().as_millis() as u64,
+                        "type1_prove",
+                    );
+                    p
+                }
+                Err(e) => {
+                    stop_and_discard(timer);
+                    warn!(
+                        error = %e,
+                        data_root = %format!("0x{:x}", job.data_root),
+                        "Aggregated signature build failed"
+                    );
+                    continue;
+                }
+            };
+
+            info!(
+                slot = slot.0,
+                validators = job.raw_ids.len() + job.accepted_child_ids.len(),
+                children = job.children.len(),
+                data_root = %format!("0x{:x}", job.data_root),
+                "Created aggregated attestation"
+            );
+
+            aggregated_attestations.push(SignedAggregatedAttestation {
+                data: job.attestation_data.clone(),
+                proof,
+            });
+
+            if !job.raw_ids.is_empty() {
+                consumed_data_roots.insert(job.data_root);
+            }
         }
 
-        // data_roots whose raw gossip sigs were consumed into a proof; the caller will
-        // remove these from the store to match spec cleanup semantics.
-        let mut aggregated_attestations = Vec::with_capacity(results.len());
-        let mut consumed_data_roots = HashSet::with_capacity(results.len());
-        for (attestation, root) in results {
-            aggregated_attestations.push(attestation);
-            consumed_data_roots.insert(root);
+        if aggregated_attestations.is_empty() {
+            return None;
         }
 
         Some((aggregated_attestations, consumed_data_roots))
@@ -552,36 +579,87 @@ impl ValidatorService {
     /// The validator task calls `BuildAttestationData` on the chain task first,
     /// receives the `AttestationData` via oneshot, then calls this method.
     /// This keeps XMSS signing (~170ms) entirely off the chain task's thread.
-    pub fn sign_block_with_data(
+    pub async fn sign_block_with_data(
         &self,
         block: Block,
         validator_index: u64,
         attestation_signatures: Vec<AggregatedSignatureProof>,
+        validators: Validators,
+        log_inv_rate: usize,
     ) -> Result<SignedBlock> {
         let Some(key_manager) = self.key_manager.as_ref() else {
             bail!("unable to sign block - keymanager not configured");
         };
 
-        let proposer_signature = {
+        let exec = self.cpu_snark_executor.clone();
+        let km = Arc::clone(key_manager);
+
+        let job = exec.spawn(async move {
+            let block_root = block.hash_tree_root();
+            let block_slot = block.slot.0 as u32;
+
+            let proposer = validators
+                .get(validator_index)
+                .context(format!("proposer {validator_index} not found in state"))?;
+            let proposer_proposal_pubkey = proposer.proposal_pubkey.clone();
+
             let sign_timer = METRICS.get().map(|metrics| {
                 metrics
                     .lean_pq_sig_attestation_signing_time_seconds
                     .start_timer()
             });
+            let proposer_raw_signature = km
+                .sign_proposal(validator_index, block_slot, block_root)
+                .context("failed to sign block root")
+                .inspect_err(|_| stop_and_discard(sign_timer))?;
 
-            key_manager
-                .sign_proposal(validator_index, block.slot.0 as u32, block.hash_tree_root())
-                .context("failed to sign block")
-                .inspect_err(|_| stop_and_discard(sign_timer))?
-        };
+            let proposer_type1 = AggregatedSignature::aggregate(
+                [proposer_proposal_pubkey.clone()],
+                [proposer_raw_signature],
+                block_root,
+                block_slot,
+                log_inv_rate,
+            )
+            .context("failed to wrap proposer signature into Type-1 aggregate")?;
 
-        let signature = BlockSignatures {
-            attestation_signatures: AttestationSignatures::try_from_iter(attestation_signatures)
-                .context("invalid attestation signatures")?,
-            proposer_signature,
-        };
+            let mut pubkeys_owned: Vec<Vec<xmss::PublicKey>> =
+                Vec::with_capacity(attestation_signatures.len() + 1);
+            for sig in &attestation_signatures {
+                let mut pks = Vec::new();
+                for vid in sig.participants.to_validator_indices() {
+                    let v = validators
+                        .get(vid)
+                        .context(format!("attester {vid} not found in state"))?;
+                    pks.push(v.attestation_pubkey.clone());
+                }
+                pubkeys_owned.push(pks);
+            }
+            pubkeys_owned.push(vec![proposer_proposal_pubkey]);
 
-        Ok(SignedBlock { block, signature })
+            let mut parts: Vec<(&AggregatedSignature, &[xmss::PublicKey])> =
+                Vec::with_capacity(attestation_signatures.len() + 1);
+            for (i, sig) in attestation_signatures.iter().enumerate() {
+                parts.push((&sig.proof_data, pubkeys_owned[i].as_slice()));
+            }
+            parts.push((
+                &proposer_type1,
+                pubkeys_owned[attestation_signatures.len()].as_slice(),
+            ));
+
+            let type2_start = std::time::Instant::now();
+            let proof = MultiMessageAggregate::aggregate(&parts, log_inv_rate)
+                .context("failed to assemble Type-2 block proof")?;
+            info!(
+                block_slot,
+                parts = parts.len(),
+                duration_ms = type2_start.elapsed().as_millis() as u64,
+                "type2_prove",
+            );
+
+            Ok(SignedBlock { block, proof })
+        });
+
+        job.await.unwrap_or_else(|e| Err(anyhow!("executor: {e}")))
     }
 
     /// Create and sign attestations for all validators given pre-fetched attestation data.

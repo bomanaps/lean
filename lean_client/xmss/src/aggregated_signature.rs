@@ -4,27 +4,26 @@ use std::{str::FromStr, sync::Once};
 use crate::{PublicKey, Signature};
 use anyhow::{Context, Error, Result, anyhow, bail};
 use ethereum_types::H256;
+use leansig_wrapper::XmssPublicKey;
 use metrics::{METRICS, stop_and_discard};
 use rec_aggregation::{
-    AggregatedXMSS, init_aggregation_bytecode, xmss_aggregate, xmss_verify_aggregation,
+    SingleMessageAggregateSignature, aggregate_single_message_signatures,
+    init_aggregation_bytecode, verify_single_message_aggregate,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use ssz::{ByteList, ReadError, Size, SszHash, SszRead, SszSize, SszWrite, U1, WriteError};
-use typenum::U1048576;
+use typenum::U524288;
 
-/// Max size currently is 1MiB by spec.
-type AggregatedSignatureSizeLimit = U1048576;
+/// Spec: `SingleMessageAggregate.proof: ByteList512KiB` (524 288 bytes).
+type AggregatedSignatureSizeLimit = U524288;
 
 /// Cryptographic proof that a set of validators signed a message.
 ///
-/// Note: this doesn't follow spec a bit - in spec this would be a `proof_data`
-///   field of AggregatedSignatureProof type. Implemented like this to have a
-///   bit of nice encapsulation, so that xmss-related types don't leak
-///   abstraction into containers crate.
-///
-/// SSZ traits are implemented manually (not derived) so that `SszRead` can validate
-/// the inner bytes via `AggregatedXMSS::deserialize` at decode time, rejecting
-/// malformed gossip messages at the boundary instead of panicking later in `as_lean`.
+/// Wire form: the lean-multisig `compress_without_pubkeys()` output. Pubkeys
+/// are not baked into the bytes — verifiers must supply them externally,
+/// matching `SingleMessageAggregate.proof: ByteList512KiB` in leanSpec
+/// (`forks/lstar/containers/aggregation.py`) and zeam's `xmss_verify_type_1`
+/// FFI which takes `pks + msg + slot + wire` as separate args.
 #[derive(Debug, Clone)]
 pub struct AggregatedSignature(ByteList<AggregatedSignatureSizeLimit>);
 
@@ -35,9 +34,6 @@ impl SszSize for AggregatedSignature {
 impl<C> SszRead<C> for AggregatedSignature {
     fn from_ssz_unchecked(context: &C, bytes: &[u8]) -> Result<Self, ReadError> {
         let inner = ByteList::<AggregatedSignatureSizeLimit>::from_ssz_unchecked(context, bytes)?;
-        AggregatedXMSS::decompress(inner.as_bytes()).ok_or(ReadError::Custom {
-            message: "invalid aggregated XMSS signature",
-        })?;
         Ok(Self(inner))
     }
 }
@@ -64,11 +60,7 @@ pub fn setup_aggregation() {
 impl AggregatedSignature {
     pub fn new(bytes: &[u8]) -> Result<Self> {
         let bytes = ByteList::try_from(bytes.to_vec())
-            .context("signature too large - currently max 1MiB signatures allowed")?;
-
-        AggregatedXMSS::decompress(bytes.as_bytes())
-            .ok_or_else(|| anyhow!("invalid aggregated signature"))?;
-
+            .context("signature too large - exceeds 512 KiB cap")?;
         Ok(Self(bytes))
     }
 
@@ -131,27 +123,15 @@ impl AggregatedSignature {
             .map(|(pk, sig)| (pk.as_lean(), sig.as_lean()))
             .collect::<Vec<_>>();
 
-        // Convert children: store owned XmssPublicKey Vecs and owned AggregatedXMSS values,
-        // then build the reference slice that xmss_aggregate expects.
-        let lean_pks_vec: Vec<Vec<_>> = children
+        let children_arg: Vec<SingleMessageAggregateSignature> = children
             .iter()
-            .map(|(pks, _)| pks.iter().map(|pk| pk.as_lean()).collect())
-            .collect();
-        let lean_agg_vec: Vec<_> = children
-            .iter()
-            .map(|(_, agg)| agg.as_lean())
+            .map(|(pks, agg)| agg.as_lean(sorted_dedup_lean_pubkeys(pks)))
             .collect::<Result<Vec<_>>>()?;
 
-        let children_arg: Vec<(&[_], _)> = lean_pks_vec
-            .iter()
-            .zip(lean_agg_vec.into_iter())
-            .map(|(pks, agg)| (pks.as_slice(), agg))
-            .collect();
-
-        let (_pub_keys, agg) = xmss_aggregate(
+        let agg = aggregate_single_message_signatures(
             &children_arg,
             raw_xmss,
-            message.as_fixed_bytes(),
+            *message.as_fixed_bytes(),
             slot,
             log_inv_rate,
         )?;
@@ -162,9 +142,9 @@ impl AggregatedSignature {
                 .inc_by(sig_count as u64)
         });
 
-        let bytes = agg.compress();
+        let bytes = agg.compress_without_pubkeys();
         Ok(Self(ByteList::try_from(bytes).context(
-            "aggregated proof too large - exceeds 1MiB limit",
+            "aggregated proof too large - exceeds 512 KiB cap",
         )?))
     }
 
@@ -182,32 +162,48 @@ impl AggregatedSignature {
                 .start_timer()
         });
 
-        let pub_keys = public_keys
+        let mut expected_pubkeys = public_keys
             .into_iter()
             .map(|k| k.as_lean())
             .collect::<Vec<_>>();
+        expected_pubkeys.sort();
+        expected_pubkeys.dedup();
 
-        let agg = self.as_lean()?;
+        let agg = self.as_lean(expected_pubkeys)?;
 
-        xmss_verify_aggregation(pub_keys, &agg, message.as_fixed_bytes(), slot)
+        if agg.info.without_pubkeys.message != *message.as_fixed_bytes() {
+            bail!("aggregated signature bound to a different message than expected");
+        }
+        if agg.info.without_pubkeys.slot != slot {
+            bail!("aggregated signature bound to a different slot than expected");
+        }
+
+        let result = verify_single_message_aggregate(&agg)
             .map(|_| ())
-            .map_err(|err| anyhow!("{err:?}"))
-            .inspect(|_| {
+            .map_err(|err| anyhow!("{err:?}"));
+
+        match &result {
+            Ok(()) => {
                 METRICS
                     .get()
                     .map(|metrics| metrics.lean_pq_sig_aggregated_signatures_valid_total.inc());
-            })
-            .inspect_err(|_| {
+            }
+            Err(_) => {
                 METRICS.get().map(|metrics| {
                     metrics
                         .lean_pq_sig_aggregated_signatures_invalid_total
                         .inc()
                 });
-            })
+            }
+        }
+        result
     }
 
-    fn as_lean(&self) -> Result<AggregatedXMSS> {
-        AggregatedXMSS::decompress(self.0.as_bytes())
+    pub(crate) fn as_lean(
+        &self,
+        pubkeys: Vec<XmssPublicKey>,
+    ) -> Result<SingleMessageAggregateSignature> {
+        SingleMessageAggregateSignature::decompress_without_pubkeys(self.0.as_bytes(), pubkeys)
             .ok_or_else(|| anyhow!("invalid aggregated XMSS signature"))
     }
 
@@ -215,6 +211,13 @@ impl AggregatedSignature {
     pub fn is_empty(&self) -> bool {
         self.0.as_bytes().is_empty()
     }
+}
+
+fn sorted_dedup_lean_pubkeys(pks: &[PublicKey]) -> Vec<XmssPublicKey> {
+    let mut lean: Vec<XmssPublicKey> = pks.iter().map(|pk| pk.as_lean()).collect();
+    lean.sort();
+    lean.dedup();
+    lean
 }
 
 impl Display for AggregatedSignature {

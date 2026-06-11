@@ -15,10 +15,12 @@ use tracing::warn;
 use typenum::U1024;
 
 pub const MAX_REQUEST_BLOCKS: usize = 1024;
+pub const MIN_SLOTS_FOR_BLOCK_REQUESTS: u64 = 3600;
 pub const MAX_PAYLOAD_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
 
 pub const STATUS_PROTOCOL_V1: &str = "/leanconsensus/req/status/1/ssz_snappy";
 pub const BLOCKS_BY_ROOT_PROTOCOL_V1: &str = "/leanconsensus/req/blocks_by_root/1/ssz_snappy";
+pub const BLOCKS_BY_RANGE_PROTOCOL_V1: &str = "/leanconsensus/req/blocks_by_range/1/ssz_snappy";
 
 /// Response codes for req/resp protocol messages.
 pub const RESPONSE_SUCCESS: u8 = 0;
@@ -31,6 +33,12 @@ pub type RequestedBlockRoots = PersistentList<H256, U1024>;
 #[derive(Clone, Debug, PartialEq, Eq, Ssz)]
 pub struct BlocksByRootRequest {
     pub roots: RequestedBlockRoots,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Ssz)]
+pub struct BlocksByRangeRequest {
+    pub start_slot: u64,
+    pub count: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -46,12 +54,14 @@ impl AsRef<str> for LeanProtocol {
 pub enum LeanRequest {
     Status(Status),
     BlocksByRoot(Vec<H256>),
+    BlocksByRange { start_slot: u64, count: u64 },
 }
 
 #[derive(Debug, Clone)]
 pub enum LeanResponse {
     Status(Status),
     BlocksByRoot(Vec<SignedBlock>),
+    BlocksByRange(Vec<SignedBlock>),
     Empty,
 }
 
@@ -127,6 +137,15 @@ impl LeanCodec {
                 }
                 let request = BlocksByRootRequest {
                     roots: request_roots,
+                };
+                request.to_ssz().map_err(|e| {
+                    io::Error::new(io::ErrorKind::Other, format!("SSZ encode failed: {e}"))
+                })?
+            }
+            LeanRequest::BlocksByRange { start_slot, count } => {
+                let request = BlocksByRangeRequest {
+                    start_slot: *start_slot,
+                    count: *count,
                 };
                 request.to_ssz().map_err(|e| {
                     io::Error::new(io::ErrorKind::Other, format!("SSZ encode failed: {e}"))
@@ -215,6 +234,17 @@ impl LeanCodec {
                 ));
             }
             Ok(LeanRequest::BlocksByRoot(roots))
+        } else if protocol.contains("blocks_by_range") {
+            let request = BlocksByRangeRequest::from_ssz_default(&ssz_bytes).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("SSZ decode BlocksByRangeRequest failed: {e:?}"),
+                )
+            })?;
+            Ok(LeanRequest::BlocksByRange {
+                start_slot: request.start_slot,
+                count: request.count,
+            })
         } else {
             Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -256,22 +286,34 @@ impl LeanCodec {
                 // Empty response: no chunks written (stream just ends)
                 Ok(result)
             }
+            LeanResponse::BlocksByRange(blocks) => {
+                let mut result = Vec::new();
+                for block in blocks {
+                    let ssz_bytes = block.to_ssz().map_err(|e| {
+                        io::Error::new(io::ErrorKind::Other, format!("SSZ encode failed: {e}"))
+                    })?;
+                    let chunk = Self::encode_response_chunk(RESPONSE_SUCCESS, &ssz_bytes)?;
+                    result.extend(chunk);
+                }
+                Ok(result)
+            }
             LeanResponse::Empty => Ok(Vec::new()),
         }
     }
 
-    /// Returns the byte length of one snappy framing stream starting at data[0].
+    /// Returns the byte length consumed by one ssz-snappy framed payload starting at data[0].
+    ///
+    /// Driven by `expected_uncompressed_size` from the response's varint prefix: we walk
+    /// chunk-by-chunk, accumulating each chunk's uncompressed contribution, and stop when
+    /// we've collected the declared message size.
     ///
     /// Snappy framing format (https://github.com/google/snappy/blob/main/framing_format.txt):
-    ///   Stream identifier chunk: [0xFF][0x06][0x00][0x00][s][N][a][P][p][Y]
-    ///   Data chunk:              [type][len_lo][len_mid][len_hi][data...]
-    ///
-    /// We scan through chunk headers to advance without decompressing.  The
-    /// stream identifier byte 0xFF cannot legally appear as a chunk type inside
-    /// a stream, so hitting 0xFF after the first chunk signals the start of the
-    /// next framing stream and therefore the end of this one.
-    fn snappy_frame_size(data: &[u8]) -> io::Result<usize> {
-        // Stream identifier is 10 bytes: 4-byte header + 6-byte "sNaPpY"
+    ///   0xFF (stream identifier):           fixed 10 bytes: [0xFF][0x06 0x00 0x00][s][N][a][P][p][Y]
+    ///   0x00 (compressed data):             [type][len:3LE][crc:4][snappy_block]
+    ///   0x01 (uncompressed data):           [type][len:3LE][crc:4][raw_bytes]
+    ///   0x80..=0xFF (reserved skippable):   skip whole chunk, contributes 0 to uncompressed
+    ///   0x02..=0x7F (reserved unskippable): MUST reject per spec
+    fn snappy_frame_size(data: &[u8], expected_uncompressed_size: usize) -> io::Result<usize> {
         const STREAM_ID: &[u8] = b"\xff\x06\x00\x00sNaPpY";
         if data.len() < STREAM_ID.len() || &data[..STREAM_ID.len()] != STREAM_ID {
             return Err(io::Error::new(
@@ -281,31 +323,78 @@ impl LeanCodec {
         }
 
         let mut pos = STREAM_ID.len();
-        while pos < data.len() {
-            // 0xFF marks the start of a new snappy stream — this stream ends here.
-            if data[pos] == 0xFF {
-                break;
-            }
+        let mut uncompressed_len = 0_usize;
+
+        while uncompressed_len < expected_uncompressed_size {
             if pos + 4 > data.len() {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "Truncated snappy chunk header",
                 ));
             }
-            // 3-byte LE length field (bytes 1..=3 of header)
+            let chunk_type = data[pos];
             let chunk_len =
                 u32::from_le_bytes([data[pos + 1], data[pos + 2], data[pos + 3], 0]) as usize;
+
             if pos + 4 + chunk_len > data.len() {
                 return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
+                    io::ErrorKind::UnexpectedEof,
                     format!(
-                        "snappy chunk_len {} at pos {} exceeds buffer len {}",
+                        "Truncated snappy chunk: type=0x{:02x} chunk_len={} at pos={} buffer={}",
+                        chunk_type,
                         chunk_len,
                         pos,
                         data.len()
                     ),
                 ));
             }
+            let chunk_payload = &data[pos + 4..pos + 4 + chunk_len];
+
+            let chunk_uncompressed_len = match chunk_type {
+                // Compressed: [4-byte CRC][snappy block]. snap::raw::decompress_len reads the
+                // uncompressed length from the block's own varint header without decompressing.
+                0x00 => {
+                    let block = chunk_payload.get(4..).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "Compressed chunk missing CRC")
+                    })?;
+                    snap::raw::decompress_len(block).map_err(|err| {
+                        io::Error::new(io::ErrorKind::InvalidData, format!("snappy len: {err}"))
+                    })?
+                }
+                // Uncompressed: [4-byte CRC][raw bytes] → contributes chunk_len - 4 bytes.
+                0x01 => chunk_len.checked_sub(4).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "Uncompressed chunk missing CRC")
+                })?,
+                // Reserved skippable (includes mid-stream 0xFF stream identifier).
+                0x80..=0xFF => 0,
+                // Reserved unskippable: MUST reject per snappy framing spec.
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "Reserved unskippable snappy chunk type 0x{:02x}",
+                            chunk_type
+                        ),
+                    ));
+                }
+            };
+
+            uncompressed_len = uncompressed_len
+                .checked_add(chunk_uncompressed_len)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "Uncompressed size overflow")
+                })?;
+
+            if uncompressed_len > expected_uncompressed_size {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Snappy uncompressed_len {} exceeds varint-declared {}",
+                        uncompressed_len, expected_uncompressed_size
+                    ),
+                ));
+            }
+
             pos += 4 + chunk_len;
         }
 
@@ -343,7 +432,7 @@ impl LeanCodec {
 
         // Determine the byte length of this snappy framing stream so we know
         // exactly where the next chunk begins (required for multi-block responses).
-        let frame_size = Self::snappy_frame_size(&data[payload_start..])?;
+        let frame_size = Self::snappy_frame_size(&data[payload_start..], declared_len as usize)?;
         let payload_end = payload_start + frame_size;
 
         let ssz_bytes = Self::decompress(&data[payload_start..payload_end])?;
@@ -415,6 +504,33 @@ impl LeanCodec {
                 blocks.push(block);
             }
             Ok(LeanResponse::BlocksByRoot(blocks))
+        } else if protocol.contains("blocks_by_range") {
+            let mut blocks = Vec::new();
+            let mut offset = 0;
+            while offset < data.len() {
+                let (code, ssz_bytes, consumed) = Self::decode_response_chunk(&data[offset..])?;
+                offset += consumed;
+
+                if code != RESPONSE_SUCCESS {
+                    warn!(
+                        response_code = code,
+                        "BlocksByRange non-success response chunk"
+                    );
+                    continue;
+                }
+                if ssz_bytes.is_empty() {
+                    continue;
+                }
+
+                let block = SignedBlock::from_ssz_default(&ssz_bytes).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("SSZ decode Block failed: {e:?}"),
+                    )
+                })?;
+                blocks.push(block);
+            }
+            Ok(LeanResponse::BlocksByRange(blocks))
         } else {
             Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -424,64 +540,71 @@ impl LeanCodec {
     }
 }
 
-#[async_trait]
 impl Codec for LeanCodec {
     type Protocol = LeanProtocol;
     type Request = LeanRequest;
     type Response = LeanResponse;
 
-    async fn read_request<T>(
+    fn read_request<T>(
         &mut self,
         protocol: &Self::Protocol,
         io: &mut T,
-    ) -> io::Result<Self::Request>
+    ) -> impl core::future::Future<Output = io::Result<Self::Request>> + Send
     where
         T: AsyncRead + Unpin + Send,
     {
-        let mut data = Vec::new();
-        io.read_to_end(&mut data).await?;
-        Self::decode_request(&protocol.0, &data)
+        async move {
+            let mut data = Vec::new();
+            io.read_to_end(&mut data).await?;
+            Self::decode_request(&protocol.0, &data)
+        }
     }
 
-    async fn read_response<T>(
+    fn read_response<T>(
         &mut self,
         protocol: &Self::Protocol,
         io: &mut T,
-    ) -> io::Result<Self::Response>
+    ) -> impl core::future::Future<Output = io::Result<Self::Response>> + Send
     where
         T: AsyncRead + Unpin + Send,
     {
-        let mut data = Vec::new();
-        io.read_to_end(&mut data).await?;
-        Self::decode_response(&protocol.0, &data)
+        async move {
+            let mut data = Vec::new();
+            io.read_to_end(&mut data).await?;
+            Self::decode_response(&protocol.0, &data)
+        }
     }
 
-    async fn write_request<T>(
+    fn write_request<T>(
         &mut self,
         _protocol: &Self::Protocol,
         io: &mut T,
         request: Self::Request,
-    ) -> io::Result<()>
+    ) -> impl core::future::Future<Output = io::Result<()>> + Send
     where
         T: AsyncWrite + Unpin + Send,
     {
-        let data = Self::encode_request(&request)?;
-        io.write_all(&data).await?;
-        io.close().await
+        async move {
+            let data = Self::encode_request(&request)?;
+            io.write_all(&data).await?;
+            io.close().await
+        }
     }
 
-    async fn write_response<T>(
+    fn write_response<T>(
         &mut self,
         _protocol: &Self::Protocol,
         io: &mut T,
         response: Self::Response,
-    ) -> io::Result<()>
+    ) -> impl core::future::Future<Output = io::Result<()>> + Send
     where
         T: AsyncWrite + Unpin + Send,
     {
-        let data = Self::encode_response(&response)?;
-        io.write_all(&data).await?;
-        io.close().await
+        async move {
+            let data = Self::encode_response(&response)?;
+            io.write_all(&data).await?;
+            io.close().await
+        }
     }
 }
 
@@ -503,62 +626,69 @@ pub struct GenericRequest(pub Vec<u8>);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenericResponse(pub Vec<u8>);
 
-#[async_trait]
 impl Codec for GenericCodec {
     type Protocol = GenericProtocol;
     type Request = GenericRequest;
     type Response = GenericResponse;
 
-    async fn read_request<T>(
+    fn read_request<T>(
         &mut self,
         _protocol: &Self::Protocol,
         io: &mut T,
-    ) -> io::Result<Self::Request>
+    ) -> impl core::future::Future<Output = io::Result<Self::Request>> + Send
     where
         T: AsyncRead + Unpin + Send,
     {
-        let mut data = Vec::new();
-        io.read_to_end(&mut data).await?;
-        Ok(GenericRequest(data))
+        async move {
+            let mut data = Vec::new();
+            io.read_to_end(&mut data).await?;
+            Ok(GenericRequest(data))
+        }
     }
 
-    async fn read_response<T>(
+    fn read_response<T>(
         &mut self,
         _protocol: &Self::Protocol,
         io: &mut T,
-    ) -> io::Result<Self::Response>
+    ) -> impl core::future::Future<Output = io::Result<Self::Response>> + Send
     where
         T: AsyncRead + Unpin + Send,
     {
-        let mut data = Vec::new();
-        io.read_to_end(&mut data).await?;
-        Ok(GenericResponse(data))
+        async move {
+            let mut data = Vec::new();
+            io.read_to_end(&mut data).await?;
+            Ok(GenericResponse(data))
+        }
     }
 
-    async fn write_request<T>(
+    fn write_request<T>(
         &mut self,
         _protocol: &Self::Protocol,
         io: &mut T,
         GenericRequest(data): Self::Request,
-    ) -> io::Result<()>
+    ) -> impl core::future::Future<Output = io::Result<()>> + Send
     where
         T: AsyncWrite + Unpin + Send,
     {
-        io.write_all(&data).await?;
-        io.close().await
+        async move {
+            io.write_all(&data).await?;
+            io.close().await
+        }
     }
 
-    async fn write_response<T>(
+    fn write_response<T>(
         &mut self,
         _protocol: &Self::Protocol,
         io: &mut T,
         GenericResponse(data): Self::Response,
-    ) -> io::Result<()>
+    ) -> impl core::future::Future<Output = io::Result<()>> + Send
     where
         T: AsyncWrite + Unpin + Send,
     {
-        io.write_all(&data).await?;
-        io.close().await
+        async move {
+            io.write_all(&data).await?;
+            io.close().await
+        }
     }
 }
 
@@ -588,4 +718,9 @@ pub fn build_status() -> ReqResp {
 /// Build a RequestResponse behavior for BlocksByRoot protocol only
 pub fn build_blocks_by_root() -> ReqResp {
     build(vec![BLOCKS_BY_ROOT_PROTOCOL_V1.to_string()])
+}
+
+/// Build a RequestResponse behavior for BlocksByRange protocol only
+pub fn build_blocks_by_range() -> ReqResp {
+    build(vec![BLOCKS_BY_RANGE_PROTOCOL_V1.to_string()])
 }

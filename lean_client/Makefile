@@ -86,6 +86,7 @@ clean:
 x86_64-unknown-linux-gnu: ./target/x86_64-unknown-linux-gnu/release/lean_client
 
 ./target/x86_64-unknown-linux-gnu/release/lean_client:
+	CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C target-cpu=x86-64-v3" \
 	LEAN_REPO_ROOT=$(LEAN_REPO_ROOT) cross build --bin lean_client --target x86_64-unknown-linux-gnu --profile release
 
 .PHONY: aarch64-unknown-linux-gnu

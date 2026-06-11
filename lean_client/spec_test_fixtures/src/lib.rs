@@ -19,9 +19,9 @@ pub mod verify_signatures;
 pub use common::{
     HexBytesJSON, TestAggregatedAttestation, TestAggregatedSignatureProofFixture,
     TestAggregationBits, TestAnchorBlock, TestAnchorState, TestAttestation, TestAttestationData,
-    TestBlock, TestBlockBody, TestBlockHeader, TestBlockSignaturesFixture,
-    TestBlockWithAttestation, TestCheckpoint, TestConfig, TestDataWrapper, TestSignedBlock,
-    TestValidator, parse_root,
+    TestBlock, TestBlockBody, TestBlockHeader, TestBlockWithAttestation, TestCheckpoint,
+    TestConfig, TestDataWrapper, TestMultiMessageAggregateFixture, TestSignedBlock, TestValidator,
+    parse_root,
 };
 pub use fork_choice::{
     AttestationCheck, ForkChoiceStep, ForkChoiceTest, GossipAggregatedAttestationStep,
