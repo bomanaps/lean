@@ -44,7 +44,7 @@ impl AggregationService {
         vs: Arc<ValidatorService>,
         store: Arc<RwLock<Store>>,
         log_rate: usize,
-        cpu_snark_executor: Arc<DedicatedExecutor>,
+        cpu_aggregation_executor: Arc<DedicatedExecutor>,
     ) -> Self {
         let (agg_tx, mut agg_rx) = watch::channel::<Option<u64>>(None);
         let (res_tx, res_rx) = mpsc::channel::<(
@@ -106,8 +106,8 @@ impl AggregationService {
                 });
 
                 let cancel_for_worker = cancel.clone();
-                let snark_exec = cpu_snark_executor.clone();
-                let job = snark_exec.spawn(async move {
+                let agg_exec = cpu_aggregation_executor.clone();
+                let job = agg_exec.spawn(async move {
                     vs.maybe_aggregate(&snapshot, Slot(slot), log_rate, &cancel_for_worker)
                 });
                 let result = job.await.unwrap_or(None);

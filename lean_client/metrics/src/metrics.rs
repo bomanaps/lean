@@ -65,6 +65,7 @@ pub struct Metrics {
     pub lean_fork_choice_block_processing_time_seconds: Histogram,
 
     /// Total number of valid attestations
+    pub lean_aggregator_skipped_total: IntCounterVec,
     pub lean_attestations_valid_total: IntCounterVec,
 
     /// Total number of invalid attestations
@@ -189,7 +190,9 @@ pub struct Metrics {
     pub grandine_validator_chain_message_channel_depth: IntGauge,
     pub grandine_verify_result_channel_depth: IntGauge,
     pub grandine_cpu_normal_executor_tasks_in_flight: IntGauge,
-    pub grandine_cpu_low_executor_tasks_in_flight: IntGauge,
+    pub grandine_cpu_snark_executor_tasks_in_flight: IntGauge,
+    pub grandine_cpu_verify_executor_tasks_in_flight: IntGauge,
+    pub grandine_cpu_aggregation_executor_tasks_in_flight: IntGauge,
     pub grandine_reaggregate_candidates_selected_total: IntCounterVec,
     pub grandine_reaggregate_split_outcomes_total: IntCounterVec,
 
@@ -339,6 +342,13 @@ impl Metrics {
                 "Time taken to process block",
                 vec![0.005, 0.01, 0.025, 0.05, 0.1, 1.0, 1.25, 1.5, 2.0, 4.0]
             ))?,
+            lean_aggregator_skipped_total: IntCounterVec::new(
+                opts!(
+                    "lean_aggregator_skipped_total",
+                    "Aggregation submissions skipped, by reason",
+                ),
+                &["reason"],
+            )?,
             lean_attestations_valid_total: IntCounterVec::new(
                 opts!(
                     "lean_attestations_valid_total",
@@ -562,9 +572,17 @@ impl Metrics {
                 "grandine_cpu_normal_executor_tasks_in_flight",
                 "Active tasks on cpu_normal DedicatedExecutor (XMSS block verify + attestation signing combined)",
             )?,
-            grandine_cpu_low_executor_tasks_in_flight: IntGauge::new(
-                "grandine_cpu_low_executor_tasks_in_flight",
-                "Active tasks on cpu_low DedicatedExecutor (reaggregate split_type_2 work)",
+            grandine_cpu_snark_executor_tasks_in_flight: IntGauge::new(
+                "grandine_cpu_snark_executor_tasks_in_flight",
+                "Active tasks on cpu_snark DedicatedExecutor (propose-build + propose-sign)",
+            )?,
+            grandine_cpu_verify_executor_tasks_in_flight: IntGauge::new(
+                "grandine_cpu_verify_executor_tasks_in_flight",
+                "Active tasks on cpu_verify DedicatedExecutor (reaggregate split + cascade-verify + gossip-block-verify + gossip-agg-att-verify)",
+            )?,
+            grandine_cpu_aggregation_executor_tasks_in_flight: IntGauge::new(
+                "grandine_cpu_aggregation_executor_tasks_in_flight",
+                "Active tasks on cpu_aggregation DedicatedExecutor (aggregation worker, isolated from propose)",
             )?,
             grandine_reaggregate_candidates_selected_total: IntCounterVec::new(
                 opts!(
@@ -795,6 +813,18 @@ impl Metrics {
         default_registry.register(Box::new(
             self.lean_fork_choice_block_processing_time_seconds.clone(),
         ))?;
+        default_registry.register(Box::new(self.lean_aggregator_skipped_total.clone()))?;
+        for &reason in &[
+            "not_aggregator",
+            "not_synced",
+            "missing_state",
+            "spawn_failed",
+            "other",
+        ] {
+            self.lean_aggregator_skipped_total
+                .with_label_values(&[reason])
+                .inc_by(0);
+        }
         default_registry.register(Box::new(self.lean_attestations_valid_total.clone()))?;
         default_registry.register(Box::new(self.lean_attestations_invalid_total.clone()))?;
         default_registry.register(Box::new(
@@ -874,7 +904,14 @@ impl Metrics {
             self.grandine_cpu_normal_executor_tasks_in_flight.clone(),
         ))?;
         default_registry.register(Box::new(
-            self.grandine_cpu_low_executor_tasks_in_flight.clone(),
+            self.grandine_cpu_snark_executor_tasks_in_flight.clone(),
+        ))?;
+        default_registry.register(Box::new(
+            self.grandine_cpu_verify_executor_tasks_in_flight.clone(),
+        ))?;
+        default_registry.register(Box::new(
+            self.grandine_cpu_aggregation_executor_tasks_in_flight
+                .clone(),
         ))?;
         default_registry.register(Box::new(
             self.grandine_reaggregate_candidates_selected_total.clone(),
