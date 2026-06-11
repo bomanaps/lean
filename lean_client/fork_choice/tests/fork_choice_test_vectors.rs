@@ -1,7 +1,8 @@
 use containers::{
     AggregatedAttestation, AggregationBits, Attestation, AttestationData, Block, BlockBody,
-    BlockHeader, BlockSignatures, Checkpoint, Config, HistoricalBlockHashes, JustificationRoots,
-    JustificationValidators, JustifiedSlots, SignedBlock, Slot, State, Validator, Validators,
+    BlockHeader, Checkpoint, Config, HistoricalBlockHashes, JustificationRoots,
+    JustificationValidators, JustifiedSlots, MultiMessageAggregate, SignedBlock, Slot, State,
+    Validator, Validators,
 };
 use fork_choice::{
     block_cache::BlockCache,
@@ -221,7 +222,7 @@ impl Into<SignedBlock> for TestAnchorBlock {
 
         SignedBlock {
             block,
-            signature: BlockSignatures::default(),
+            proof: MultiMessageAggregate::default(),
         }
     }
 }
@@ -468,7 +469,7 @@ fn forkchoice(spec_file: &str) {
             body_root,
         };
 
-        let mut store = get_forkchoice_store(anchor_state, anchor_block, config, false);
+        let mut store = get_forkchoice_store(anchor_state, anchor_block, config, false, 1);
         let mut cache = BlockCache::new();
         let mut block_labels: HashMap<String, H256> = HashMap::new();
 
@@ -483,7 +484,7 @@ fn forkchoice(spec_file: &str) {
                         let block: Block = test_block.into();
                         let signed_block = SignedBlock {
                             block,
-                            signature: BlockSignatures::default(),
+                            proof: MultiMessageAggregate::default(),
                         };
                         let block_root = signed_block.block.hash_tree_root();
 

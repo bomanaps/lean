@@ -1,9 +1,11 @@
 mod aggregated_signature;
+mod multi_message;
 mod public_key;
 mod secret_key;
 mod signature;
 
 pub use aggregated_signature::{AggregatedSignature, setup_aggregation};
+pub use multi_message::MultiMessageAggregate;
 pub use public_key::PublicKey;
 pub use secret_key::SecretKey;
 pub use signature::Signature;

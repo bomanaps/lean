@@ -164,6 +164,15 @@ pub struct Metrics {
     /// Number of orphan blocks held in the backfill BlockCache (hard-capped at 1024)
     pub grandine_block_cache_size: IntGauge,
 
+    /// Number of attestations queued waiting for a missing block to arrive
+    pub grandine_pending_attestations_size: IntGauge,
+
+    /// Number of aggregated attestations queued waiting for a missing block to arrive
+    pub grandine_pending_aggregated_attestations_size: IntGauge,
+
+    /// Signed blocks in the networking-layer cache (hard-capped at 1024)
+    pub grandine_signed_block_provider_size: IntGauge,
+
     /// Gap between the network's current slot and the node's head slot (backfill depth)
     pub grandine_slots_behind: IntGauge,
 
@@ -180,6 +189,9 @@ pub struct Metrics {
     pub grandine_validator_chain_message_channel_depth: IntGauge,
     pub grandine_verify_result_channel_depth: IntGauge,
     pub grandine_cpu_normal_executor_tasks_in_flight: IntGauge,
+    pub grandine_cpu_low_executor_tasks_in_flight: IntGauge,
+    pub grandine_reaggregate_candidates_selected_total: IntCounterVec,
+    pub grandine_reaggregate_split_outcomes_total: IntCounterVec,
 
     /// Wall-clock time of the aggregation snapshot deep-clone. After V2, the
     /// clone runs on the aggregation worker thread (not the chain task), so this
@@ -506,6 +518,18 @@ impl Metrics {
                 "grandine_block_cache_size",
                 "Orphan blocks in backfill BlockCache (hard cap 1024)",
             )?,
+            grandine_pending_attestations_size: IntGauge::new(
+                "grandine_pending_attestations_size",
+                "Attestations queued waiting for a missing block to arrive",
+            )?,
+            grandine_pending_aggregated_attestations_size: IntGauge::new(
+                "grandine_pending_aggregated_attestations_size",
+                "Aggregated attestations queued waiting for a missing block to arrive",
+            )?,
+            grandine_signed_block_provider_size: IntGauge::new(
+                "grandine_signed_block_provider_size",
+                "Signed blocks in the networking-layer cache (hard cap 1024)",
+            )?,
             grandine_slots_behind: IntGauge::new(
                 "grandine_slots_behind",
                 "Current slot minus head slot — backfill depth and primary OOM risk indicator",
@@ -537,6 +561,24 @@ impl Metrics {
             grandine_cpu_normal_executor_tasks_in_flight: IntGauge::new(
                 "grandine_cpu_normal_executor_tasks_in_flight",
                 "Active tasks on cpu_normal DedicatedExecutor (XMSS block verify + attestation signing combined)",
+            )?,
+            grandine_cpu_low_executor_tasks_in_flight: IntGauge::new(
+                "grandine_cpu_low_executor_tasks_in_flight",
+                "Active tasks on cpu_low DedicatedExecutor (reaggregate split_type_2 work)",
+            )?,
+            grandine_reaggregate_candidates_selected_total: IntCounterVec::new(
+                opts!(
+                    "grandine_reaggregate_candidates_selected_total",
+                    "Reaggregate candidate-selection outcomes per block",
+                ),
+                &["outcome"],
+            )?,
+            grandine_reaggregate_split_outcomes_total: IntCounterVec::new(
+                opts!(
+                    "grandine_reaggregate_split_outcomes_total",
+                    "Reaggregate Type-2 split_by_message outcomes",
+                ),
+                &["outcome"],
             )?,
             lean_aggregation_snapshot_clone_seconds: Histogram::with_opts(histogram_opts!(
                 "lean_aggregation_snapshot_clone_seconds",
@@ -812,6 +854,11 @@ impl Metrics {
         default_registry.register(Box::new(self.grandine_attestation_data_by_root.clone()))?;
         default_registry.register(Box::new(self.grandine_pending_fetch_roots.clone()))?;
         default_registry.register(Box::new(self.grandine_block_cache_size.clone()))?;
+        default_registry.register(Box::new(self.grandine_pending_attestations_size.clone()))?;
+        default_registry.register(Box::new(
+            self.grandine_pending_aggregated_attestations_size.clone(),
+        ))?;
+        default_registry.register(Box::new(self.grandine_signed_block_provider_size.clone()))?;
         default_registry.register(Box::new(self.grandine_slots_behind.clone()))?;
         default_registry.register(Box::new(
             self.grandine_fork_choice_known_attestations.clone(),
@@ -825,6 +872,15 @@ impl Metrics {
         default_registry.register(Box::new(self.grandine_verify_result_channel_depth.clone()))?;
         default_registry.register(Box::new(
             self.grandine_cpu_normal_executor_tasks_in_flight.clone(),
+        ))?;
+        default_registry.register(Box::new(
+            self.grandine_cpu_low_executor_tasks_in_flight.clone(),
+        ))?;
+        default_registry.register(Box::new(
+            self.grandine_reaggregate_candidates_selected_total.clone(),
+        ))?;
+        default_registry.register(Box::new(
+            self.grandine_reaggregate_split_outcomes_total.clone(),
         ))?;
         default_registry.register(Box::new(
             self.lean_aggregation_snapshot_clone_seconds.clone(),

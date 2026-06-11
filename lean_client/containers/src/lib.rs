@@ -9,10 +9,10 @@ mod validator;
 
 pub use attestation::{
     AggregatedAttestation, AggregatedSignatureProof, AggregatedSignatures, AggregationBits,
-    Attestation, AttestationData, AttestationSignatures, Attestations, SignatureKey,
-    SignedAggregatedAttestation, SignedAttestation,
+    Attestation, AttestationData, Attestations, SignatureKey, SignedAggregatedAttestation,
+    SignedAttestation,
 };
-pub use block::{Block, BlockBody, BlockHeader, BlockSignatures, SignedBlock};
+pub use block::{Block, BlockBody, BlockHeader, SignedBlock};
 pub use checkpoint::Checkpoint;
 pub use config::{Config, GenesisConfig, GenesisValidatorEntry};
 pub use slot::Slot;
@@ -21,3 +21,4 @@ pub use state::{
 };
 pub use status::Status;
 pub use validator::{Validator, Validators};
+pub use xmss::MultiMessageAggregate;

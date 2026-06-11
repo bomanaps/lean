@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use containers::{
@@ -6,8 +7,10 @@ use containers::{
     State,
 };
 use metrics::METRICS;
+use parking_lot::RwLock;
 use ssz::{H256, SszHash};
 use tracing::warn;
+use xmss::PublicKey;
 
 use crate::block_cache::BlockCache;
 use crate::store::{
@@ -407,6 +410,19 @@ pub fn on_aggregated_attestation(
         .verify(public_keys, data_root, attestation_data.slot.0 as u32)
         .context("aggregated attestation proof verification failed")?;
 
+    let attestation_slot = attestation_data.slot;
+    for vid in &validator_ids {
+        if store
+            .latest_new_attestations
+            .get(vid)
+            .map_or(true, |existing| existing.slot < attestation_slot)
+        {
+            store
+                .latest_new_attestations
+                .insert(*vid, attestation_data.clone());
+        }
+    }
+
     // Store the verified proof in latest_new_aggregated_payloads, keyed by data_root
     store
         .latest_new_aggregated_payloads
@@ -424,6 +440,113 @@ pub fn on_aggregated_attestation(
             .lean_latest_new_aggregated_payloads
             .set(store.latest_new_aggregated_payloads.len() as i64);
     });
+
+    Ok(())
+}
+
+/// Three-phase variant of `on_aggregated_attestation` that releases the store
+/// lock across the XMSS verify SNARK. Phase 1 takes a brief read borrow to
+/// validate metadata and copy participant pubkeys; Phase 2 runs `proof.verify`
+/// with no lock held; Phase 3 takes a brief write borrow to insert results.
+pub fn on_aggregated_attestation_async(
+    store: Arc<RwLock<Store>>,
+    signed_aggregated_attestation: SignedAggregatedAttestation,
+) -> Result<()> {
+    enum Phase1 {
+        Pending(H256),
+        Verify(Vec<PublicKey>),
+    }
+
+    let attestation_data = signed_aggregated_attestation.data.clone();
+    let proof = signed_aggregated_attestation.proof.clone();
+    let data_root = attestation_data.hash_tree_root();
+
+    let phase1 = {
+        let s = store.read();
+
+        if let Some(missing_root) = find_unknown_attestation_block(&s, &attestation_data) {
+            Phase1::Pending(missing_root)
+        } else {
+            validate_attestation_data(&s, &attestation_data)?;
+
+            let key_state = s.states.get(&attestation_data.target.root).ok_or_else(|| {
+                anyhow!("no state for target block {}", attestation_data.target.root)
+            })?;
+
+            ensure!(
+                proof.participants.0.iter().any(|b| *b),
+                "aggregated attestation has empty participants bitfield"
+            );
+
+            let validator_ids = proof.participants.to_validator_indices();
+            let public_keys = validator_ids
+                .iter()
+                .map(|&id| {
+                    key_state
+                        .validators
+                        .get(id)
+                        .map(|v| v.attestation_pubkey.clone())
+                        .map_err(Into::into)
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            Phase1::Verify(public_keys)
+        }
+    };
+
+    match phase1 {
+        Phase1::Pending(missing_root) => {
+            let mut s = store.write();
+            s.pending_aggregated_attestations
+                .entry(missing_root)
+                .or_default()
+                .push(signed_aggregated_attestation);
+            s.pending_fetch_roots.insert(missing_root);
+            METRICS.get().map(|m| {
+                m.grandine_pending_fetch_roots
+                    .set(s.pending_fetch_roots.len() as i64)
+            });
+        }
+        Phase1::Verify(public_keys) => {
+            proof
+                .verify(public_keys, data_root, attestation_data.slot.0 as u32)
+                .context("aggregated attestation proof verification failed")?;
+
+            let mut s = store.write();
+            s.attestation_data_by_root
+                .insert(data_root, attestation_data.clone());
+            METRICS.get().map(|m| {
+                m.grandine_attestation_data_by_root
+                    .set(s.attestation_data_by_root.len() as i64)
+            });
+
+            let validator_ids = proof.participants.to_validator_indices();
+            let attestation_slot = attestation_data.slot;
+            for vid in &validator_ids {
+                if s.latest_new_attestations
+                    .get(vid)
+                    .map_or(true, |existing| existing.slot < attestation_slot)
+                {
+                    s.latest_new_attestations
+                        .insert(*vid, attestation_data.clone());
+                }
+            }
+
+            s.latest_new_aggregated_payloads
+                .entry(data_root)
+                .or_default()
+                .push(proof);
+            METRICS.get().map(|metrics| {
+                metrics
+                    .lean_attestations_valid_total
+                    .with_label_values(&["aggregation"])
+                    .inc();
+                metrics
+                    .lean_latest_new_aggregated_payloads
+                    .set(s.latest_new_aggregated_payloads.len() as i64);
+            });
+        }
+    }
 
     Ok(())
 }
@@ -538,7 +661,7 @@ pub fn verify_and_transition(
     if verify_signatures {
         signed_block.verify_signatures(parent_state.clone())?;
     }
-    parent_state.state_transition(signed_block, true)
+    parent_state.state_transition(&signed_block.block)
 }
 
 /// Store-mutating portion of block processing: must run on the chain task. Inserts the
@@ -680,28 +803,17 @@ pub fn apply_verified_block(
         );
     }
 
-    // Process block body attestations as on-chain (is_from_block=true)
-    let signatures = &signed_block.signature;
     let aggregated_attestations = &block.body.attestations;
 
-    // Store aggregated proofs indexed by (validator_id, data_root) for future block building
-    for (att_idx, aggregated_attestation) in aggregated_attestations.into_iter().enumerate() {
+    for aggregated_attestation in aggregated_attestations.into_iter() {
         let data_root = aggregated_attestation.data.hash_tree_root();
-
-        // Store attestation data for safe target extraction
-        // This is critical: without this, block attestations are invisible to update_safe_target()
         store
             .attestation_data_by_root
             .insert(data_root, aggregated_attestation.data.clone());
-
-        // Get the corresponding proof from attestation_signatures and store it keyed by data_root
-        if let Ok(proof_data) = signatures.attestation_signatures.get(att_idx as u64) {
-            store
-                .latest_known_aggregated_payloads
-                .entry(data_root)
-                .or_default()
-                .push(proof_data.clone());
-        }
+        store
+            .latest_known_aggregated_payloads
+            .entry(data_root)
+            .or_default();
     }
 
     // Update gauge for known aggregated payloads count
@@ -824,6 +936,16 @@ fn prune_with_retention_bounds(store: &mut Store) {
             .set(store.latest_new_aggregated_payloads.len() as i64);
         m.grandine_attestation_data_by_root
             .set(store.attestation_data_by_root.len() as i64);
+        let pending_atts: usize = store.pending_attestations.values().map(|v| v.len()).sum();
+        let pending_agg_atts: usize = store
+            .pending_aggregated_attestations
+            .values()
+            .map(|v| v.len())
+            .sum();
+        m.grandine_pending_attestations_size
+            .set(pending_atts as i64);
+        m.grandine_pending_aggregated_attestations_size
+            .set(pending_agg_atts as i64);
     });
 }
 

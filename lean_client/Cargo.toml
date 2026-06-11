@@ -251,10 +251,10 @@ indexmap = "2"
 http-body-util = "0.1"
 http_api_utils = { git = "https://github.com/grandinetech/grandine", rev = "64afdee3c6be79fceffb66933dcb69a943f3f1ae" }
 k256 = "0.13"
-rec_aggregation = { git = "https://github.com/leanEthereum/leanMultisig.git", rev = "f66d4a974eced803574eb0ea43d812e523c8d7ad" }
-leansig = { git = "https://github.com/leanEthereum/leanSig" }
-leansig_wrapper = { git = "https://github.com/leanEthereum/leanMultisig.git", rev = "f66d4a974eced803574eb0ea43d812e523c8d7ad" }
-libp2p = { version = "0.56.0", default-features = false, features = [
+rec_aggregation = { git = "https://github.com/leanEthereum/leanVM.git", rev = "e2592df4e30fdddbbf8ae26a333116c68cec7026" }
+leansig = { git = "https://github.com/leanEthereum/leanSig", branch = "devnet4" }
+leansig_wrapper = { git = "https://github.com/leanEthereum/leanVM.git", rev = "e2592df4e30fdddbbf8ae26a333116c68cec7026" }
+libp2p = { git = "https://github.com/lambdaclass/rust-libp2p.git", rev = "2f14d0ec9665a01cfb6a02326c90628c4bba521c", default-features = false, features = [
     'dns',
     'gossipsub',
     'identify',
@@ -266,8 +266,7 @@ libp2p = { version = "0.56.0", default-features = false, features = [
     'tokio',
     'yamux'
 ] }
-libp2p-identity = { version = "0.2", features = ["secp256k1"] }
-libp2p-mplex = "0.39"
+libp2p-identity = { version = "0.2.13", features = ["secp256k1"] }
 dedicated_executor = { path = "dedicated_executor" }
 num-bigint = "0.4"
 num-traits = "0.2"
@@ -329,6 +328,7 @@ metrics = { workspace = true }
 networking = { workspace = true }
 num_cpus = { workspace = true }
 parking_lot = { workspace = true }
+rayon = { workspace = true }
 ssz = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -337,3 +337,9 @@ validator = { workspace = true }
 xmss = { workspace = true }
 reqwest = { workspace = true }
 tikv-jemallocator = { workspace = true }
+
+[profile.release]
+debug = true
+split-debuginfo = "packed"
+lto = "thin"
+codegen-units = 1

@@ -19,8 +19,8 @@ pub fn create_test_store() -> Store {
 
     let signed_block = SignedBlock {
         block,
-        signature: Default::default(),
+        proof: Default::default(),
     };
 
-    get_forkchoice_store(state, signed_block, config, true)
+    get_forkchoice_store(state, signed_block, config, true, 1)
 }

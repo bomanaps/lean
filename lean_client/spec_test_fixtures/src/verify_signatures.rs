@@ -32,6 +32,8 @@ pub struct VerifySignaturesTestCase {
     pub signed_block: TestSignedBlock,
     #[serde(default)]
     pub expect_exception: Option<String>,
+    #[serde(default)]
+    pub rejection_reason: Option<String>,
     /// `_info` is a metadata blob the test harness emits for traceability.
     /// Not all fixtures populate every sub-field (and we do not consume any
     /// of them), so it is fully optional.

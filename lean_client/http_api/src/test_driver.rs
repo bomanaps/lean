@@ -17,7 +17,7 @@ use axum::{
     Json, Router, body::Bytes, extract::State as AxumState, http::StatusCode, routing::post,
 };
 use containers::{
-    AggregatedSignatureProof, BlockSignatures, Config, SignedAggregatedAttestation,
+    AggregatedSignatureProof, Config, MultiMessageAggregate, SignedAggregatedAttestation,
     SignedAttestation, SignedBlock, State,
 };
 use fork_choice::{
@@ -179,7 +179,7 @@ async fn init_fork_choice(
         genesis_time: anchor_state.config.genesis_time,
     };
 
-    let new_store = get_forkchoice_store(anchor_state, anchor_block, config, false);
+    let new_store = get_forkchoice_store(anchor_state, anchor_block, config, false, 1);
 
     *state.store.write() = new_store;
     *state.cache.write() = BlockCache::new();
@@ -254,11 +254,7 @@ async fn run_state_transition(body: Bytes) -> Json<StateTransitionResponse> {
 
     let mut last_err: Option<String> = None;
     for block in blocks {
-        let signed = SignedBlock {
-            block,
-            signature: BlockSignatures::default(),
-        };
-        match state.state_transition(signed, true) {
+        match state.state_transition(&block) {
             Ok(next) => state = next,
             Err(err) => {
                 last_err = Some(err.to_string());
@@ -372,7 +368,7 @@ fn apply_step(
             let block: containers::Block = block.into();
             let signed = SignedBlock {
                 block,
-                signature: BlockSignatures::default(),
+                proof: MultiMessageAggregate::default(),
             };
 
             // Advance store time to the block's slot before applying it.

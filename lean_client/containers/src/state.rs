@@ -13,12 +13,19 @@ use crate::{
     attestation::{
         AggregatedAttestation, AggregatedAttestations, AggregationBits, AttestationData,
     },
-    block::{Block, BlockBody, BlockHeader, SignedBlock},
+    block::{Block, BlockBody, BlockHeader},
     validator::{Validator, ValidatorRegistryLimit, Validators},
 };
 
 /// Maximum number of distinct AttestationData entries per block (spec: chain/config.py:36).
-const MAX_ATTESTATIONS_DATA: usize = 16;
+/// Used by the import-side validation so we accept any spec-valid block from other clients.
+pub(crate) const MAX_ATTESTATIONS_DATA: usize = 8;
+
+/// Producer-side cap on distinct AttestationData entries when *we* build a block.
+/// Lower than the spec ceiling so the per-block Type-2 MultiMessageAggregate prove
+/// fits inside the slot. Spec-permissible because MAX_ATTESTATIONS_DATA is a ceiling,
+/// not a floor (confirmed on 2026-06-10 spec call).
+pub(crate) const PRODUCER_MAX_ATTESTATIONS_DATA: usize = 4;
 
 type HistoricalRootsLimit = U262144; // 2^18
 
@@ -295,17 +302,10 @@ impl State {
         self
     }
 
-    pub fn state_transition(
-        &self,
-        signed_block: SignedBlock,
-        valid_signatures: bool,
-    ) -> Result<Self> {
-        ensure!(valid_signatures, "invalid block signatures");
-
+    pub fn state_transition(&self, block: &Block) -> Result<Self> {
         let _timer = METRICS
             .get()
             .map(|metrics| metrics.lean_state_transition_time_seconds.start_timer());
-        let block = &signed_block.block;
         let mut state = self.process_slots(block.slot)?;
         state = state.process_block(block)?;
 
@@ -500,6 +500,7 @@ impl State {
 
             let source = attestation.data.source.clone();
             let target = attestation.data.target.clone();
+            let head = attestation.data.head.clone();
 
             if !justified_slots.is_slot_justified(finalized_slot, source.slot)? {
                 info!("skipping attestation, source slot is not justified");
@@ -511,17 +512,16 @@ impl State {
                 continue;
             }
 
-            if source.root.is_zero() || target.root.is_zero() {
-                info!("skipping attestation, source or target slots are zero");
+            if source.root.is_zero() || target.root.is_zero() || head.root.is_zero() {
+                info!("skipping attestation, source/target/head root is zero");
                 continue;
             }
 
             if &source.root != self.historical_block_hashes.get(source.slot.0)?
                 || &target.root != self.historical_block_hashes.get(target.slot.0)?
+                || &head.root != self.historical_block_hashes.get(head.slot.0)?
             {
-                info!(
-                    "skipping attestation, source or target roots not found in historical block hashes"
-                );
+                info!("skipping attestation, source/target/head roots not on canonical chain");
                 continue;
             }
 
@@ -698,7 +698,12 @@ impl State {
                 &H256,
                 &(AttestationData, Vec<AggregatedSignatureProof>),
             )> = aggregated_payloads.iter().collect();
-            sorted_entries.sort_by_key(|(_, (data, _))| data.target.slot);
+            sorted_entries.sort_by_key(|(_, (data, _))| {
+                (
+                    std::cmp::Reverse(data.target.slot),
+                    std::cmp::Reverse(data.slot),
+                )
+            });
 
             let mut processed_data_roots: HashSet<H256> = HashSet::new();
 
@@ -714,8 +719,11 @@ impl State {
                     if processed_data_roots.contains(data_root) {
                         continue;
                     }
-                    if processed_data_roots.len() >= MAX_ATTESTATIONS_DATA {
+                    if processed_data_roots.len() >= PRODUCER_MAX_ATTESTATIONS_DATA {
                         break;
+                    }
+                    if att_data.target.slot <= att_data.source.slot {
+                        continue;
                     }
                     if !known_block_roots.contains(&att_data.head.root) {
                         continue;
@@ -732,12 +740,8 @@ impl State {
                         continue;
                     }
 
-                    let is_genesis_self_vote =
-                        att_data.source.slot == Slot(0) && att_data.target.slot == Slot(0);
-
-                    if !is_genesis_self_vote
-                        && current_justified_slots
-                            .is_slot_justified(current_finalized_slot, att_data.target.slot)?
+                    if current_justified_slots
+                        .is_slot_justified(current_finalized_slot, att_data.target.slot)?
                     {
                         continue;
                     }

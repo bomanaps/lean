@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use crate::unit_tests::common::create_test_store;
 use containers::{
     AggregatedSignatureProof, AggregationBits, Attestation, AttestationData, Block, BlockBody,
-    BlockSignatures, Checkpoint, Config, SignedBlock, Slot, State, Validator,
+    Checkpoint, Config, MultiMessageAggregate, SignedBlock, Slot, State, Validator,
 };
 use fork_choice::block_cache::BlockCache;
 use fork_choice::handlers::on_block;
@@ -21,7 +21,7 @@ use xmss::SecretKey;
 fn apply_block(store: &mut Store, block: &Block) {
     let signed_block = SignedBlock {
         block: block.clone(),
-        signature: BlockSignatures::default(),
+        proof: MultiMessageAggregate::default(),
     };
     let mut cache = BlockCache::new();
     on_block(store, &mut cache, signed_block, false).expect("on_block should succeed");
@@ -118,11 +118,11 @@ fn create_test_store_with_signers() -> (Store, HashMap<u64, SecretKey>) {
 
     let signed_block = SignedBlock {
         block,
-        signature: Default::default(),
+        proof: Default::default(),
     };
 
     (
-        get_forkchoice_store(state, signed_block, config, true),
+        get_forkchoice_store(state, signed_block, config, true, 1),
         keys,
     )
 }
@@ -511,10 +511,10 @@ fn test_validator_operations_empty_store() {
 
     let signed_block = SignedBlock {
         block: genesis,
-        signature: Default::default(),
+        proof: Default::default(),
     };
 
-    let mut store = get_forkchoice_store(state, signed_block, config, true);
+    let mut store = get_forkchoice_store(state, signed_block, config, true, 1);
 
     // Should be able to produce block and attestation
     let (_root, block, _sig) =
@@ -626,7 +626,7 @@ fn produce_and_apply(
         produce_block_with_signatures(store, slot, proposer, 1).expect("block production failed");
     let signed = SignedBlock {
         block,
-        signature: BlockSignatures::default(),
+        proof: MultiMessageAggregate::default(),
     };
     let block_root = signed.block.hash_tree_root();
     on_block(store, cache, signed, false).expect("on_block failed");
@@ -736,7 +736,7 @@ fn test_produce_block_closes_justification_gap() {
         .expect("build_block for sibling block_6 failed");
     let signed_block_6 = SignedBlock {
         block: block_6,
-        signature: BlockSignatures::default(),
+        proof: MultiMessageAggregate::default(),
     };
     let block_6_root = signed_block_6.block.hash_tree_root();
     on_block(&mut store, &mut cache, signed_block_6, false).expect("on_block for block_6 failed");
@@ -777,7 +777,7 @@ fn test_produce_block_closes_justification_gap() {
 
     let signed_block_7 = SignedBlock {
         block: block_7,
-        signature: BlockSignatures::default(),
+        proof: MultiMessageAggregate::default(),
     };
     on_block(&mut store, &mut cache, signed_block_7, false).expect("on_block for block_7 failed");
     assert_eq!(store.latest_justified, block_2_ckpt);
