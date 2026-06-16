@@ -58,12 +58,14 @@ impl From<TestCheckpoint> for Checkpoint {
 /// are loaded as strings; the conversion to `containers::Validator` parses
 /// them via `xmss::PublicKey::FromStr`.
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TestValidator {
-    /// Some fixtures emit `pubkey` instead of `attestationPubkey`; both map to
-    /// the same field.
-    #[serde(alias = "pubkey", alias = "attestationPubkey")]
+    /// Legacy single-key fixtures emit `pubkey` instead of the camelCase
+    /// `attestationPubkey`; `rename_all` handles the camelCase, the explicit
+    /// alias keeps the legacy form working.
+    #[serde(alias = "pubkey")]
     pub attestation_pubkey: String,
-    #[serde(default, alias = "proposalPubkey")]
+    #[serde(default)]
     pub proposal_pubkey: Option<String>,
     #[serde(default)]
     pub index: u64,

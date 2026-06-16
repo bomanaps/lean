@@ -2,7 +2,6 @@ mod attestation;
 mod block;
 mod checkpoint;
 mod config;
-mod serde_helpers;
 mod slot;
 mod state;
 mod status;
