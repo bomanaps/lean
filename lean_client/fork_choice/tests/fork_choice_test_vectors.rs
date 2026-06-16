@@ -178,12 +178,13 @@ struct TestDataWrapper<T> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct TestValidator {
     #[allow(dead_code)]
-    #[serde(alias = "pubkey", alias = "attestationPubkey")]
+    #[serde(alias = "pubkey")]
     attestation_pubkey: String,
     #[allow(dead_code)]
-    #[serde(default, alias = "proposalPubkey")]
+    #[serde(default)]
     proposal_pubkey: Option<String>,
     #[allow(dead_code)]
     #[serde(default)]
