@@ -254,7 +254,7 @@ k256 = "0.13"
 rec_aggregation = { git = "https://github.com/leanEthereum/leanVM.git", rev = "e2592df4e30fdddbbf8ae26a333116c68cec7026" }
 leansig = { git = "https://github.com/leanEthereum/leanSig", branch = "devnet4" }
 leansig_wrapper = { git = "https://github.com/leanEthereum/leanVM.git", rev = "e2592df4e30fdddbbf8ae26a333116c68cec7026" }
-libp2p = { git = "https://github.com/lambdaclass/rust-libp2p.git", rev = "2f14d0ec9665a01cfb6a02326c90628c4bba521c", default-features = false, features = [
+libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", rev = "91e8931e275bcd1c72791d18b09fea8b77209baf", default-features = false, features = [
     'dns',
     'gossipsub',
     'identify',

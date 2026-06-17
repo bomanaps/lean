@@ -1,4 +1,5 @@
 mod behaviour;
+mod range_sync;
 mod service;
 
 pub use behaviour::{LeanNetworkBehaviour, LeanNetworkBehaviourEvent};

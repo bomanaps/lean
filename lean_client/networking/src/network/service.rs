@@ -42,6 +42,7 @@ use crate::{
     enr_ext::EnrExt,
     gossipsub::{self, config::GossipsubConfig, message::GossipsubMessage, topic::GossipsubKind},
     network::behaviour::{LeanNetworkBehaviour, LeanNetworkBehaviourEvent},
+    network::range_sync::{MAX_SYNC_RANGE, RangeSyncState},
     req_resp::{self, LeanRequest, ReqRespMessage},
     types::{
         CanonicalBlocksProvider, ChainMessage, ChainMessageSink, ConnectionState,
@@ -212,6 +213,8 @@ where
     /// Peer head slots reported via Status; used by the caller to decide
     /// when a backfill should switch from per-root BlocksByRoot to batched BlocksByRange.
     peer_head_slots: HashMap<PeerId, u64>,
+    /// Active long-range sync session; `None` when up-to-date with peers.
+    range_sync_state: Option<RangeSyncState>,
     status_notify: Arc<Notify>,
 }
 
@@ -344,6 +347,7 @@ where
             network_finalized_slot,
             peer_finalized_slots: HashMap::new(),
             peer_head_slots: HashMap::new(),
+            range_sync_state: None,
             status_notify,
         };
 
@@ -519,6 +523,12 @@ where
 
                 self.peer_finalized_slots.remove(&peer_id);
                 self.peer_head_slots.remove(&peer_id);
+                if let Some(state) = &mut self.range_sync_state {
+                    state.fail_peer(&peer_id);
+                    if state.peer_set.is_empty() {
+                        self.range_sync_state = None;
+                    }
+                }
                 self.inflight_blocks_by_range
                     .retain(|_, (p, _, _)| *p != peer_id);
                 self.inflight_range_keys.retain(|(p, _, _)| *p != peer_id);
@@ -1272,18 +1282,59 @@ where
         self.peer_head_slots.insert(peer, peer_head_slot);
         self.recompute_network_finalized_slot();
 
-        if (peer_finalized_slot > our_finalized_slot || peer_head_slot > our_head_slot)
-            && !peer_head_root.is_zero()
-        {
+        if peer_head_slot > our_head_slot {
+            let gap = peer_head_slot - our_head_slot;
+            let start_slot = our_head_slot.saturating_add(1);
+            let end_exclusive = start_slot.saturating_add(gap.min(MAX_SYNC_RANGE));
+
+            match &mut self.range_sync_state {
+                Some(state) => state.merge_peer(peer, peer_head_slot, end_exclusive),
+                None => {
+                    self.range_sync_state = Some(RangeSyncState::new(
+                        start_slot..end_exclusive,
+                        peer,
+                        peer_head_slot,
+                    ));
+                }
+            }
+
             info!(
                 peer = %peer,
-                peer_head_slot,
-                our_head_slot,
+                start_slot,
+                gap,
+                "Long-range sync: triggering BlocksByRange"
+            );
+            self.drain_range_sync_batches();
+            return;
+        }
+
+        if peer_finalized_slot > our_finalized_slot && !peer_head_root.is_zero() {
+            info!(
+                peer = %peer,
                 peer_finalized = peer_finalized_slot,
                 our_finalized = our_finalized_slot,
-                "Peer is ahead — requesting head block to trigger backfill"
+                "Peer ahead on finalized only — fetching head root"
             );
             self.send_blocks_by_root_request(peer, vec![peer_head_root]);
+        }
+    }
+
+    /// Must only be called from the swarm event loop. `next_batch`'s
+    /// `in_flight` guard is not atomic against concurrent callers.
+    fn drain_range_sync_batches(&mut self) {
+        let Some(state) = &self.range_sync_state else {
+            return;
+        };
+        let Some((peer, range)) = state.next_batch() else {
+            return;
+        };
+
+        let start_slot = range.start;
+        let count = range.end - range.start;
+        self.send_blocks_by_range_request(peer, start_slot, count);
+
+        if let Some(state) = &mut self.range_sync_state {
+            state.in_flight = true;
         }
     }
 
@@ -1657,8 +1708,9 @@ where
                     response,
                     ..
                 } => {
-                    if let Some(key) = self.inflight_blocks_by_range.remove(&request_id) {
-                        self.inflight_range_keys.remove(&key);
+                    let requested = self.inflight_blocks_by_range.remove(&request_id);
+                    if let Some(ref key) = requested {
+                        self.inflight_range_keys.remove(key);
                     }
                     match response {
                         LeanResponse::BlocksByRange(blocks) => {
@@ -1668,49 +1720,83 @@ where
                                 "Received BlocksByRange response"
                             );
 
-                            {
-                                let mut provider = self.signed_block_provider.write();
-                                for block in &blocks {
-                                    let root = block.block.hash_tree_root();
-                                    provider.insert(root, block.clone());
-                                }
-                                if provider.len() > MAX_BLOCK_CACHE_SIZE {
-                                    let to_remove = provider.len() - MAX_BLOCK_CACHE_SIZE;
-                                    let mut slots: Vec<(H256, u64)> = provider
-                                        .iter()
-                                        .map(|(root, b)| (*root, b.block.slot.0))
-                                        .collect();
-                                    slots.sort_by_key(|(_, slot)| *slot);
-                                    for (root, _) in slots.into_iter().take(to_remove) {
-                                        provider.remove(&root);
+                            if blocks.is_empty() {
+                                if let Some(state) = &mut self.range_sync_state {
+                                    state.fail_peer(&peer);
+                                    if state.peer_set.is_empty() {
+                                        self.range_sync_state = None;
+                                        warn!("Long-range sync abandoned: no peers remaining after empty response");
                                     }
                                 }
-                                METRICS.get().map(|m| {
-                                    m.grandine_signed_block_provider_size
-                                        .set(provider.len() as i64)
-                                });
-                            }
+                                self.drain_range_sync_batches();
+                            } else {
+                                {
+                                    let mut provider = self.signed_block_provider.write();
+                                    for block in &blocks {
+                                        let root = block.block.hash_tree_root();
+                                        provider.insert(root, block.clone());
+                                    }
+                                    if provider.len() > MAX_BLOCK_CACHE_SIZE {
+                                        let to_remove = provider.len() - MAX_BLOCK_CACHE_SIZE;
+                                        let mut slots: Vec<(H256, u64)> = provider
+                                            .iter()
+                                            .map(|(root, b)| (*root, b.block.slot.0))
+                                            .collect();
+                                        slots.sort_by_key(|(_, slot)| *slot);
+                                        for (root, _) in slots.into_iter().take(to_remove) {
+                                            provider.remove(&root);
+                                        }
+                                    }
+                                    METRICS.get().map(|m| {
+                                        m.grandine_signed_block_provider_size
+                                            .set(provider.len() as i64)
+                                    });
+                                }
 
-                            let chain_sink = self.chain_message_sink.clone();
-                            tokio::spawn(async move {
-                                for block in blocks {
-                                    let slot = block.block.slot.0;
-                                    if let Err(e) = chain_sink
-                                        .send(ChainMessage::ProcessBlock {
-                                            signed_block: block,
-                                            is_trusted: false,
-                                            should_gossip: false,
-                                            cached_post_state: None,
-                                        })
-                                        .await
-                                    {
-                                        warn!(slot, ?e, "Failed to forward range block to chain");
+                                let chain_sink = self.chain_message_sink.clone();
+                                tokio::spawn(async move {
+                                    for block in blocks {
+                                        let slot = block.block.slot.0;
+                                        if let Err(e) = chain_sink
+                                            .send(ChainMessage::ProcessBlock {
+                                                signed_block: block,
+                                                is_trusted: false,
+                                                should_gossip: false,
+                                                cached_post_state: None,
+                                            })
+                                            .await
+                                        {
+                                            warn!(slot, ?e, "Failed to forward range block to chain");
+                                        }
+                                    }
+                                });
+
+                                if let Some((_, start_slot, count)) = requested {
+                                    let requested_end_slot =
+                                        start_slot.saturating_add(count).saturating_sub(1);
+                                    if let Some(state) = &mut self.range_sync_state {
+                                        state.complete_batch(requested_end_slot);
+                                        if state.current_range.is_empty()
+                                            || state.peer_set.is_empty()
+                                        {
+                                            self.range_sync_state = None;
+                                            info!("Long-range sync complete");
+                                        }
                                     }
                                 }
-                            });
+                                self.drain_range_sync_batches();
+                            }
                         }
                         _ => {
                             warn!(peer = %peer, "Unexpected response type on BlocksByRange protocol");
+                            if let Some(state) = &mut self.range_sync_state {
+                                state.fail_peer(&peer);
+                                if state.peer_set.is_empty() {
+                                    self.range_sync_state = None;
+                                    warn!("Long-range sync abandoned: no peers remaining after codec mismatch");
+                                }
+                            }
+                            self.drain_range_sync_batches();
                         }
                     }
                 }
@@ -1724,7 +1810,15 @@ where
                 if let Some(key) = self.inflight_blocks_by_range.remove(&request_id) {
                     self.inflight_range_keys.remove(&key);
                 }
+                if let Some(state) = &mut self.range_sync_state {
+                    state.fail_peer(&peer);
+                    if state.peer_set.is_empty() {
+                        self.range_sync_state = None;
+                        warn!("Long-range sync abandoned: no peers remaining");
+                    }
+                }
                 warn!(peer = %peer, ?error, "BlocksByRange outbound request failed");
+                self.drain_range_sync_batches();
             }
             Event::InboundFailure { peer, error, .. } => {
                 warn!(peer = %peer, ?error, "BlocksByRange inbound request failed");

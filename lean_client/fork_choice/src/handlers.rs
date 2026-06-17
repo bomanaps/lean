@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use containers::{
-    AttestationData, SignatureKey, SignedAggregatedAttestation, SignedAttestation, SignedBlock,
-    State,
+    AttestationData, Checkpoint, SignatureKey, SignedAggregatedAttestation, SignedAttestation,
+    SignedBlock, State,
 };
 use metrics::METRICS;
 use parking_lot::RwLock;
@@ -40,6 +40,7 @@ pub fn on_tick(store: &mut Store, time_millis: u64, has_proposal: bool) {
 /// 2. A vote cannot span backwards in time (source > target).
 /// 3. A vote cannot be for a future slot.
 /// 4. Checkpoint slots must match block slots.
+/// 5. Source, target, and head must lie on one parent chain.
 fn validate_attestation_data(store: &Store, data: &AttestationData) -> Result<()> {
     // Topology: history is linear and monotonic — source <= target <= head.
     ensure!(
@@ -81,6 +82,23 @@ fn validate_attestation_data(store: &Store, data: &AttestationData) -> Result<()
         head_block.slot.0
     );
 
+    ensure!(
+        checkpoint_is_ancestor(store, &data.source, &data.target),
+        "Source checkpoint {} (slot {}) is not an ancestor of target {} (slot {})",
+        data.source.root,
+        data.source.slot.0,
+        data.target.root,
+        data.target.slot.0,
+    );
+    ensure!(
+        checkpoint_is_ancestor(store, &data.target, &data.head),
+        "Target checkpoint {} (slot {}) is not an ancestor of head {} (slot {})",
+        data.target.root,
+        data.target.slot.0,
+        data.head.root,
+        data.head.slot.0,
+    );
+
     // Honest validators emit votes only after their slot has begun. Allow exactly
     // one interval (~800 ms) of clock skew between peers; a whole-slot margin would
     // let an adversary pre-publish next-slot aggregates ahead of any honest
@@ -97,6 +115,32 @@ fn validate_attestation_data(store: &Store, data: &AttestationData) -> Result<()
     );
 
     Ok(())
+}
+
+/// Returns whether `ancestor` lies on `descendant`'s parent chain.
+///
+/// An unknown root in the walk yields false (lineage cannot be proven).
+fn checkpoint_is_ancestor(
+    store: &Store,
+    ancestor: &Checkpoint,
+    descendant: &Checkpoint,
+) -> bool {
+    if ancestor.slot > descendant.slot {
+        return false;
+    }
+
+    let mut current_root = descendant.root;
+    while let Some(current_block) = store.blocks.get(&current_root) {
+        if current_block.slot == ancestor.slot {
+            return current_root == ancestor.root;
+        }
+        if current_block.slot < ancestor.slot {
+            return false;
+        }
+        current_root = current_block.parent_root;
+    }
+
+    false
 }
 
 /// Returns the first block root (source, target, or head) referenced by `attestation_data`
