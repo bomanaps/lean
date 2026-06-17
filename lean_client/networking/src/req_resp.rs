@@ -455,6 +455,12 @@ impl LeanCodec {
     /// [code][varint][snappy(block1)][code][varint][snappy(block2)]...
     fn decode_response(protocol: &str, data: &[u8]) -> io::Result<LeanResponse> {
         if data.is_empty() {
+            if protocol.contains("blocks_by_range") {
+                return Ok(LeanResponse::BlocksByRange(Vec::new()));
+            }
+            if protocol.contains("blocks_by_root") {
+                return Ok(LeanResponse::BlocksByRoot(Vec::new()));
+            }
             return Ok(LeanResponse::Empty);
         }
 
