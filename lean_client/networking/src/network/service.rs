@@ -1725,7 +1725,9 @@ where
                                     state.fail_peer(&peer);
                                     if state.peer_set.is_empty() {
                                         self.range_sync_state = None;
-                                        warn!("Long-range sync abandoned: no peers remaining after empty response");
+                                        warn!(
+                                            "Long-range sync abandoned: no peers remaining after empty response"
+                                        );
                                     }
                                 }
                                 self.drain_range_sync_batches();
@@ -1766,7 +1768,11 @@ where
                                             })
                                             .await
                                         {
-                                            warn!(slot, ?e, "Failed to forward range block to chain");
+                                            warn!(
+                                                slot,
+                                                ?e,
+                                                "Failed to forward range block to chain"
+                                            );
                                         }
                                     }
                                 });
@@ -1793,7 +1799,9 @@ where
                                 state.fail_peer(&peer);
                                 if state.peer_set.is_empty() {
                                     self.range_sync_state = None;
-                                    warn!("Long-range sync abandoned: no peers remaining after codec mismatch");
+                                    warn!(
+                                        "Long-range sync abandoned: no peers remaining after codec mismatch"
+                                    );
                                 }
                             }
                             self.drain_range_sync_batches();

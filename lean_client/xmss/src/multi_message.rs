@@ -18,7 +18,7 @@ type MultiMessageAggregateSizeLimit = U524288;
 
 #[derive(Clone, Debug, Default, Ssz)]
 pub struct MultiMessageAggregate {
-    pub proof: ByteList<MultiMessageAggregateSizeLimit>,
+    proof: ByteList<MultiMessageAggregateSizeLimit>,
 }
 
 impl MultiMessageAggregate {
