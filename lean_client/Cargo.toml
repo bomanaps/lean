@@ -339,7 +339,5 @@ reqwest = { workspace = true }
 tikv-jemallocator = { workspace = true }
 
 [profile.release]
-debug = true
-split-debuginfo = "packed"
-lto = "thin"
+lto = true
 codegen-units = 1

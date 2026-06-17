@@ -120,11 +120,7 @@ fn validate_attestation_data(store: &Store, data: &AttestationData) -> Result<()
 /// Returns whether `ancestor` lies on `descendant`'s parent chain.
 ///
 /// An unknown root in the walk yields false (lineage cannot be proven).
-fn checkpoint_is_ancestor(
-    store: &Store,
-    ancestor: &Checkpoint,
-    descendant: &Checkpoint,
-) -> bool {
+fn checkpoint_is_ancestor(store: &Store, ancestor: &Checkpoint, descendant: &Checkpoint) -> bool {
     if ancestor.slot > descendant.slot {
         return false;
     }
