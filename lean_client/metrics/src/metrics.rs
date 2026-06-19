@@ -66,6 +66,7 @@ pub struct Metrics {
 
     /// Total number of valid attestations
     pub lean_aggregator_skipped_total: IntCounterVec,
+    pub lean_chain_message_drop_total: IntCounterVec,
     pub lean_attestations_valid_total: IntCounterVec,
 
     /// Total number of invalid attestations
@@ -348,6 +349,13 @@ impl Metrics {
                     "Aggregation submissions skipped, by reason",
                 ),
                 &["reason"],
+            )?,
+            lean_chain_message_drop_total: IntCounterVec::new(
+                opts!(
+                    "lean_chain_message_drop_total",
+                    "Chain-message channel drops on full, by protocol",
+                ),
+                &["protocol"],
             )?,
             lean_attestations_valid_total: IntCounterVec::new(
                 opts!(
@@ -814,6 +822,12 @@ impl Metrics {
             self.lean_fork_choice_block_processing_time_seconds.clone(),
         ))?;
         default_registry.register(Box::new(self.lean_aggregator_skipped_total.clone()))?;
+        default_registry.register(Box::new(self.lean_chain_message_drop_total.clone()))?;
+        for &protocol in &["blocks_by_root", "blocks_by_range"] {
+            self.lean_chain_message_drop_total
+                .with_label_values(&[protocol])
+                .inc_by(0);
+        }
         for &reason in &[
             "not_aggregator",
             "not_synced",
