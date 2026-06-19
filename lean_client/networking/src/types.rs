@@ -263,6 +263,8 @@ pub enum OutboundP2pRequest {
 #[async_trait]
 pub trait ChainMessageSink<M>: Send + Sync + Clone {
     async fn send(&self, message: M) -> Result<()>;
+
+    fn try_send(&self, message: M) -> Result<(), mpsc::error::TrySendError<M>>;
 }
 
 #[async_trait]
@@ -272,6 +274,16 @@ impl<M: Send + 'static> ChainMessageSink<M> for mpsc::Sender<M> {
             .send(message)
             .await
             .map_err(|err| anyhow!("failed to send message to chain: {err}"));
+        if result.is_ok() {
+            METRICS.get().map(|m| {
+                m.grandine_chain_message_channel_depth.inc();
+            });
+        }
+        result
+    }
+
+    fn try_send(&self, message: M) -> Result<(), mpsc::error::TrySendError<M>> {
+        let result = mpsc::Sender::try_send(self, message);
         if result.is_ok() {
             METRICS.get().map(|m| {
                 m.grandine_chain_message_channel_depth.inc();
