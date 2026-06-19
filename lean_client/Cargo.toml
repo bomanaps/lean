@@ -252,6 +252,7 @@ http-body-util = "0.1"
 http_api_utils = { git = "https://github.com/grandinetech/grandine", rev = "64afdee3c6be79fceffb66933dcb69a943f3f1ae" }
 k256 = "0.13"
 rec_aggregation = { git = "https://github.com/leanEthereum/leanVM.git", rev = "e2592df4e30fdddbbf8ae26a333116c68cec7026" }
+backend = { git = "https://github.com/leanEthereum/leanVM.git", rev = "e2592df4e30fdddbbf8ae26a333116c68cec7026" }
 leansig = { git = "https://github.com/leanEthereum/leanSig", branch = "devnet4" }
 leansig_wrapper = { git = "https://github.com/leanEthereum/leanVM.git", rev = "e2592df4e30fdddbbf8ae26a333116c68cec7026" }
 libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", rev = "91e8931e275bcd1c72791d18b09fea8b77209baf", default-features = false, features = [
@@ -328,7 +329,6 @@ metrics = { workspace = true }
 networking = { workspace = true }
 num_cpus = { workspace = true }
 parking_lot = { workspace = true }
-rayon = { workspace = true }
 ssz = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

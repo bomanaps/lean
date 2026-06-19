@@ -54,7 +54,20 @@ impl SszHash for AggregatedSignature {
 
 pub fn setup_aggregation() {
     static SETUP: Once = Once::new();
-    SETUP.call_once(init_aggregation_bytecode);
+    SETUP.call_once(|| {
+        init_aggregation_bytecode();
+        backend::precompute_dft_twiddles::<backend::KoalaBear>(1 << 24);
+    });
+}
+
+/// Cap the global rayon pool so the leansig prover doesn't oversubscribe physical
+/// cores. Idempotent; safe to call once at process startup before any aggregation.
+pub fn configure_rayon_pool(num_threads: usize) {
+    drop(
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build_global(),
+    );
 }
 
 impl AggregatedSignature {

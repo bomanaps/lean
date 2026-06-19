@@ -761,7 +761,7 @@ pub fn apply_verified_block(
     }
 
     let justified_updated = new_state.latest_justified.slot > store.latest_justified.slot;
-    let finalized_updated = new_state.latest_finalized.slot > store.latest_finalized.slot;
+    let prev_finalized_slot = store.latest_finalized.slot;
 
     if justified_updated {
         tracing::info!(
@@ -778,69 +778,6 @@ pub fn apply_verified_block(
             };
             metrics.lean_latest_justified_slot.set(slot);
         });
-    }
-    if finalized_updated {
-        tracing::info!(
-            old_finalized = store.latest_finalized.slot.0,
-            new_finalized = new_state.latest_finalized.slot.0,
-            "Store finalized checkpoint updated!"
-        );
-        store.latest_finalized = new_state.latest_finalized.clone();
-        store.finalized_ever_updated = true;
-        METRICS.get().map(|metrics| {
-            let Some(slot) = new_state.latest_finalized.slot.0.try_into().ok() else {
-                warn!("unable to set latest_finalized slot in metrics");
-                return;
-            };
-            metrics.lean_latest_finalized_slot.set(slot);
-        });
-
-        let keep_from = store
-            .latest_finalized
-            .slot
-            .0
-            .saturating_sub(STATE_PRUNE_BUFFER);
-        store.states.retain(|_, state| state.slot.0 >= keep_from);
-        store.blocks.retain(|_, block| block.slot.0 >= keep_from);
-
-        // Prune stale attestation data whenever finalization advances.
-        // Criterion: target.slot <= finalized_slot → stale, no longer affects fork choice.
-        // attestation_data_by_root is the secondary index used for target.slot lookup and
-        // must be pruned last so the retain calls above can still resolve target.slot.
-        let finalized_slot = store.latest_finalized.slot.0;
-        let adr = &store.attestation_data_by_root;
-        store.gossip_signatures.retain(|key, _| {
-            adr.get(&key.data_root)
-                .map_or(true, |data| data.target.slot.0 > finalized_slot)
-        });
-        store
-            .latest_known_aggregated_payloads
-            .retain(|data_root, _| {
-                adr.get(data_root)
-                    .map_or(true, |data| data.target.slot.0 > finalized_slot)
-            });
-        store.latest_new_aggregated_payloads.retain(|data_root, _| {
-            adr.get(data_root)
-                .map_or(true, |data| data.target.slot.0 > finalized_slot)
-        });
-        store
-            .attestation_data_by_root
-            .retain(|_, data| data.target.slot.0 > finalized_slot);
-        METRICS.get().map(|m| {
-            m.grandine_attestation_data_by_root
-                .set(store.attestation_data_by_root.len() as i64);
-        });
-    }
-
-    if !justified_updated && !finalized_updated {
-        tracing::debug!(
-            block_slot = block.slot.0,
-            store_justified = store.latest_justified.slot.0,
-            store_finalized = store.latest_finalized.slot.0,
-            state_justified = new_state.latest_justified.slot.0,
-            state_finalized = new_state.latest_finalized.slot.0,
-            "No checkpoint updates from this block"
-        );
     }
 
     let aggregated_attestations = &block.body.attestations;
@@ -892,6 +829,55 @@ pub fn apply_verified_block(
     }
 
     update_head(store);
+
+    if store.latest_finalized.slot > prev_finalized_slot {
+        tracing::info!(
+            old_finalized = prev_finalized_slot.0,
+            new_finalized = store.latest_finalized.slot.0,
+            "Store finalized checkpoint updated!"
+        );
+
+        let keep_from = store
+            .latest_finalized
+            .slot
+            .0
+            .saturating_sub(STATE_PRUNE_BUFFER);
+        store.states.retain(|_, state| state.slot.0 >= keep_from);
+        store.blocks.retain(|_, block| block.slot.0 >= keep_from);
+
+        let finalized_slot = store.latest_finalized.slot.0;
+        let adr = &store.attestation_data_by_root;
+        store.gossip_signatures.retain(|key, _| {
+            adr.get(&key.data_root)
+                .map_or(true, |data| data.target.slot.0 > finalized_slot)
+        });
+        store
+            .latest_known_aggregated_payloads
+            .retain(|data_root, _| {
+                adr.get(data_root)
+                    .map_or(true, |data| data.target.slot.0 > finalized_slot)
+            });
+        store.latest_new_aggregated_payloads.retain(|data_root, _| {
+            adr.get(data_root)
+                .map_or(true, |data| data.target.slot.0 > finalized_slot)
+        });
+        store
+            .attestation_data_by_root
+            .retain(|_, data| data.target.slot.0 > finalized_slot);
+        METRICS.get().map(|m| {
+            m.grandine_attestation_data_by_root
+                .set(store.attestation_data_by_root.len() as i64);
+        });
+    } else if !justified_updated {
+        tracing::debug!(
+            block_slot = block.slot.0,
+            store_justified = store.latest_justified.slot.0,
+            store_finalized = store.latest_finalized.slot.0,
+            state_justified = new_state.latest_justified.slot.0,
+            state_finalized = new_state.latest_finalized.slot.0,
+            "No checkpoint updates from this block"
+        );
+    }
 
     prune_with_retention_bounds(store);
 

@@ -4,7 +4,7 @@ mod public_key;
 mod secret_key;
 mod signature;
 
-pub use aggregated_signature::{AggregatedSignature, setup_aggregation};
+pub use aggregated_signature::{AggregatedSignature, configure_rayon_pool, setup_aggregation};
 pub use multi_message::MultiMessageAggregate;
 pub use public_key::PublicKey;
 pub use secret_key::SecretKey;
