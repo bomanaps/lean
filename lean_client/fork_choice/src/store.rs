@@ -180,6 +180,7 @@ impl Store {
         let attestations = extract_attestations_from_aggregated_payloads(
             &self.latest_known_aggregated_payloads,
             &self.attestation_data_by_root,
+            self.latest_finalized.slot,
         );
 
         let start_slot = self.latest_finalized.slot;
@@ -378,14 +379,44 @@ pub fn get_latest_justified(states: &HashMap<H256, State>) -> Option<&Checkpoint
 pub fn update_head(store: &mut Store) {
     let old_head = store.head;
 
-    // Compute new head using LMD-GHOST from latest justified root
-    let new_head = get_fork_choice_head(
-        store,
-        store.latest_justified.root,
-        &store.latest_known_attestations,
-        0,
+    let latest_votes = extract_attestations_from_aggregated_payloads(
+        &store.latest_known_aggregated_payloads,
+        &store.attestation_data_by_root,
+        store.latest_finalized.slot,
     );
+
+    // Compute new head using LMD-GHOST from latest justified root
+    let new_head = get_fork_choice_head(store, store.latest_justified.root, &latest_votes, 0);
     store.head = new_head;
+
+    if let Some(head_state) = store.states.get(&new_head) {
+        let finalized_slot = head_state.latest_finalized.slot;
+        let mut finalized_root = new_head;
+        while let Some(block) = store.blocks.get(&finalized_root) {
+            if block.slot <= finalized_slot {
+                break;
+            }
+            let parent_root = block.parent_root;
+            if !store.blocks.contains_key(&parent_root) {
+                break;
+            }
+            finalized_root = parent_root;
+        }
+        if let Some(block) = store.blocks.get(&finalized_root) {
+            if block.slot == finalized_slot {
+                store.latest_finalized = Checkpoint {
+                    root: finalized_root,
+                    slot: finalized_slot,
+                };
+                store.finalized_ever_updated = true;
+                METRICS.get().map(|m| {
+                    if let Ok(s) = i64::try_from(finalized_slot.0) {
+                        m.lean_latest_finalized_slot.set(s);
+                    }
+                });
+            }
+        }
+    }
 
     // Detect reorg if head changed and new head's parent is not old head
     if new_head != old_head && !old_head.is_zero() {
@@ -448,6 +479,7 @@ pub fn update_head(store: &mut Store) {
 fn extract_attestations_from_aggregated_payloads(
     payloads: &IndexMap<H256, Vec<AggregatedSignatureProof>>,
     attestation_data_by_root: &HashMap<H256, AttestationData>,
+    latest_finalized_slot: Slot,
 ) -> HashMap<u64, AttestationData> {
     let mut attestations: HashMap<u64, AttestationData> = HashMap::new();
 
@@ -456,6 +488,10 @@ fn extract_attestations_from_aggregated_payloads(
         let Some(attestation_data) = attestation_data_by_root.get(data_root) else {
             continue;
         };
+
+        if attestation_data.head.slot <= latest_finalized_slot {
+            continue;
+        }
 
         // For each proof, extract participating validators
         for proof in proofs {
@@ -508,6 +544,7 @@ pub fn update_safe_target(store: &mut Store) {
     let attestations = extract_attestations_from_aggregated_payloads(
         &store.latest_new_aggregated_payloads,
         &store.attestation_data_by_root,
+        store.latest_finalized.slot,
     );
 
     // Run LMD-GHOST with 2/3 threshold to find safe target

@@ -1294,7 +1294,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ab67060fc6b8ef687992d439ca0fa36e7ed17e9a0b16b25b601e8757df720de"
 dependencies = [
  "data-encoding",
- "syn 2.0.117",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -2947,7 +2947,6 @@ dependencies = [
  "networking",
  "num_cpus",
  "parking_lot",
- "rayon",
  "reqwest",
  "ssz",
  "tikv-jemallocator",
@@ -5897,7 +5896,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -7086,6 +7085,7 @@ name = "xmss"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "backend",
  "bls",
  "derive_more",
  "ethereum-types",
@@ -7096,6 +7096,7 @@ dependencies = [
  "metrics",
  "rand 0.10.1",
  "rand_chacha 0.10.0",
+ "rayon",
  "rec_aggregation",
  "serde",
  "ssz",

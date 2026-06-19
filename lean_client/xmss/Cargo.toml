@@ -13,10 +13,12 @@ eth_ssz = { workspace = true }
 ethereum-types = { workspace = true }
 hex = { workspace = true }
 rec_aggregation = { workspace = true }
+backend = { workspace = true }
 leansig = { workspace = true }
 leansig_wrapper = { workspace = true }
 metrics = { workspace = true }
 rand = { workspace = true }
+rayon = { workspace = true }
 ssz = { workspace = true }
 typenum = { workspace = true }
 serde = { workspace = true }

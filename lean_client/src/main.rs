@@ -422,22 +422,8 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let available = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(2);
-    let rayon_threads = available.saturating_sub(2).max(1);
-    match rayon::ThreadPoolBuilder::new()
-        .num_threads(rayon_threads)
-        .build_global()
-    {
-        Ok(()) => eprintln!(
-            "configured global rayon pool: available={available} rayon_threads={rayon_threads}"
-        ),
-        Err(e) => eprintln!(
-            "global rayon pool already initialized; rayon_threads cap NOT applied: available={available} err={e}"
-        ),
-    }
-
+    let rayon_threads = num_cpus::get().saturating_sub(3).max(1);
+    xmss::configure_rayon_pool(rayon_threads);
     xmss::setup_aggregation();
 
     tracing_subscriber::fmt()
@@ -497,6 +483,7 @@ async fn main() -> Result<()> {
         mpsc::unbounded_channel::<ValidatorChainMessage>();
 
     let num_cpus = num_cpus::get();
+
     let cpu_normal_executor = Arc::new(DedicatedExecutor::new(
         "lean-cpu-normal",
         (num_cpus / 2).max(2),
@@ -1838,7 +1825,7 @@ async fn main() -> Result<()> {
                                 Ok(inputs) => {
                                     let agg_payload_count = inputs.aggregated_payloads.len();
                                     let validators = inputs.head_state.validators.clone();
-                                    let exec = cpu_snark_executor.clone();
+                                    let exec = cpu_normal_executor.clone();
                                     let exec_start = Instant::now();
                                     tokio::spawn(async move {
                                         let job = exec.spawn(async move {
@@ -1853,7 +1840,7 @@ async fn main() -> Result<()> {
                                         let exec_elapsed = exec_start.elapsed();
                                         let total_elapsed = block_build_start.elapsed();
                                         match &result {
-                                            Ok(_) => {
+                                            Ok((block, _sigs, _validators, post_state)) => {
                                                 METRICS.get().map(|m| {
                                                     m.lean_block_building_success_total.inc();
                                                     m.lean_block_building_time_seconds
@@ -1863,6 +1850,21 @@ async fn main() -> Result<()> {
                                                     m.lean_block_aggregated_payloads
                                                         .observe(agg_payload_count as f64);
                                                 });
+                                                info!(
+                                                    block_slot = block.slot.0,
+                                                    state_slot = post_state.slot.0,
+                                                    state_root = %post_state.hash_tree_root(),
+                                                    slot_h = %post_state.slot.hash_tree_root(),
+                                                    lbh = %post_state.latest_block_header.hash_tree_root(),
+                                                    lj = %post_state.latest_justified.hash_tree_root(),
+                                                    lf = %post_state.latest_finalized.hash_tree_root(),
+                                                    hbh = %post_state.historical_block_hashes.hash_tree_root(),
+                                                    js = %post_state.justified_slots.hash_tree_root(),
+                                                    v = %post_state.validators.hash_tree_root(),
+                                                    jr = %post_state.justifications_roots.hash_tree_root(),
+                                                    jv = %post_state.justifications_validators.hash_tree_root(),
+                                                    "proposer post-state per-field"
+                                                );
                                             }
                                             Err(_) => {
                                                 METRICS.get().map(|m| m.lean_block_building_failures_total.inc());

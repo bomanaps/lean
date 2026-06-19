@@ -142,6 +142,13 @@ pub fn snapshot_aggregation_inputs(store: &Store) -> Option<AggregationSnapshot>
         let mut accepted_child_ids: Vec<u64> = covered_by_children.into_iter().collect();
         accepted_child_ids.sort();
 
+        info!(
+            data_root = %data_root,
+            raw_sigs = raw_ids.len(),
+            children = children_refs.len(),
+            "aggregation job built"
+        );
+
         jobs.push(AggregationJob {
             data_root,
             attestation_data: attestation_data.clone(),
