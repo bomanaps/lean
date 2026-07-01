@@ -5,8 +5,8 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use containers::{
-    Block, BlockBody, BlockHeader, Checkpoint, Config, MultiMessageAggregate, SignedBlock, Slot,
-    State, Status, Validator,
+    AggregatedAttestation, Block, BlockBody, BlockHeader, Checkpoint, Config,
+    MultiMessageAggregate, SignedBlock, Slot, State, Status, Validator,
 };
 use dedicated_executor::DedicatedExecutor;
 use ethereum_types::H256;
@@ -1317,6 +1317,16 @@ async fn main() -> Result<()> {
                         continue;
                     }
 
+                    if AggregatedAttestation::has_duplicate_data(
+                        &signed_block.block.body.attestations,
+                    ) {
+                        warn!(
+                            block_root = %format!("0x{:x}", block_root),
+                            "Rejecting verified block: duplicate AttestationData entries"
+                        );
+                        continue;
+                    }
+
                     // Skip if parent state was pruned by finalization while verify ran.
                     // `apply_verified_block` retains finalized + buffer states only; if
                     // finalization advanced past this block's parent during the verify
@@ -1547,6 +1557,17 @@ async fn main() -> Result<()> {
                             let parent_root = signed_block.block.parent_root;
 
                             if store.read().blocks.contains_key(&block_root) {
+                                continue;
+                            }
+
+                            if AggregatedAttestation::has_duplicate_data(
+                                &signed_block.block.body.attestations,
+                            ) {
+                                warn!(
+                                    slot = block_slot.0,
+                                    block_root = %format!("0x{:x}", block_root),
+                                    "Rejecting block: duplicate AttestationData entries"
+                                );
                                 continue;
                             }
 

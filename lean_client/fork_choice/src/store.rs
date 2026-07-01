@@ -145,11 +145,23 @@ impl Store {
 
         let target_checkpoint = self.get_attestation_target();
 
+        let head_state = self
+            .states
+            .get(&self.head)
+            .ok_or(anyhow!("head state is not known"))?;
+        let mut source = head_state.latest_justified.clone();
+        if source.root == H256::zero() {
+            source = Checkpoint {
+                root: self.head,
+                slot: source.slot,
+            };
+        }
+
         Ok(AttestationData {
             slot,
             head: head_checkpoint,
             target: target_checkpoint,
-            source: self.latest_justified.clone(),
+            source,
         })
     }
 

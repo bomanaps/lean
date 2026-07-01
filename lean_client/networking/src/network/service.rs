@@ -645,7 +645,7 @@ where
                             .send(ChainMessage::ProcessBlock {
                                 signed_block,
                                 is_trusted: false,
-                                should_gossip: true,
+                                should_gossip: false,
                                 cached_post_state: None,
                             })
                             .await

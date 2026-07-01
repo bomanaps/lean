@@ -428,24 +428,19 @@ impl State {
                 .start_timer()
         });
 
-        // Each unique AttestationData must appear at most once per block.
-        // Mirrors leanSpec spec.py:1247-1252. Our own builder collapses
-        // duplicates upstream via `aggregate_by_data`, so this guards
-        // externally-built blocks.
-        ensure!(
-            !AggregatedAttestation::has_duplicate_data(attestations),
-            "Block contains duplicate AttestationData entries; \
-             each AttestationData must appear at most once",
-        );
-
         // Cap distinct AttestationData entries per block. Mirrors leanSpec
-        // spec.py:1253-1256. With the duplicate check above, len ==
-        // distinct-count, so this is equivalent to the spec's
-        // `len(att_data_set) <= MAX_ATTESTATIONS_DATA`.
+        // state_transition.py:205-216 — only distinct data is bounded; split
+        // aggregates sharing one data count once. Wire-level duplicate
+        // rejection lives at the on_block-equivalent in main.rs.
+        let distinct_data_count = attestations
+            .into_iter()
+            .map(|att| att.data.hash_tree_root())
+            .collect::<HashSet<H256>>()
+            .len();
         ensure!(
-            (attestations.len_u64() as usize) <= MAX_ATTESTATIONS_DATA,
+            distinct_data_count <= MAX_ATTESTATIONS_DATA,
             "Block contains {} distinct AttestationData entries; maximum is {}",
-            attestations.len_u64(),
+            distinct_data_count,
             MAX_ATTESTATIONS_DATA,
         );
 

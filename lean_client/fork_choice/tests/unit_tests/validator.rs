@@ -598,19 +598,32 @@ fn test_validator_operations_invalid_parameters() {
 }
 
 #[test]
-fn test_produce_attestation_data_uses_store_justified() {
+fn test_produce_attestation_data_uses_head_state_justified() {
     let mut store = create_test_store();
 
-    store.latest_justified = Checkpoint {
+    let head_state_justified = Checkpoint {
+        root: H256::from_slice(&[0xaa; 32]),
+        slot: Slot(3),
+    };
+    let store_only_justified = Checkpoint {
         root: H256::from_slice(&[0xff; 32]),
         slot: Slot(5),
     };
+
+    let mut new_head_state = store.states[&store.head].as_ref().clone();
+    new_head_state.latest_justified = head_state_justified.clone();
+    store
+        .states
+        .insert(store.head, std::sync::Arc::new(new_head_state));
+
+    store.latest_justified = store_only_justified.clone();
 
     let attestation_data = store
         .produce_attestation_data(Slot(1))
         .expect("produce_attestation_data failed");
 
-    assert_eq!(attestation_data.source, store.latest_justified);
+    assert_eq!(attestation_data.source, head_state_justified);
+    assert_ne!(attestation_data.source, store_only_justified);
 }
 
 fn produce_and_apply(
