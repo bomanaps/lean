@@ -43,4 +43,5 @@ jobs:
           LEAN_REPO_ROOT: ${{ github.workspace }}
         run: |
           make docker \
-            DOCKER_TAG=${{ env.DOCKER_TAG }}
+            DOCKER_TAG=${{ env.DOCKER_TAG }} \
+            DOCKER_REPO=bomanaps/lean
