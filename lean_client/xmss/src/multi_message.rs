@@ -28,8 +28,9 @@ impl MultiMessageAggregate {
     }
 
     /// Merge Type-1 components, each bound to its own `(message, slot)`, into
-    /// one Type-2 proof. leanVM groups claims by slot, so components sharing a
-    /// slot must carry the same message; their keys are unioned into one group.
+    /// one Type-2 proof. leanVM groups claims by `(epoch, message)`, so a slot
+    /// may carry several messages; components sharing a `(slot, message)` have
+    /// their keys unioned into one group.
     pub fn aggregate(
         parts: &[(&AggregatedSignature, &[PublicKey], H256, u32)],
         log_inv_rate: usize,
@@ -116,8 +117,8 @@ impl MultiMessageAggregate {
 
         let sig = self.as_lean(pubkeys_per_message, messages)?;
 
-        // A slot carries one message, so a message that appears at all appears
-        // in exactly one group unless two slots signed the very same bytes.
+        // Groups are keyed by (epoch, message), so a message appears in one
+        // group unless two slots signed the very same bytes.
         let matches: Vec<&XmssClaimGroup> = sig
             .xmss_signers()
             .iter()
@@ -157,10 +158,10 @@ impl MultiMessageAggregate {
 }
 
 /// The signer set leanVM binds a Type-2 aggregate to, built from the caller's
-/// view of the claims: one group per slot, holding that slot's message and its
-/// strictly sorted, deduplicated keys, with the groups themselves sorted by
-/// slot. Claims sharing a slot merge into one group; claims sharing a slot
-/// under different messages have no representation inside one aggregate.
+/// view of the claims: one group per `(slot, message)` pair, holding its
+/// strictly sorted, deduplicated keys, with the groups themselves strictly
+/// increasing on `(epoch, message)`. Claims sharing a `(slot, message)` merge
+/// into one group; a slot may carry several messages, each its own group.
 fn wire_claims(
     pubkeys_per_message: &[&[PublicKey]],
     messages: &[(H256, u32)],
@@ -176,13 +177,11 @@ fn wire_claims(
     let mut groups: Vec<XmssClaimGroup> = Vec::with_capacity(messages.len());
     for ((message, slot), pks) in messages.iter().zip(pubkeys_per_message) {
         let keys = pks.iter().map(|pk| pk.as_lean());
-        match groups.iter_mut().find(|group| group.epoch == *slot) {
-            Some(group) => {
-                if group.message != *message.as_fixed_bytes() {
-                    bail!("slot {slot} carries two different messages in one aggregate");
-                }
-                group.keys.extend(keys);
-            }
+        match groups
+            .iter_mut()
+            .find(|group| group.epoch == *slot && group.message == *message.as_fixed_bytes())
+        {
+            Some(group) => group.keys.extend(keys),
             None => groups.push(XmssClaimGroup {
                 epoch: *slot,
                 message: *message.as_fixed_bytes(),
@@ -194,7 +193,7 @@ fn wire_claims(
         group.keys.sort_unstable();
         group.keys.dedup();
     }
-    groups.sort_unstable_by_key(|group| group.epoch);
+    groups.sort_unstable_by_key(|group| (group.epoch, group.message));
     Ok(SignatureClaims {
         xmss: groups,
         sphincs: Vec::new(),
