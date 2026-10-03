@@ -241,6 +241,19 @@ pub fn run_sync(store: &mut Store, signed_block: &SignedBlock, log_inv_rate: usi
 }
 
 pub fn run_in_executor(store: Arc<RwLock<Store>>, signed_block: SignedBlock, log_inv_rate: usize) {
+    if xmss::prover_busy() {
+        debug!(
+            block_root = %signed_block.block.hash_tree_root(),
+            "reaggregate skipped: prover busy"
+        );
+        METRICS.get().map(|m| {
+            m.grandine_reaggregate_split_outcomes_total
+                .with_label_values(&["skipped_prover_busy"])
+                .inc()
+        });
+        return;
+    }
+
     let context = {
         let s = store.read();
         let parent_validators = match s.states.get(&signed_block.block.parent_root) {

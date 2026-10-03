@@ -1517,22 +1517,51 @@ async fn main() -> Result<()> {
                                     let _ = block_slot_tx.send(block_slot.0);
 
                                     {
-                                        let exec = cpu_verify_executor.clone();
-                                        let store_for_reagg = store.clone();
-                                        let signed_block_for_reagg = signed_block.clone();
-                                        let log_inv_rate = chain_log_inv_rate;
-                                        tokio::spawn(async move {
-                                            let job = exec.spawn(async move {
-                                                fork_choice::reaggregate::run_in_executor(
-                                                    store_for_reagg,
-                                                    signed_block_for_reagg,
-                                                    log_inv_rate,
-                                                );
+                                        let (head_slot_now, latest_justified_slot, wall_slot) = {
+                                            let s = store.read();
+                                            (
+                                                s.blocks.get(&s.head).map(|b| b.slot.0).unwrap_or(0),
+                                                s.latest_justified.slot.0,
+                                                s.time / INTERVALS_PER_SLOT,
+                                            )
+                                        };
+                                        let wall_head_lag = wall_slot.saturating_sub(head_slot_now);
+                                        let peer_head = *network_head_slot.lock();
+                                        let has_fresher_peer_near_wall = peer_head
+                                            .map(|h| {
+                                                h.saturating_add(BLOCK_PROPOSAL_MAX_HEAD_LAG_SLOTS)
+                                                    >= wall_slot
+                                            })
+                                            .unwrap_or(false);
+                                        if should_suppress_proposal_for_head_lag(
+                                            wall_head_lag,
+                                            BLOCK_PROPOSAL_MAX_HEAD_LAG_SLOTS,
+                                            latest_justified_slot,
+                                            has_fresher_peer_near_wall,
+                                        ) {
+                                            debug!(
+                                                wall_head_lag,
+                                                head_slot = head_slot_now,
+                                                "Skipping reaggregation: local head is behind wall clock"
+                                            );
+                                        } else {
+                                            let exec = cpu_verify_executor.clone();
+                                            let store_for_reagg = store.clone();
+                                            let signed_block_for_reagg = signed_block.clone();
+                                            let log_inv_rate = chain_log_inv_rate;
+                                            tokio::spawn(async move {
+                                                let job = exec.spawn(async move {
+                                                    fork_choice::reaggregate::run_in_executor(
+                                                        store_for_reagg,
+                                                        signed_block_for_reagg,
+                                                        log_inv_rate,
+                                                    );
+                                                });
+                                                if let Err(e) = job.await {
+                                                    warn!("reaggregate executor failed: {e}");
+                                                }
                                             });
-                                            if let Err(e) = job.await {
-                                                warn!("reaggregate executor failed: {e}");
-                                            }
-                                        });
+                                        }
                                     }
 
                                     {
@@ -2170,6 +2199,36 @@ async fn main() -> Result<()> {
                                 );
                                 let _ = sender.send(Err(anyhow::anyhow!(
                                     "not ready: justified checkpoint has not advanced from anchor value"
+                                )));
+                                continue;
+                            }
+
+                            let head_slot = store_read
+                                .blocks
+                                .get(&store_read.head)
+                                .map(|b| b.slot.0)
+                                .unwrap_or(0);
+                            let wall_head_lag = slot.0.saturating_sub(head_slot);
+                            let peer_head = *network_head_slot.lock();
+                            let has_fresher_peer_near_wall = peer_head
+                                .map(|h| {
+                                    h.saturating_add(BLOCK_PROPOSAL_MAX_HEAD_LAG_SLOTS) >= slot.0
+                                })
+                                .unwrap_or(false);
+                            if should_suppress_proposal_for_head_lag(
+                                wall_head_lag,
+                                BLOCK_PROPOSAL_MAX_HEAD_LAG_SLOTS,
+                                store_read.latest_justified.slot.0,
+                                has_fresher_peer_near_wall,
+                            ) {
+                                warn!(
+                                    slot = slot.0,
+                                    wall_head_lag,
+                                    head_slot,
+                                    "Skipping attestation production: local head is {wall_head_lag} wall-clock slots behind"
+                                );
+                                let _ = sender.send(Err(anyhow::anyhow!(
+                                    "attestation suppressed: head {wall_head_lag} slots behind wall"
                                 )));
                             } else {
                                 let result = store_read.produce_attestation_data(slot);
