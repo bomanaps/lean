@@ -97,6 +97,10 @@ pub(crate) fn one_group(message: H256, slot: u32, mut keys: Vec<XmssPublicKey>) 
 /// panics. Hold this lock across every prove call; verification needs no permit.
 pub(crate) static PROVER_PERMIT: Mutex<()> = Mutex::new(());
 
+pub fn prover_busy() -> bool {
+    PROVER_PERMIT.try_lock().is_err()
+}
+
 impl AggregatedSignature {
     pub fn new(bytes: &[u8]) -> Result<Self> {
         let bytes = ByteList::try_from(bytes.to_vec())
