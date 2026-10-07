@@ -206,11 +206,7 @@ pub fn compute_recoveries(
 
 pub fn apply_recoveries(store: &mut Store, recoveries: Vec<(H256, AggregatedSignatureProof)>) {
     for (data_root, proof) in recoveries {
-        store
-            .latest_new_aggregated_payloads
-            .entry(data_root)
-            .or_default()
-            .push(proof);
+        store.add_new_aggregated_payload(data_root, proof);
     }
 }
 

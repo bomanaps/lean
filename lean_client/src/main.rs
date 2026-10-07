@@ -1708,10 +1708,10 @@ async fn main() -> Result<()> {
                             let mut s = store.write();
                             for aggregation in aggregations {
                                 let data_root = aggregation.data.hash_tree_root();
-                                s.latest_new_aggregated_payloads
+                                s.attestation_data_by_root
                                     .entry(data_root)
-                                    .or_default()
-                                    .push(aggregation.proof.clone());
+                                    .or_insert_with(|| aggregation.data.clone());
+                                s.add_new_aggregated_payload(data_root, aggregation.proof.clone());
                                 to_publish.push(aggregation);
                             }
                             s.gossip_signatures.retain(|key, _| {
